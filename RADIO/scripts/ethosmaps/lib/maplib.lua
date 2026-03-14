@@ -95,11 +95,11 @@ local zoomUpdate = false
 local n1,n2
 
 local lastHeavyUpdate = getTime()
-local HEAVY_UPDATE_INTERVAL = 250
+local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
 -- === PHASE 3: Trail + Garbage-Optimierung ===
 local lastTrailUpdate = getTime()
-local TRAIL_UPDATE_INTERVAL = 500   -- 500 ms = alle 0.5 Sekunden (reicht vollkommen)
+local TRAIL_UPDATE_INTERVAL = 50   -- 500 ms = alle 0.5 Sekunden (reicht vollkommen)
 
 -- === MULTI-WIDGET-FIX: Offsets pro Widget statt global ===
 -- (verhindert Springen bei 2+ Widgets)
