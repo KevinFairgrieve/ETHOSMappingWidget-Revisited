@@ -187,13 +187,15 @@ end
 function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
   local now = getTime()
   
-  -- NEU: Nur alle 250 ms oder bei echter Änderung laden
+  -- Nur alle 250 ms oder bei echter Änderung laden
   if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
     return   -- ← hier sparen wir CPU!
   end
   
   lastHeavyUpdate = now
   mapNeedsHeavyUpdate = false
+
+  local tilesChanged = false   -- NEU: Merkt sich, ob wirklich etwas geändert wurde
 
   -- Der Rest bleibt 1:1 wie vorher (keine weiteren Änderungen nötig)
   for x=1,TILES_X do
@@ -204,10 +206,12 @@ function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
       if tiles[idx] == nil then
         tiles[idx] = tile_path
         tiles_path_to_idx[tile_path] = { idx, x, y }
+        tilesChanged = true
       else
         if tiles[idx] ~= tile_path then
           tiles[idx] = tile_path
-          tiles_path_to_idx[tile_path] =  { idx, x, y }
+          tiles_path_to_idx[tile_path] = { idx, x, y }
+          tilesChanged = true
         end
       end
     end
@@ -222,9 +226,11 @@ function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
     if remove then
       mapBitmapByPath[path]=nil
       tiles_path_to_idx[path]=nil
+      tilesChanged = true
     end
   end
-  if mapNeedsHeavyUpdate then
+  
+  if tilesChanged then
     collectgarbage()   -- nur noch bei echter Änderung
   end
 end
