@@ -20,6 +20,7 @@ It displays your real-time GPS position on a supported map type of your choice a
 ## Installation
 
 1. Copy the files to your SD card:
+```
 RADIO/
 ├── scripts/
 │   └── ethosmaps/          ← all .lua files
@@ -28,8 +29,9 @@ RADIO/
 │       └── maps/           ← your map tiles go here
 └── SOUNDS/
 └── ethosmaps/          ← err.wav and inf.wav (optional)
-2. Restart your radio completely.
-3. Add the widget to any screen. It automatically adapts to the assigned size.
+```
+3. Restart your radio completely.
+4. Add the widget to any screen. It automatically adapts to the assigned size.
 
 ## Usage
 
