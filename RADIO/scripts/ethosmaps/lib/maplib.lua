@@ -97,6 +97,9 @@ local n1,n2
 local lastHeavyUpdate = getTime()
 local HEAVY_UPDATE_INTERVAL = 250
 local mapNeedsHeavyUpdate = true
+-- === PHASE 3: Trail + Garbage-Optimierung ===
+local lastTrailUpdate = getTime()
+local TRAIL_UPDATE_INTERVAL = 500   -- 500 ms = alle 0.5 Sekunden (reicht vollkommen)
 
 function mapLib.clip(n, min, max)
   return math.min(math.max(n, min), max)
@@ -217,8 +220,9 @@ function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
       tiles_path_to_idx[path]=nil
     end
   end
-  -- collectgarbage() nur noch bei echtem Update (sparen!)
-  collectgarbage()
+  if mapNeedsHeavyUpdate then
+    collectgarbage()   -- nur noch bei echter Änderung
+  end
 end
 
 
@@ -348,8 +352,10 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     end
   end
 
-  if getTime() - lastPosSample > 50 and posUpdated then
-    lastPosSample = getTime()
+    -- NEU Phase 3: Trail nur alle 500 ms aktualisieren
+  local now = getTime()
+  if now - lastTrailUpdate > TRAIL_UPDATE_INTERVAL and posUpdated then
+    lastTrailUpdate = now
     posUpdated = false
     local path = mapLib.tiles_to_path(tile_x, tile_y, level)
     posHistory[sample] = { path, offset_x, offset_y }
