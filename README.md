@@ -28,7 +28,7 @@ RADIO/
 │   └── ethosmaps/
 │       └── maps/           ← your map tiles go here
 └── SOUNDS/
-└── ethosmaps/          ← err.wav and inf.wav (optional)
+    └── ethosmaps/          ← err.wav and inf.wav (optional)
 ```
 3. Restart your radio completely.
 4. Add the widget to any screen. It automatically adapts to the assigned size.
