@@ -151,20 +151,20 @@ function mapLib.gmapcatcher_tiles_to_path(tile_x, tile_y, level)
 end
 
 function mapLib.getTileBitmap(tilePath)
-  local fullPath = "/bitmaps/ethosmaps/maps/"..status.conf.mapType..tilePath
-  -- check cache
+  local fullPath = "/bitmaps/ethosmaps/maps/" .. status.conf.mapType .. tilePath
+  
+  -- Cache prüfen (bleibt superschnell)
   if mapBitmapByPath[tilePath] ~= nil then
     return mapBitmapByPath[tilePath]
   end
 
-  local tmp = io.open(fullPath,"r")
-  if tmp ~= nil  then
-    print("OK",fullPath)
+  local tmp = io.open(fullPath, "r")
+  if tmp ~= nil then
     io.close(tmp)
     mapBitmapByPath[tilePath] = lcd.loadBitmap(fullPath)
     return mapBitmapByPath[tilePath]
   else
-    print("ERROR",fullPath)
+    -- nomap-Fallback
     if nomap == nil then
       nomap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/nomap.png")
     end

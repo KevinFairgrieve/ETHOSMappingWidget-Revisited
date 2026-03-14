@@ -1,4 +1,4 @@
-S--
+--
 -- A FRSKY SPort/FPort/FPort2 and TBS CRSF telemetry widget for the Ethos OS
 -- based on ArduPilot's passthrough telemetry protocol
 --
@@ -756,7 +756,7 @@ end
 
 local function init()
     -- there's a limit on key size of 7 characters
-    system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
+    system.registerWidget({key="yaapum", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
     registerSources()
 end
 
