@@ -188,7 +188,7 @@ end
 function utils.init(param_status, param_libs)
   status = param_status
   libs = param_libs
-  return resetLib
+  return utils
 end
 
 return utils

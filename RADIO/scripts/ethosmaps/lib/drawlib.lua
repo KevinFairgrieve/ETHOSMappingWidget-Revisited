@@ -439,7 +439,7 @@ end
 
 function drawLib.getBitmap(name)
   if bitmaps[name] == nil then
-    bitmaps[name] = lcd.loadBitmap("/scripts/ethosmaps/bitmaps/"..name..".png")
+    bitmaps[name] = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/"..name..".png")
   end
   return bitmaps[name]
 end
