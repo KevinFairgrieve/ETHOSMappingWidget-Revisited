@@ -67,13 +67,13 @@ function panel.draw(widget)
   local mapH    = h - topH - bottomH
 
   -- NEU Phase 1: Throttling-Trigger (nur bei echter Änderung laden)
-  if status.telemetry.lat ~= (status.lastLat or 0) or 
-     status.telemetry.lon ~= (status.lastLon or 0) or 
-     status.mapZoomLevel ~= (status.lastZoom or 0) then
+  if status.telemetry.lat ~= (status.mapLastLat or 0) or 
+     status.telemetry.lon ~= (status.mapLastLon or 0) or 
+     status.mapZoomLevel ~= (status.mapLastZoom or 0) then
     libs.mapLib.setNeedsHeavyUpdate()
-    status.lastLat = status.telemetry.lat
-    status.lastLon = status.telemetry.lon
-    status.lastZoom = status.mapZoomLevel
+    status.mapLastLat = status.telemetry.lat
+    status.mapLastLon = status.telemetry.lon
+    status.mapLastZoom = status.mapZoomLevel
   end
 
   libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
