@@ -1,4 +1,4 @@
---
+S--
 -- A FRSKY SPort/FPort/FPort2 and TBS CRSF telemetry widget for the Ethos OS
 -- based on ArduPilot's passthrough telemetry protocol
 --
@@ -564,7 +564,7 @@ local function applyConfig()
 end
 local function configure(widget)
   local line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0 dev".." ("..'d1f1063'..")")
+  form.addStaticText(line, nil, "1.0.0".."RC1")
 
   line = form.addLine("Link quality source")
   form.addSourceField(line, nil, function() return mapStatus.conf.linkQualitySource end, function(value) mapStatus.conf.linkQualitySource = value end)
@@ -756,7 +756,7 @@ end
 
 local function init()
     -- there's a limit on key size of 7 characters
-    system.registerWidget({key="yaapum", name="Yaapu Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
+    system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
     registerSources()
 end
 
