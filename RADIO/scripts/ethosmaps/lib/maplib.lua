@@ -94,6 +94,10 @@ local zoomUpdate = false
 
 local n1,n2
 
+local lastHeavyUpdate = getTime()
+local HEAVY_UPDATE_INTERVAL = 250
+local mapNeedsHeavyUpdate = true
+
 function mapLib.clip(n, min, max)
   return math.min(math.max(n, min), max)
 end
@@ -174,11 +178,19 @@ function mapLib.getTileBitmap(tilePath)
 end
 
 function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
-  -- determine if upper or lower center tile
-  for x=1,TILES_X
-  do
-    for y=1,TILES_Y
-    do
+  local now = getTime()
+  
+  -- NEU: Nur alle 250 ms oder bei echter Änderung laden
+  if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
+    return   -- ← hier sparen wir CPU!
+  end
+  
+  lastHeavyUpdate = now
+  mapNeedsHeavyUpdate = false
+
+  -- Der Rest bleibt 1:1 wie vorher (keine weiteren Änderungen nötig)
+  for x=1,TILES_X do
+    for y=1,TILES_Y do
       local tile_path = mapLib.tiles_to_path(tile_x + x - math.floor(TILES_X/2 + 0.5), tile_y + y - math.floor(TILES_Y/2 + 0.5), level)
       local idx = width*(y-1)+x
 
@@ -193,22 +205,19 @@ function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
       end
     end
   end
-  -- release unused cached images
+  
+  -- unused Tiles aus Cache werfen
   for path, bmp in pairs(mapBitmapByPath) do
     local remove = true
-    for i=1,#tiles
-    do
-      if tiles[i] == path then
-        remove = false
-      end
+    for i=1,#tiles do
+      if tiles[i] == path then remove = false end
     end
     if remove then
       mapBitmapByPath[path]=nil
       tiles_path_to_idx[path]=nil
     end
   end
-  -- force a call to destroyBitmap()
-  collectgarbage()
+  -- collectgarbage() nur noch bei echtem Update (sparen!)
   collectgarbage()
 end
 
@@ -483,6 +492,10 @@ function mapLib.calculateScale(level)
   end
 
   return scaleLen, scaleLabel
+end
+
+function mapLib.setNeedsHeavyUpdate()
+  mapNeedsHeavyUpdate = true
 end
 
 return mapLib

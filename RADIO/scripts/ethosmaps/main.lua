@@ -44,6 +44,10 @@ local mapStatus = {
     -- RSSI
     rssi = 0,
     rssiCRSF = 0,
+
+    lastLat = nil,
+    lastLon = nil,
+    lastZoom = 0,
   },
 
   -- configuration
