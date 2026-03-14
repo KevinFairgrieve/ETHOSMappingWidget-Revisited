@@ -391,7 +391,12 @@ local function paint(widget)
   if not widget.ready then
       loadLayout(widget);
   else
-    mapStatus.layout[widget.screen].draw(widget)
+    if mapStatus.layout[widget.screen] ~= nil then
+      mapStatus.layout[widget.screen].draw(widget)
+    else
+      -- Fallback: Layout neu laden, falls nil
+      loadLayout(widget)
+    end
   end
   -- skip first iteration
   if fg_rate == 0 then
@@ -497,6 +502,12 @@ local function create()
       ------------------
       ready = false,
       runBgTasks = false,
+
+      drawOffsetX = 0,
+      drawOffsetY = 0,
+      lastW = 0,
+      lastH = 0,
+      lastZoom = 0,
       -- screen type
       screen=1,
       -- panel config
