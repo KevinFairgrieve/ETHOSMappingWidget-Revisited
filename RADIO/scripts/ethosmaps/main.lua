@@ -593,7 +593,25 @@ local function configure(widget)
       widget.gmapZoomMinField:enable(mapStatus.conf.mapProvider==1)
       return mapStatus.conf.gmapZoomMin
     end,
-    function(value) mapStatus.conf.gmapZoomMin = value end
+    function(value)
+      -- Enforce gmapZoomMin <= gmapZoomDefault <= gmapZoomMax when min changes
+      local max = mapStatus.conf.gmapZoomMax
+      if max ~= nil and value > max then
+        max = value
+        mapStatus.conf.gmapZoomMax = max
+      end
+      mapStatus.conf.gmapZoomMin = value
+      local def = mapStatus.conf.gmapZoomDefault
+      if def ~= nil then
+        if def < value then
+          def = value
+        end
+        if max ~= nil and def > max then
+          def = max
+        end
+        mapStatus.conf.gmapZoomDefault = def
+      end
+    end
   )
 
   line = form.addLine("Enable map grid")
