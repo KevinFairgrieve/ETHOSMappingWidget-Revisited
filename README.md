@@ -17,18 +17,26 @@ It displays your real-time GPS position on a supported map type of your choice a
 - Works in Fullscreen, Split-Screen and all custom widget sizes
 - Optimized tile loading and performance
 
+![As Full Screen Widget](images/screenshots/screenshot-2026-03-15-39603.jpg)
+
+![Multi Instance Possible](images/screenshots/screenshot-2026-03-15-39795.jpg)
+
+![Tiny Widget with others](images/screenshots/screenshot-2026-03-15-40068.jpg)
+
 ## Installation
 
 1. Copy the files to your SD card:
 ```
-RADIO/
+RADIO/ or SD/
 ├── scripts/
 │   └── ethosmaps/          ← all .lua files
-├── bitmaps/
-│   └── ethosmaps/
-│       └── maps/           ← your map tiles go here
-└── SOUNDS/
-    └── ethosmaps/          ← err.wav and inf.wav (optional)
+|       └── audio/
+|       └── lib/
+|       └── main.lua
+└── bitmaps/
+    └── ethosmaps/
+        └── maps/           ← your map tiles go here
+        └── bitmaps/        
 ```
 3. Restart your radio completely.
 4. Add the widget to any screen. It automatically adapts to the assigned size.
