@@ -24,8 +24,8 @@ It displays your real-time GPS position on a supported map type of your choice a
 ![Tiny Widget with others](images/screenshots/screenshot-2026-03-15-40068.jpg)
 
 ## Installation
-1. Download the Repository to your PC
-2. Copy the "scripts" and "bitmaps" folders to your SD card or Radio storage (the folder structure should look like this): 
+1. Download the repository to your PC
+2. Copy the "scripts" and "bitmaps" folders (in RADIO) to your SD card or Radio storage (the folder structure should look like this): 
 ```
 RADIO/ or SD/
 ├── scripts/
