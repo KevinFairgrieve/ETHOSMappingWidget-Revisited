@@ -231,9 +231,6 @@ local function initLibs()
   if mapLibs.drawLib == nil then
     mapLibs.drawLib = loadLib("drawlib")
   end
-  if mapLibs.hudLib == nil then
-    mapLibs.hudLib = loadLib("hudlib")
-  end
   if mapLibs.resetLib == nil then
     mapLibs.resetLib = loadLib("resetlib")
   end

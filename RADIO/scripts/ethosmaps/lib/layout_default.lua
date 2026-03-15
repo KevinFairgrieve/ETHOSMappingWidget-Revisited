@@ -82,21 +82,6 @@ function panel.draw(widget)
 
   libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
 
-  -- === Künstlicher Horizont (HUD) – sicherer Aufruf ===
-  if status.conf.enableHUD == true and 
-     w >= 400 and h >= 250 then
-    -- pcall = "protected call" – wenn HUD crasht, läuft der Rest trotzdem weiter
-    local ok, err = pcall(function()
-      libs.hudLib.drawHud(widget)
-    end)
-    if not ok then
-      -- Nur für Debug: zeigt, dass HUD fehlschlägt (kann später weg)
-      lcd.color(RED)
-      lcd.font(FONT_S)
-      lcd.drawText(20, 20, "HUD Error", LEFT)
-    end
-  end
-
   -- === Top-Bar + GPS/Zoom-Text nur bei NICHT verticalTiny und NICHT horizontalTiny ===
   if not (horizontalTiny or verticalTiny) then
     lcd.color(lcd.RGB(0,0,0))
