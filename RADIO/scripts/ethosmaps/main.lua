@@ -70,6 +70,7 @@ local mapStatus = {
     mapZoomMin = 1,
     mapTrailDots = 30,
     enableMapGrid = true,
+    enableHUD = false,
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
@@ -98,6 +99,9 @@ local mapStatus = {
   mapZoomLevel = 19,
   lastLat = nil,
   lastLon = nil,
+  mapLastLat = nil,
+  mapLastLon = nil,
+  mapLastZoom = 0,
   avgSpeed = {
     lastSampleTime = nil,
     avgTravelDist = 0,
@@ -387,7 +391,12 @@ local function paint(widget)
   if not widget.ready then
       loadLayout(widget);
   else
-    mapStatus.layout[widget.screen].draw(widget)
+    if mapStatus.layout[widget.screen] ~= nil then
+      mapStatus.layout[widget.screen].draw(widget)
+    else
+      -- Fallback: Layout neu laden, falls nil
+      loadLayout(widget)
+    end
   end
   -- skip first iteration
   if fg_rate == 0 then
@@ -493,6 +502,12 @@ local function create()
       ------------------
       ready = false,
       runBgTasks = false,
+
+      drawOffsetX = 0,
+      drawOffsetY = 0,
+      lastW = 0,
+      lastH = 0,
+      lastZoom = 0,
       -- screen type
       screen=1,
       -- panel config
@@ -684,6 +699,9 @@ local function configure(widget)
 
   line = form.addLine("Enable map grid")
   form.addBooleanField(line, nil, function() return mapStatus.conf.enableMapGrid end, function(value) mapStatus.conf.enableMapGrid = value end)
+
+  line = form.addLine("Enable Artificial Horizon (HUD)")
+  form.addBooleanField(line, nil, function() return mapStatus.conf.enableHUD end, function(value) mapStatus.conf.enableHUD = value end)
 end
 
 --------------------------------------------------------------------
@@ -706,6 +724,7 @@ local function read(widget)
   mapStatus.conf.gmapZoomMin = storageToConfig("gmapZoomMin", -2)
   mapStatus.conf.gmapZoomMax = storageToConfig("gmapZoomMax", 17)
   mapStatus.conf.enableMapGrid = storageToConfig("enableMapGrid", true)
+  mapStatus.conf.enableHUD = storageToConfig("enableHUD", false)   -- NEU
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
   mapStatus.conf.telemetrySource = storageToConfig("telemetrySource", nil)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
@@ -731,6 +750,7 @@ local function write(widget)
   storage.write("gmapZoomMin", mapStatus.conf.gmapZoomMin)
   storage.write("gmapZoomMax", mapStatus.conf.gmapZoomMax)
   storage.write("enableMapGrid", mapStatus.conf.enableMapGrid)
+  storage.write("enableHUD", mapStatus.conf.enableHUD)   -- NEU
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
   storage.write("telemetrySource", mapStatus.conf.telemetrySource)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
@@ -756,7 +776,7 @@ end
 
 local function init()
     -- there's a limit on key size of 7 characters
-    system.registerWidget({key="yaapum", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
+    system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
     registerSources()
 end
 

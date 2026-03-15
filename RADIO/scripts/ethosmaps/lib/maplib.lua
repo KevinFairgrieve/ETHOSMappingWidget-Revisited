@@ -94,6 +94,17 @@ local zoomUpdate = false
 
 local n1,n2
 
+local lastHeavyUpdate = getTime()
+local HEAVY_UPDATE_INTERVAL = 25
+local mapNeedsHeavyUpdate = true
+-- === PHASE 3: Trail + Garbage-Optimierung ===
+local lastTrailUpdate = getTime()
+local TRAIL_UPDATE_INTERVAL = 50   -- 500 ms = alle 0.5 Sekunden (reicht vollkommen)
+
+-- === MULTI-WIDGET-FIX: Offsets pro Widget statt global ===
+-- (verhindert Springen bei 2+ Widgets)
+
+
 function mapLib.clip(n, min, max)
   return math.min(math.max(n, min), max)
 end
@@ -174,42 +185,54 @@ function mapLib.getTileBitmap(tilePath)
 end
 
 function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
-  -- determine if upper or lower center tile
-  for x=1,TILES_X
-  do
-    for y=1,TILES_Y
-    do
+  local now = getTime()
+  
+  -- Nur alle 250 ms oder bei echter Änderung laden
+  if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
+    return   -- ← hier sparen wir CPU!
+  end
+  
+  lastHeavyUpdate = now
+  mapNeedsHeavyUpdate = false
+
+  local tilesChanged = false   -- NEU: Merkt sich, ob wirklich etwas geändert wurde
+
+  -- Der Rest bleibt 1:1 wie vorher (keine weiteren Änderungen nötig)
+  for x=1,TILES_X do
+    for y=1,TILES_Y do
       local tile_path = mapLib.tiles_to_path(tile_x + x - math.floor(TILES_X/2 + 0.5), tile_y + y - math.floor(TILES_Y/2 + 0.5), level)
       local idx = width*(y-1)+x
 
       if tiles[idx] == nil then
         tiles[idx] = tile_path
         tiles_path_to_idx[tile_path] = { idx, x, y }
+        tilesChanged = true
       else
         if tiles[idx] ~= tile_path then
           tiles[idx] = tile_path
-          tiles_path_to_idx[tile_path] =  { idx, x, y }
+          tiles_path_to_idx[tile_path] = { idx, x, y }
+          tilesChanged = true
         end
       end
     end
   end
-  -- release unused cached images
+  
+  -- unused Tiles aus Cache werfen
   for path, bmp in pairs(mapBitmapByPath) do
     local remove = true
-    for i=1,#tiles
-    do
-      if tiles[i] == path then
-        remove = false
-      end
+    for i=1,#tiles do
+      if tiles[i] == path then remove = false end
     end
     if remove then
       mapBitmapByPath[path]=nil
       tiles_path_to_idx[path]=nil
+      tilesChanged = true
     end
   end
-  -- force a call to destroyBitmap()
-  collectgarbage()
-  collectgarbage()
+  
+  if tilesChanged then
+    collectgarbage()   -- nur noch bei echter Änderung
+  end
 end
 
 
@@ -272,16 +295,16 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   end
 
   -- Offset pro Widget-Instanz (wichtig für Fullscreen + Split gleichzeitig!)
-  if status.drawOffsetX == nil then status.drawOffsetX = 0 end
-  if status.drawOffsetY == nil then status.drawOffsetY = 0 end
+  if widget.drawOffsetX == nil then widget.drawOffsetX = 0 end
+  if widget.drawOffsetY == nil then widget.drawOffsetY = 0 end
 
-  -- Reset bei Größen- oder Zoom-Änderung (verhindert "verschmierten" Offset beim Wechsel)
-  if status.lastW ~= w or status.lastH ~= h or status.lastZoom ~= level then
-    status.drawOffsetX = 0
-    status.drawOffsetY = 0
-    status.lastW = w
-    status.lastH = h
-    status.lastZoom = level
+  -- Reset bei Größen- oder Zoom-Änderung
+  if widget.lastW ~= w or widget.lastH ~= h or widget.lastZoom ~= level then
+    widget.drawOffsetX = 0
+    widget.drawOffsetY = 0
+    widget.lastW = w
+    widget.lastH = h
+    widget.lastZoom = level
     mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level)
   end
 
@@ -309,8 +332,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
 
         local centerX = x + (w / 2)
         local centerY = y + (h / 2)
-        status.drawOffsetX = centerX - myScreenX
-        status.drawOffsetY = centerY - myScreenY
+        widget.drawOffsetX = centerX - myScreenX
+        widget.drawOffsetY = centerY - myScreenY
       end
     end
   end
@@ -339,8 +362,10 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     end
   end
 
-  if getTime() - lastPosSample > 50 and posUpdated then
-    lastPosSample = getTime()
+  -- NEU Phase 3: Trail nur alle 500 ms aktualisieren
+  local now = getTime()
+  if now - lastTrailUpdate > TRAIL_UPDATE_INTERVAL and posUpdated then
+    lastTrailUpdate = now
     posUpdated = false
     local path = mapLib.tiles_to_path(tile_x, tile_y, level)
     posHistory[sample] = { path, offset_x, offset_y }
@@ -349,12 +374,12 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   end
 
   -- Tiles mit Offset
-  mapLib.drawTiles(TILES_X, minX + status.drawOffsetX, maxX + status.drawOffsetX, minY + status.drawOffsetY, maxY + status.drawOffsetY, status.colors.yellow, level)
+  mapLib.drawTiles(TILES_X, minX + widget.drawOffsetX, maxX + widget.drawOffsetX, minY + widget.drawOffsetY, maxY + widget.drawOffsetY, status.colors.yellow, level)
 
   -- UAV-Pfeil mit Offset
   if myScreenX ~= nil and myScreenY ~= nil then
-    local drawX = myScreenX + status.drawOffsetX
-    local drawY = myScreenY + status.drawOffsetY
+    local drawX = myScreenX + widget.drawOffsetX
+    local drawY = myScreenY + widget.drawOffsetY
     if heading ~= nil then
       libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, status.colors.white)
       libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, status.colors.black)
@@ -368,8 +393,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
 
   -- Home-Icon mit Offset + Widget-Bereich-Check (funktioniert jetzt bei Zoom 15/16)
   if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and homeScreenX ~= nil then
-    local homeDrawX = homeScreenX + status.drawOffsetX
-    local homeDrawY = homeScreenY + status.drawOffsetY
+    local homeDrawX = homeScreenX + widget.drawOffsetX
+    local homeDrawY = homeScreenY + widget.drawOffsetY
     local homeCode = libs.drawLib.computeOutCode(homeDrawX, homeDrawY, x + 11, y + 10, x + w - 11, y + h - 10)
     if homeCode == 0 then
       libs.drawLib.drawBitmap(homeDrawX - 11, homeDrawY - 10, "homeorange")
@@ -382,8 +407,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     if p ~= (sampleCount - 1) % status.conf.mapTrailDots then
       local tcache = tiles_path_to_idx[posHistory[p][1]]
       if tcache ~= nil and tiles[tcache[1]] ~= nil then
-        lcd.drawFilledRectangle(minX + status.drawOffsetX + (tcache[2]-1)*TILES_SIZE + posHistory[p][2],
-                                minY + status.drawOffsetY + (tcache[3]-1)*TILES_SIZE + posHistory[p][3], 3, 3)
+        lcd.drawFilledRectangle(minX + widget.drawOffsetX + (tcache[2]-1)*TILES_SIZE + posHistory[p][2],
+                                minY + widget.drawOffsetY + (tcache[3]-1)*TILES_SIZE + posHistory[p][3], 3, 3)
       end
     end
   end
@@ -395,7 +420,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     if getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
   end
 
-    -- === Fake Zoom-Buttons rechts (visuell, kleiner, quadratisch, weiße Linien) ===
+  -- === Fake Zoom-Buttons rechts (visuell, kleiner, quadratisch, weiße Linien) ===
   local btnSize = 52 * status.scaleX          -- deutlich kleiner (früher 92)
   local btnX     = x + w - btnSize - 18
   local btnYPlus  = y + 68
@@ -483,6 +508,10 @@ function mapLib.calculateScale(level)
   end
 
   return scaleLen, scaleLabel
+end
+
+function mapLib.setNeedsHeavyUpdate()
+  mapNeedsHeavyUpdate = true
 end
 
 return mapLib
