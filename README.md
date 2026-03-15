@@ -24,8 +24,8 @@ It displays your real-time GPS position on a supported map type of your choice a
 ![Tiny Widget with others](images/screenshots/screenshot-2026-03-15-40068.jpg)
 
 ## Installation
-
-1. Copy the files to your SD card:
+1. Download the repository to your PC
+2. Copy the "scripts" and "bitmaps" folders (in RADIO) to your SD card or Radio storage (the folder structure should look like this): 
 ```
 RADIO/ or SD/
 ├── scripts/
@@ -40,6 +40,7 @@ RADIO/ or SD/
 ```
 3. Restart your radio completely.
 4. Add the widget to any screen. It automatically adapts to the assigned size.
+NOTE: Script and Map Tiles must be on the same drive (Radio or SD) as all your other Scripts. 
 
 ## Usage
 
