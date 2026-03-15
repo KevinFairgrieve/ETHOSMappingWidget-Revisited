@@ -579,7 +579,7 @@ local function applyConfig()
 end
 local function configure(widget)
   local line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0".."beta1")
+  form.addStaticText(line, nil, "1.0.0".."RC1")
 
   line = form.addLine("Link quality source")
   form.addSourceField(line, nil, function() return mapStatus.conf.linkQualitySource end, function(value) mapStatus.conf.linkQualitySource = value end)
