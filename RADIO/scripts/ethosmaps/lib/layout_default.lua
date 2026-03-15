@@ -28,23 +28,23 @@ local panel = {}
 local status = nil
 local libs = nil
 
-local function drawBarSensor(x,y,label,value,unit,font,label_font,unit_font,color,label_color,blink,flags)
+local function drawBarSensor(x, y, label, value, unit, font, label_font, unit_font, color, label_color, blink, flags)
   lcd.font(label_font)
-  local lw,lh = lcd.getTextSize(label)
-  local sw,sh = lcd.getTextSize(" ")
+  local lw, lh = lcd.getTextSize(label)
+  local sw, sh = lcd.getTextSize(" ")
   lcd.font(unit_font)
-  local uw,uh = lcd.getTextSize(unit)
+  local uw, uh = lcd.getTextSize(unit)
   lcd.font(font)
-  local vw,vh = lcd.getTextSize(value)
+  local vw, vh = lcd.getTextSize(value)
 
   if flags == RIGHT then
     libs.drawLib.drawText(x, y+vh-uh, unit, unit_font, color, RIGHT, blink)
-    libs.drawLib.drawText(x-uw, y, value, font, color,RIGHT,blink)
-    libs.drawLib.drawText(x-(uw+sw+vw), y+vh-lh, label, label_font, label_color,RIGHT,blink)
+    libs.drawLib.drawText(x-uw, y, value, font, color, RIGHT, blink)
+    libs.drawLib.drawText(x-(uw+sw+vw), y+vh-lh, label, label_font, label_color, RIGHT, blink)
   else
-    libs.drawLib.drawText(x, y+vh-lh, label, label_font, label_color,LEFT,blink)
-    libs.drawLib.drawText(x+lw+sw, y, value, font, color,LEFT,blink)
-    libs.drawLib.drawText(x+lw+sw+vw, y+vh-uh, unit, unit_font, color,LEFT,blink)
+    libs.drawLib.drawText(x, y+vh-lh, label, label_font, label_color, LEFT, blink)
+    libs.drawLib.drawText(x+lw+sw, y, value, font, color, LEFT, blink)
+    libs.drawLib.drawText(x+lw+sw+vw, y+vh-uh, unit, unit_font, color, LEFT, blink)
   end
   return lw + vw + uw + 3*sw
 end
@@ -66,11 +66,7 @@ function panel.draw(widget)
   local mapY    = topH
   local mapH    = h - topH - bottomH
 
-  -- Vereinfachte Version: nil sicher behandeln + Float-Jitter ignorieren
-  local curLat = status.telemetry.lat
-  local curLon = status.telemetry.lon
-  local hasFix = (curLat ~= nil and curLon ~= nil)
-
+  -- Throttling-Trigger (nur bei echter Änderung laden)
   if status.telemetry.lat ~= (status.mapLastLat or 0) or 
      status.telemetry.lon ~= (status.mapLastLon or 0) or 
      status.mapZoomLevel ~= (status.mapLastZoom or 0) then
@@ -81,21 +77,6 @@ function panel.draw(widget)
   end
 
   libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
-
-  -- === Künstlicher Horizont (HUD) – sicherer Aufruf ===
-  if status.conf.enableHUD == true and 
-     w >= 400 and h >= 250 then
-    -- pcall = "protected call" – wenn HUD crasht, läuft der Rest trotzdem weiter
-    local ok, err = pcall(function()
-      libs.hudLib.drawHud(widget)
-    end)
-    if not ok then
-      -- Nur für Debug: zeigt, dass HUD fehlschlägt (kann später weg)
-      lcd.color(RED)
-      lcd.font(FONT_S)
-      lcd.drawText(20, 20, "HUD Error", LEFT)
-    end
-  end
 
   -- === Top-Bar + GPS/Zoom-Text nur bei NICHT verticalTiny und NICHT horizontalTiny ===
   if not (horizontalTiny or verticalTiny) then
@@ -176,20 +157,18 @@ function panel.draw(widget)
     libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize, math.floor(homeHeading), status.colors.black)
   end
 
-    -- === Home Not Set Warning (85% Maximalbreite) ===
+  -- === Home Not Set Warning (85% Maximalbreite) ===
   if status.telemetry.lat ~= nil and (status.telemetry.homeLat == nil or status.telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
     local font = (w < 450) and FONT_S or FONT_L
     local tw, th = lcd.getTextSize(warningText)
 
-    -- Intelligentes Padding + harte Obergrenze (max 85% der Widget-Breite)
     local basePadding = (w < 450) and 45*sx or 120*sx
-    local maxBoxW = math.floor(w * 0.85)          -- 85% Maximalbreite
+    local maxBoxW = math.floor(w * 0.85)
     local boxW = math.min(tw + basePadding, maxBoxW)
     local boxH = th + 18*sy
     local boxX = math.floor((w - boxW) / 2)
 
-    -- Position: Slim Mode höher, Horizontal Tiny oben, Fullscreen normal
     local boxY
     if horizontalTiny then
       boxY = mapY + 40*sy
@@ -207,14 +186,9 @@ function panel.draw(widget)
 
     lcd.color(status.colors.yellow)
     libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2 - 3*sy, warningText, font, status.colors.yellow, CENTERED, true)
-
-    -- Debug: immer sichtbar
-    --lcd.color(RED)
-    --lcd.font(FONT_S)
-    --lcd.drawText(8*sx, 8*sy + 80*sy, string.format("boxW = %.0f px (max 85%%)", boxW), LEFT)
   end
 
-    -- === SCALE BAR – fester Abstand + Schriftwechsel + neuer Hintergrund ===
+  -- === SCALE BAR ===
   if not ultraTiny then
     local scaleLen, scaleLabel = libs.mapLib.calculateScale(status.mapZoomLevel)
     if scaleLen ~= 0 then
@@ -222,34 +196,16 @@ function panel.draw(widget)
       lcd.font(scaleFont)
       local labelW, labelH = lcd.getTextSize(scaleLabel)
 
-      local scaleY_line  = mapY + mapH - 18*sy          -- Linie
-      local scaleY_label = scaleY_line - labelH - 4*sy  -- fester Abstand unter der Linie
+      local scaleY_line  = mapY + mapH - 18*sy
+      local scaleY_label = scaleY_line - labelH - 4*sy
 
-      -- Neuer Hintergrund (0.45 Transparenz, perfekt ausgerichtet)
       lcd.color(lcd.RGB(0, 0, 0, 0.45))
       lcd.drawFilledRectangle(8*sx, scaleY_label - 5*sy, scaleLen + 20*sx, labelH + 22*sy)
 
-      -- Scale Bar selbst
       lcd.color(WHITE)
       lcd.drawLine(12*sx, scaleY_line, 12*sx + scaleLen, scaleY_line)
       lcd.drawText(12*sx, scaleY_label, scaleLabel)
     end
-  end
-
-  -- === DEBUG OVERLAY ===
-  if false then
-    local debugX = 12 * sx
-    local debugY = math.floor(h / 2) - 48*sy
-    local lineH  = 24 * sy
-
-    lcd.color(lcd.RGB(0, 255, 100))
-    lcd.font(FONT_S)
-
-    lcd.drawText(debugX, debugY,                    string.format("Width:  %d px", w), LEFT)
-    lcd.drawText(debugX, debugY + lineH,            string.format("Height: %d px", h), LEFT)
-    lcd.drawText(debugX, debugY + 2*lineH,          string.format("Tiny Mode: %s", (h < 200) and "ON" or "OFF"), LEFT)
-    lcd.drawText(debugX, debugY + 3*lineH,          string.format("Slim Mode: %s", (w < 450) and "ON" or "OFF"), LEFT)
-    lcd.drawText(debugX, debugY + 4*lineH,          string.format("barFont: %s", barFont), LEFT)
   end
 end
 
