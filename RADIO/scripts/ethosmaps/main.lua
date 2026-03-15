@@ -48,7 +48,6 @@ local mapStatus = {
 
   -- configuration
   conf = {
-    -- unit setup
     horSpeedUnit = 1,
     horSpeedMultiplier=1,
     horSpeedLabel = "m/s",
@@ -63,8 +62,8 @@ local mapStatus = {
     distUnitLongScale = 0.001,
     language = "en",
     -- map support
-    mapProvider = 2, -- 1 GMapCatcher, 2 Google
-    mapType = "GoogleSatelliteMap", -- applies to gmapcacther only
+    mapProvider = 2,
+    mapType = "GoogleSatelliteMap",
     mapZoomLevel = 19,
     mapZoomMax = 20,
     mapZoomMin = 1,
@@ -74,19 +73,17 @@ local mapStatus = {
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
-    gpsFormat = 0, -- decimal
+    gpsFormat = 0,
     -- layout
     layout = 1,
   },
 
   -- panels
-  layoutFilenames = {
-    "layout_default",
-  },
+  layoutFilenames = { "layout_default" },
   counter = 0,
 
   -- layout
-  lastScreen = 1, -- allows to switch to a different screen on same widget
+  lastScreen = 1,
   loadCycle = 0,
   layout = { nil },
 
@@ -102,6 +99,7 @@ local mapStatus = {
   mapLastLat = nil,
   mapLastLon = nil,
   mapLastZoom = 0,
+
   avgSpeed = {
     lastSampleTime = nil,
     avgTravelDist = 0,
@@ -118,10 +116,10 @@ local mapStatus = {
   userSensor2 = nil,
   userSensor3 = nil,
 
-  -- blinking suppport
+  -- blinking support
   blinkon = false,
 
-  -- UNIT CONVERSION
+  -- UNIT CONVERSION + COLORS
   unitConversion = {},
   battPercByVoltage = {},
   colors = {
@@ -144,55 +142,16 @@ local mapStatus = {
     rpmBar = lcd.RGB(240,192,0),
     background = lcd.RGB(60, 60, 60)
   },
-          -- ===================== AUTOMATIC SCALING =====================
+
+  -- AUTOMATIC SCALING
   widgetWidth = 800,
   widgetHeight = 480,
   scaleX = 1.0,
   scaleY = 1.0,
 }
 
---[[
-UNIT_AMPERE
-UNIT_AMPERE_HOUR
-UNIT_CELSIUS
-UNIT_CENTIMETER
-UNIT_CENTIMETER_PER_SECOND
-UNIT_DB
-UNIT_DBM
-UNIT_DEGREE
-UNIT_FAHRENHEIT
-UNIT_FOOT
-UNIT_FOOT_PER_SECOND
-UNIT_G
-UNIT_HERTZ
-UNIT_HOUR
-UNIT_KILOMETER
-UNIT_KNOT
-UNIT_KPH
-UNIT_METER
-UNIT_METER_PER_SECOND
-UNIT_MICROSECOND
-UNIT_MILLIAMPERE
-UNIT_MILLIAMPERE_HOUR
-UNIT_MILLILITER
-UNIT_MILLILITER_PER_MINUTE
-UNIT_MILLILITER_PER_PULSE
-UNIT_MILLISECOND
-UNIT_MILLIVOLT
-UNIT_MILLIWATT
-UNIT_MINUTE
-UNIT_MPH
-UNIT_PERCENT
-UNIT_RADIAN
-UNIT_RPM
-UNIT_SECOND
-UNIT_VOLT
-UNIT_WATT
-]]
-
 -- { value, decimals, unit}
 mapStatus.luaSourcesConfig = {}
-
 mapStatus.luaSourcesConfig.HomeDistance =  {0, 0, UNIT_METER, "homeDist", 1}
 mapStatus.luaSourcesConfig.CourseOverGround =  {0, 0, UNIT_DEGREE, "cog", 1}
 mapStatus.luaSourcesConfig.GroundSpeed =  {0, 1, UNIT_METER_PER_SECOND, "groundSpeed", 1}
@@ -210,9 +169,8 @@ end
 
 local mapLibs = {
   drawLib = nil,
-  hudLib = nil,
   resetLib = nil,
-  mapsLib = nil,
+  mapLib = nil,
   utils = nil,
 }
 
@@ -225,18 +183,10 @@ function loadLib(name)
 end
 
 local function initLibs()
-  if mapLibs.utils == nil then
-    mapLibs.utils = loadLib("utils")
-  end
-  if mapLibs.drawLib == nil then
-    mapLibs.drawLib = loadLib("drawlib")
-  end
-  if mapLibs.resetLib == nil then
-    mapLibs.resetLib = loadLib("resetlib")
-  end
-  if mapLibs.mapLib == nil then
-    mapLibs.mapLib = loadLib("maplib")
-  end
+  if mapLibs.utils == nil then mapLibs.utils = loadLib("utils") end
+  if mapLibs.drawLib == nil then mapLibs.drawLib = loadLib("drawlib") end
+  if mapLibs.resetLib == nil then mapLibs.resetLib = loadLib("resetlib") end
+  if mapLibs.mapLib == nil then mapLibs.mapLib = loadLib("maplib") end
 end
 
 local function checkSize(widget)
@@ -252,7 +202,6 @@ local function checkSize(widget)
 end
 
 local function createOnce(widget)
-  -- only this widget instance will run bg tasks
   widget.runBgTasks = true
 end
 
@@ -260,9 +209,7 @@ local function reset(widget)
   mapLibs.resetLib.reset(widget)
 end
 
-
 local function loadLayout(widget)
-
   lcd.pen(SOLID)
   lcd.color(lcd.RGB(20, 20, 20))
   lcd.drawFilledRectangle(mapStatus.widgetWidth/4, mapStatus.widgetHeight/4, mapStatus.widgetWidth/2, mapStatus.widgetHeight/4)
@@ -282,11 +229,9 @@ mapStatus.blinkTimer = getTime()
 local bgclock = 0
 
 local function bgtasks(widget)
-  -- blinking support
   local now = getTime()
   mapStatus.counter = mapStatus.counter + 1
 
-  -- update gps telemetry data
   local gpsData = {}
   gpsData.lat = system.getSource({name="GPS", options=OPTION_LATITUDE}):value()
   gpsData.lon = system.getSource({name="GPS", options=OPTION_LONGITUDE}):value()
@@ -294,8 +239,8 @@ local function bgtasks(widget)
     mapStatus.telemetry.lat = gpsData.lat
     mapStatus.telemetry.lon = gpsData.lon
   end
+
   if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
-    -- PROCESS GPS DATA
     if mapStatus.avgSpeed.lastLat == nil or mapStatus.avgSpeed.lastLon == nil then
       mapStatus.avgSpeed.lastLat = mapStatus.telemetry.lat
       mapStatus.avgSpeed.lastLon = mapStatus.telemetry.lon
@@ -305,10 +250,7 @@ local function bgtasks(widget)
     if now - mapStatus.avgSpeed.lastSampleTime > 100 then
       local travelDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.avgSpeed.lastLat, mapStatus.avgSpeed.lastLon)
       local travelTime = now - mapStatus.avgSpeed.lastSampleTime
-      local speed = travelDist/travelTime
-      -- discard sampling errors
       if travelDist < 10000 then
-        -- 5 point moving average, about 10 seconds data
         mapStatus.avgSpeed.avgTravelDist = mapStatus.avgSpeed.avgTravelDist * 0.8 + travelDist*0.2
         mapStatus.avgSpeed.avgTravelTime = mapStatus.avgSpeed.avgTravelTime * 0.8 + 0.01 * travelTime * 0.2
         mapStatus.avgSpeed.value = mapStatus.avgSpeed.avgTravelDist/mapStatus.avgSpeed.avgTravelTime
@@ -318,7 +260,7 @@ local function bgtasks(widget)
       mapStatus.avgSpeed.lastLat = mapStatus.telemetry.lat
       mapStatus.avgSpeed.lastLon = mapStatus.telemetry.lon
       mapStatus.avgSpeed.lastSampleTime = now
-      -- home distance
+
       if mapStatus.telemetry.homeLat ~= nil and mapStatus.telemetry.homeLon ~= nil then
         mapStatus.telemetry.homeDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.telemetry.homeLat, mapStatus.telemetry.homeLon)
         mapStatus.telemetry.homeAngle = mapLibs.utils.getAngleFromLatLon(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.telemetry.homeLat, mapStatus.telemetry.homeLon)
@@ -326,21 +268,19 @@ local function bgtasks(widget)
     end
   end
 
-  -- SLOWER
   if bgclock % 4 == 2 then
     if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
       if mapStatus.conf.gpsFormat == 1 then
-        -- DMS
         mapStatus.telemetry.strLat = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lat)
         mapStatus.telemetry.strLon = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lon, mapStatus.telemetry.lat)
       else
-        -- decimal
         mapStatus.telemetry.strLat = string.format("%.06f", mapStatus.telemetry.lat)
         mapStatus.telemetry.strLon = string.format("%.06f", mapStatus.telemetry.lon)
       end
     end
     mapLibs.utils.updateCog()
   end
+
   if now - mapStatus.blinkTimer > 60 then
     mapStatus.blinkon = not mapStatus.blinkon
     mapStatus.blinkTimer = now
@@ -348,85 +288,44 @@ local function bgtasks(widget)
   bgclock = (bgclock%4)+1
 end
 
-local function onScreenChange(widget)
-end
-
-local function wrap360(angle)
-    local res = angle % 360
-    if res < 0 then
-        res = res + 360
-    end
-    return res
-end
-
-local bitmaskCache = {}
-
-local fg_counter = 0
-local fg_rate = 0
-local fg_timer = 0
-
 local function gpsDataAvailable(lat,lon)
   return lat ~= nil and lon ~= nil and lat ~= 0 and lon ~= 0
 end
 
--- called only when visible
 local function paint(widget)
   lcd.color(mapStatus.colors.background)
   lcd.pen(SOLID)
   lcd.drawFilledRectangle(0, 0, mapStatus.widgetWidth, mapStatus.widgetHeight)
 
-  local now = getTime()
   if mapStatus.lastScreen ~= widget.screen then
-    onScreenChange(widget)
     mapStatus.lastScreen = widget.screen
   end
 
-  if not checkSize(widget) then
-    return
-  end
+  if not checkSize(widget) then return end
 
   if not widget.ready then
-      loadLayout(widget);
+    loadLayout(widget)
   else
     if mapStatus.layout[widget.screen] ~= nil then
       mapStatus.layout[widget.screen].draw(widget)
     else
-      -- Fallback: Layout neu laden, falls nil
       loadLayout(widget)
     end
   end
-  -- skip first iteration
-  if fg_rate == 0 then
-    fg_rate = fg_counter
-  end
-
-  fg_counter=fg_counter+1
-
-  if now - fg_timer > 100 then
-    fg_rate = fg_rate*0.5 + fg_counter*0.5
-    fg_counter = 0
-    fg_timer = now
-  end
-
 
   if not gpsDataAvailable(mapStatus.telemetry.lat, mapStatus.telemetry.lon) then
     mapLibs.drawLib.drawNoGPSData(widget)
   end
-
-  lcd.font(FONT_S)
-  lcd.color(mapStatus.colors.yellow)
 end
 
--- called when event is passed to the widget
--- called when event is passed to the widget
 local function event(widget, category, value, x, y)
   local kill = false
   if category == EVT_TOUCH and value == 16641 then
     kill = true
     local rightX = mapStatus.widgetWidth * 0.80
-    if mapLibs.drawLib.isInside(x, y, rightX, 0, mapStatus.widgetWidth, mapStatus.widgetHeight/2) == true then
+    if mapLibs.drawLib.isInside(x, y, rightX, 0, mapStatus.widgetWidth, mapStatus.widgetHeight/2) then
       mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1)
-    elseif mapLibs.drawLib.isInside(x, y, rightX, mapStatus.widgetHeight/2, mapStatus.widgetWidth, mapStatus.widgetHeight) == true then
+    elseif mapLibs.drawLib.isInside(x, y, rightX, mapStatus.widgetHeight/2, mapStatus.widgetWidth, mapStatus.widgetHeight) then
       mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1)
     else
       kill = false
@@ -444,27 +343,20 @@ local function setHome(widget)
   mapStatus.telemetry.homeLon = mapStatus.telemetry.lon
 end
 
--- widget custom context menu
 local function menu(widget)
   if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
     return {
-      { "Maps: Reset",function() reset(widget) end },
-      { "Maps: Set Home",function() setHome(widget) end },
+      { "Maps: Reset", function() reset(widget) end },
+      { "Maps: Set Home", function() setHome(widget) end },
       { "Maps: Zoom in", function() mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1) end},
       { "Maps: Zoom out", function() mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1) end},
     }
   end
-    return {
-      { "Maps: Reset",function() reset(widget) end }
-    }
+  return { { "Maps: Reset", function() reset(widget) end } }
 end
-
 
 local function wakeup(widget)
   local now = getTime()
-  -- one time init
-  -- multiple instances of the same
-  -- widget need to call this only once
   if mapStatus.initPending then
     createOnce(widget)
     mapStatus.initPending = false
@@ -476,81 +368,54 @@ local function wakeup(widget)
   lcd.invalidate()
 end
 
-------------------------------------------------
--- create() is called once at widget creation
--- it sets widget properties
--- mapStatus.conf is shared between widget instances
--------------------------------------------------
 local function create()
-    if not mapStatus.initPending then
-      mapStatus.initPending = true
-    end
+  if not mapStatus.initPending then
+    mapStatus.initPending = true
+  end
 
-    initLibs()
+  initLibs()
 
-    return {
-      ------------------
-      -- shared config
-      ------------------
-      conf = mapStatus.conf,
-
-      ------------------
-      -- widget config
-      ------------------
-      ready = false,
-      runBgTasks = false,
-
-      drawOffsetX = 0,
-      drawOffsetY = 0,
-      lastW = 0,
-      lastH = 0,
-      lastZoom = 0,
-      -- screen type
-      screen=1,
-      -- panel config
-      centerPanelIndex = 1,
-      leftPanelIndex = 1,
-      rightPanelIndex = 1,
-      -------------------
-      -- widget properties
-      -------------------
-      layout = nil,
-      centerPanel = nil,
-      leftPanel = nil,
-      rightPanel = nil,
-      name = "ETHOS Maps",
-    }
+  return {
+    conf = mapStatus.conf,
+    ready = false,
+    runBgTasks = false,
+    drawOffsetX = 0,
+    drawOffsetY = 0,
+    lastW = 0,
+    lastH = 0,
+    lastZoom = 0,
+    screen = 1,
+    centerPanelIndex = 1,
+    leftPanelIndex = 1,
+    rightPanelIndex = 1,
+    layout = nil,
+    centerPanel = nil,
+    leftPanel = nil,
+    rightPanel = nil,
+    name = "ETHOS Maps",
+  }
 end
 
 local function applyDefault(value, defaultValue, lookup)
   local v = value ~= nil and value or defaultValue
-  if lookup ~= nil then
-    return lookup[v]
-  end
+  if lookup ~= nil then return lookup[v] end
   return v
 end
 
 local function storageToConfig(name, defaultValue, lookup)
   local storageValue = storage.read(name)
-  local value = applyDefault(storageValue, defaultValue, lookup)
-  return value
+  return applyDefault(storageValue, defaultValue, lookup)
 end
 
 local function configToStorage(value, lookup)
-  if lookup ~= nil then
-    for i=1,#lookup
-    do
-      if lookup[i] == value then
-        return i
-      end
-    end
-    return 1 -- assume 1 as default index
+  if lookup == nil then return value end
+  for i=1,#lookup do
+    if lookup[i] == value then return i end
   end
-  return value
+  return 1
 end
 
 local function applyConfig()
-
   mapStatus.conf.horSpeedLabel = applyDefault(mapStatus.conf.horSpeedUnit, 1, {"m/s", "km/h", "mph", "kn"})
   mapStatus.conf.vertSpeedLabel = applyDefault(mapStatus.conf.vertSpeedUnit, 1, {"m/s", "ft/s", "ft/min"})
   mapStatus.conf.distUnitLabel = applyDefault(mapStatus.conf.distUnit, 1, {"m", "ft"})
@@ -559,7 +424,7 @@ local function applyConfig()
   mapStatus.conf.horSpeedMultiplier = applyDefault(mapStatus.conf.horSpeedUnit, 1, {1, 3.6, 2.23694, 1.94384})
   mapStatus.conf.vertSpeedMultiplier = applyDefault(mapStatus.conf.vertSpeedUnit, 1, {1, 3.28084, 196.85})
   mapStatus.conf.distUnitScale = applyDefault(mapStatus.conf.distUnit, 1, {1, 3.28084})
-  mapStatus.conf.distUnitLongScale = applyDefault(mapStatus.conf.distUnitLong, 1, {1/1000,  1/1609.34})
+  mapStatus.conf.distUnitLongScale = applyDefault(mapStatus.conf.distUnitLong, 1, {1/1000, 1/1609.34})
 
   mapStatus.conf.mapType = applyDefault(mapStatus.conf.mapTypeId, 1, mapStatus.conf.mapProvider == 1 and {"sat_tiles","tiles","tiles","ter_tiles"} or {"GoogleSatelliteMap","GoogleHybridMap","GoogleMap","GoogleTerrainMap"})
 
@@ -572,11 +437,11 @@ local function applyConfig()
     mapStatus.conf.mapZoomMin = mapStatus.conf.googleZoomMin
     mapStatus.conf.mapZoomMax = mapStatus.conf.googleZoomMax
   end
-
 end
+
 local function configure(widget)
   local line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0".."beta1")
+  form.addStaticText(line, nil, "1.0.0 beta1")
 
   line = form.addLine("Link quality source")
   form.addSourceField(line, nil, function() return mapStatus.conf.linkQualitySource end, function(value) mapStatus.conf.linkQualitySource = value end)
@@ -591,23 +456,24 @@ local function configure(widget)
   form.addSourceField(line, nil, function() return mapStatus.conf.userSensor3 end, function(value) mapStatus.conf.userSensor3 = value end)
 
   line = form.addLine("GPS Source")
-  widget.gpsField = form.addSourceField(line, nil, function() return widget.gpsSource end, function(value) widget.gpsSource = value end );
+  widget.gpsField = form.addSourceField(line, nil, function() return widget.gpsSource end, function(value) widget.gpsSource = value end)
 
   line = form.addLine("Airspeed/Groundspeed unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s", 1}, {"km/h", 2}, {"mph", 3}, {"kn",4}}, function() return mapStatus.conf.horSpeedUnit end, function(value) mapStatus.conf.horSpeedUnit = value end)
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"km/h",2},{"mph",3},{"kn",4}}, function() return mapStatus.conf.horSpeedUnit end, function(value) mapStatus.conf.horSpeedUnit = value end)
 
   line = form.addLine("Vertical speed unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s", 1}, {"ft/s", 2}, {"ft/min", 3}}, function() return mapStatus.conf.vertSpeedUnit end, function(value) mapStatus.conf.vertSpeedUnit = value end)
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"ft/s",2},{"ft/min",3}}, function() return mapStatus.conf.vertSpeedUnit end, function(value) mapStatus.conf.vertSpeedUnit = value end)
 
   line = form.addLine("Altitude/Distance unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m", 1}, {"ft", 2}}, function() return mapStatus.conf.distUnit end, function(value) mapStatus.conf.distUnit = value end)
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m",1},{"ft",2}}, function() return mapStatus.conf.distUnit end, function(value) mapStatus.conf.distUnit = value end)
 
   line = form.addLine("Long distance unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"km", 1}, {"mi", 2}}, function() return mapStatus.conf.distUnitLong end, function(value) mapStatus.conf.distUnitLong = value end)
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"km",1},{"mi",2}}, function() return mapStatus.conf.distUnitLong end, function(value) mapStatus.conf.distUnitLong = value end)
 
   line = form.addLine("GPS coordinates format")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"DMS", 1}, {"Decimal", 2}}, function() return mapStatus.conf.gpsFormat end, function(value) mapStatus.conf.gpsFormat = value end)
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"DMS",1},{"Decimal",2}}, function() return mapStatus.conf.gpsFormat end, function(value) mapStatus.conf.gpsFormat = value end)
 
+  -- === Map Provider zuerst (wie im Original) ===
   line = form.addLine("Map provider")
   form.addChoiceField(line, form.getFieldSlots(line)[0], {{"GMapCatcher", 1}, {"Google", 2}}, function() return mapStatus.conf.mapProvider end,
     function(value)
@@ -622,17 +488,16 @@ local function configure(widget)
   )
 
   line = form.addLine("Map type")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"Satellite", 1}, {"Hybrid (Google only)", 2}, {"Map", 3}, {"Terrain", 4}}, function() return mapStatus.conf.mapTypeId end, function(value) mapStatus.conf.mapTypeId = value end)
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"Satellite",1},{"Hybrid",2},{"Map",3},{"Terrain",4}}, function() return mapStatus.conf.mapTypeId end, function(value) mapStatus.conf.mapTypeId = value end)
 
+  -- === Zoom-Felder danach mit originaler Abblend-Logik ===
   line = form.addLine("Google zoom")
   widget.googleZoomField = form.addNumberField(line, nil, 1, 20,
     function()
       widget.googleZoomField:enable(mapStatus.conf.mapProvider==2)
       return mapStatus.conf.googleZoomDefault
     end,
-    function(value)
-      mapStatus.conf.googleZoomDefault = value
-    end
+    function(value) mapStatus.conf.googleZoomDefault = value end
   )
 
   line = form.addLine("Google zoom max")
@@ -641,10 +506,7 @@ local function configure(widget)
       widget.googleZoomMaxField:enable(mapStatus.conf.mapProvider==2)
       return mapStatus.conf.googleZoomMax
     end,
-    function(value)
-      mapStatus.conf.googleZoomMax = value
-      mapStatus.conf.googleZoomDefault = math.min(mapStatus.conf.googleZoomMax, mapStatus.conf.googleZoomDefault)
-    end
+    function(value) mapStatus.conf.googleZoomMax = value end
   )
 
   line = form.addLine("Google zoom min")
@@ -653,10 +515,7 @@ local function configure(widget)
       widget.googleZoomMinField:enable(mapStatus.conf.mapProvider==2)
       return mapStatus.conf.googleZoomMin
     end,
-    function(value)
-      mapStatus.conf.googleZoomMin = value
-      mapStatus.conf.googleZoomDefault = math.max(mapStatus.conf.googleZoomMin, mapStatus.conf.googleZoomDefault)
-    end
+    function(value) mapStatus.conf.googleZoomMin = value end
   )
 
   line = form.addLine("GMapCatcher zoom")
@@ -665,9 +524,7 @@ local function configure(widget)
       widget.gmapZoomField:enable(mapStatus.conf.mapProvider==1)
       return mapStatus.conf.gmapZoomDefault
     end,
-    function(value)
-      mapStatus.conf.gmapZoomDefault = value
-    end
+    function(value) mapStatus.conf.gmapZoomDefault = value end
   )
 
   line = form.addLine("GMapCatcher zoom max")
@@ -676,10 +533,7 @@ local function configure(widget)
       widget.gmapZoomMaxField:enable(mapStatus.conf.mapProvider==1)
       return mapStatus.conf.gmapZoomMax
     end,
-    function(value)
-      mapStatus.conf.gmapZoomMax = value
-      mapStatus.conf.gmapZoomDefault = math.min(mapStatus.conf.gmapZoomMax, mapStatus.conf.gmapZoomDefault)
-    end
+    function(value) mapStatus.conf.gmapZoomMax = value end
   )
 
   line = form.addLine("GMapCatcher zoom min")
@@ -688,10 +542,7 @@ local function configure(widget)
       widget.gmapZoomMinField:enable(mapStatus.conf.mapProvider==1)
       return mapStatus.conf.gmapZoomMin
     end,
-    function(value)
-      mapStatus.conf.gmapZoomMin = value
-      mapStatus.conf.gmapZoomDefault = math.max(mapStatus.conf.gmapZoomMin, mapStatus.conf.gmapZoomDefault)
-    end
+    function(value) mapStatus.conf.gmapZoomMin = value end
   )
 
   line = form.addLine("Enable map grid")
@@ -701,10 +552,6 @@ local function configure(widget)
   form.addBooleanField(line, nil, function() return mapStatus.conf.enableHUD end, function(value) mapStatus.conf.enableHUD = value end)
 end
 
---------------------------------------------------------------------
--- configuration read/write
--- properties must be read in the same order they are written
---------------------------------------------------------------------
 local function read(widget)
   widget.gpsSource = storageToConfig("gps", nil)
   mapStatus.conf.horSpeedUnit = storageToConfig("horSpeedUnit", 1)
@@ -721,9 +568,8 @@ local function read(widget)
   mapStatus.conf.gmapZoomMin = storageToConfig("gmapZoomMin", -2)
   mapStatus.conf.gmapZoomMax = storageToConfig("gmapZoomMax", 17)
   mapStatus.conf.enableMapGrid = storageToConfig("enableMapGrid", true)
-  mapStatus.conf.enableHUD = storageToConfig("enableHUD", false)   -- NEU
+  mapStatus.conf.enableHUD = storageToConfig("enableHUD", false)
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
-  mapStatus.conf.telemetrySource = storageToConfig("telemetrySource", nil)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
   mapStatus.conf.userSensor2 = storageToConfig("userSensor2", nil)
   mapStatus.conf.userSensor3 = storageToConfig("userSensor3", nil)
@@ -747,15 +593,13 @@ local function write(widget)
   storage.write("gmapZoomMin", mapStatus.conf.gmapZoomMin)
   storage.write("gmapZoomMax", mapStatus.conf.gmapZoomMax)
   storage.write("enableMapGrid", mapStatus.conf.enableMapGrid)
-  storage.write("enableHUD", mapStatus.conf.enableHUD)   -- NEU
+  storage.write("enableHUD", mapStatus.conf.enableHUD)
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
-  storage.write("telemetrySource", mapStatus.conf.telemetrySource)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
   storage.write("userSensor2", mapStatus.conf.userSensor2)
   storage.write("userSensor3", mapStatus.conf.userSensor3)
 
   applyConfig()
-  -- reset the layout
   mapLibs.resetLib.resetLayout(widget)
 end
 
@@ -772,10 +616,8 @@ local function registerSources()
 end
 
 local function init()
-    -- there's a limit on key size of 7 characters
-    system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
-    registerSources()
+  system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
+  registerSources()
 end
 
 return {init=init}
-
