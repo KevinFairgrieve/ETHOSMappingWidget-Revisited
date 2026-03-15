@@ -42,6 +42,23 @@ local debugLogPath = "/scripts/ethosmaps/debug.log"
 local maxLogLines = 1000
 local lastLogWrite = 0
 
+-- NEW: Debug Line Count nur initialisieren, wenn Logging aktiviert ist
+local function initDebugLineCount()
+  if not status.conf.enableDebugLog then 
+    utils.debugLineCount = 0
+    return 
+  end
+
+  local count = 0
+  local f = io.open(debugLogPath, "r")
+  if f then
+    for _ in f:lines() do count = count + 1 end
+    f:close()
+  end
+  utils.debugLineCount = count
+end
+-- END NEW
+
 function utils.logDebug(category, message)
   -- NEW: Rollender Log mit 5000 Zeilen – löscht älteste 2000 (deine Idee)
   if not status.conf.enableDebugLog then return end
@@ -68,36 +85,36 @@ function utils.logDebug(category, message)
   -- Zeilen zählen
   utils.debugLineCount = (utils.debugLineCount or 0) + 1
 
-  -- Bei 5000: Älteste 2000 löschen → immer die letzten 3000 bleiben
+    -- NEW: Streaming Rollover with temp file (Copilot suggestion – no full table in RAM)
   if utils.debugLineCount >= 5000 then
-    local f = io.open(debugLogPath, "r")
-    if f then
-      local lines = {}
+    local tmpPath = debugLogPath .. ".tmp"
+    
+    local f  = io.open(debugLogPath, "r")
+    local f2 = io.open(tmpPath, "w")
+    
+    if f and f2 then
+      local lineIndex = 0
       for line in f:lines() do
-        table.insert(lines, line)
-      end
-      f:close()
-
-      -- Nur Zeilen 2001 bis Ende behalten + Marker
-      local keep = {}
-      for i = 2001, #lines do
-        table.insert(keep, lines[i])
-      end
-      table.insert(keep, "00:00:00.00 | SETTINGS | === DEBUG LOG ROLLED (oldest 2000 lines removed) ===")
-
-      -- Datei neu schreiben
-      local f2 = io.open(debugLogPath, "w")
-      if f2 then
-        for _, l in ipairs(keep) do
-          f2:write(l .. "\n")
+        lineIndex = lineIndex + 1
+        if lineIndex > 2000 then                -- skip oldest 2000 lines
+          f2:write(line .. "\n")
         end
-        f2:close()
       end
+      
+      -- Add rollover marker
+      f2:write("00:00:00.00 | SETTINGS | === DEBUG LOG ROLLED (oldest 2000 lines removed) ===\n")
+      
+      f:close()
+      f2:close()
+      
+      -- Replace original file
+      os.remove(debugLogPath)
+      os.rename(tmpPath, debugLogPath)
     end
-    utils.debugLineCount = 3000   -- Zähler auf die verbleibenden Zeilen setzen
+    
+    utils.debugLineCount = 3000   -- now we have ~3000 lines left
   end
-end
--- END NEW
+  -- END NEW
 
 function utils.getSourceValue(name)
   -- Returns value of a telemetry source by name (caches source handle for performance)
@@ -148,17 +165,17 @@ end
 
 function utils.haversine(lat1, lon1, lat2, lon2)
   -- Calculates great-circle distance between two GPS coordinates in meters
-  lat1 = lat1 * math.pi / 180
-  lon1 = lon1 * math.pi / 180
-  lat2 = lat2 * math.pi / 180
-  lon2 = lon2 * math.pi / 180
+  local lat1 = lat1 * math.pi / 180
+  local lon1 = lon1 * math.pi / 180
+  local lat2 = lat2 * math.pi / 180
+  local lon2 = lon2 * math.pi / 180
 
-  lat_dist = lat2-lat1
-  lon_dist = lon2-lon1
-  lat_hsin = math.sin(lat_dist/2)^2
-  lon_hsin = math.sin(lon_dist/2)^2
+  local lat_dist = lat2 - lat1
+  local lon_dist = lon2 - lon1
+  local lat_hsin  = math.sin(lat_dist/2)^2
+  local lon_hsin  = math.sin(lon_dist/2)^2
 
-  a = lat_hsin + math.cos(lat1) * math.cos(lat2) * lon_hsin
+  local a = lat_hsin + math.cos(lat1) * math.cos(lat2) * lon_hsin
   return 2 * 6372.8 * math.asin(math.sqrt(a)) * 1000
 end
 
@@ -294,9 +311,11 @@ function utils.playSound(soundFile, skipHaptic)
 end
 
 function utils.init(param_status, param_libs)
-  -- Initializes the utils library and stores references to status and libs
   status = param_status
   libs = param_libs
+  -- NEW: Nur zählen, wenn Debugging wirklich eingeschaltet ist
+  initDebugLineCount()
+  -- END NEW
   return utils
 end
 
