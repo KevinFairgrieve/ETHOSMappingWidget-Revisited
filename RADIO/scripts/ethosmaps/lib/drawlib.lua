@@ -103,6 +103,17 @@ function drawLib.drawNoGPSData(widget)
   lcd.drawText(w / 2, boxY + 25*sy, "...waiting for GPS", CENTERED)
 end
 
+-- Placeholder implementations to maintain API compatibility with hudlib.lua.
+-- These functions intentionally perform no drawing; they prevent runtime errors
+-- if HUD support is enabled while the full HUD rendering logic is not present.
+function drawLib.drawCompassRibbon(widget, ...)
+  -- no-op: HUD compass ribbon drawing currently disabled
+end
+
+function drawLib.drawWindArrow(widget, ...)
+  -- no-op: HUD wind arrow drawing currently disabled
+end
+
 function drawLib.drawTopBar(widget)
   local w = status.widgetWidth
   local sx = status.scaleX
