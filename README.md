@@ -5,6 +5,11 @@
 A modern, fully scalable version of the popular Yaapu Mapping Widget for FrSky Ethos.  
 It displays your real-time GPS position on a supported map type of your choice and works perfectly on **any** widget size — from Fullscreen down to very small custom layouts.
 
+## Download
+- Releases and Pre-Tested Beta-Versions can be downloaded from https://github.com/b14ckyy/ETHOSMappingWidget-Revisited/releases
+- If you want to try out the latest running development version, download from the `main` branch directly (usually working fine but just roughly tested).
+- other branches are in active development and should not be used and no feedback to these will be accepted.
+
 ## Features
 
 - Real-time moving map with satellite imagery
