@@ -69,7 +69,6 @@ local mapStatus = {
     mapZoomMin = 1,
     mapTrailDots = 30,
     enableMapGrid = true,
-    enableHUD = false,
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
