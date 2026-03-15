@@ -19,7 +19,8 @@
 
 
 local function getTime()
-  return os.clock()*100 -- 1/100th
+  -- Returns current time in centiseconds for timing and throttling
+  return os.clock()*100
 end
 
 local mapLib = {}
@@ -27,21 +28,20 @@ local mapLib = {}
 local status = nil
 local libs = nil
 
---------------------------
 -- MAP properties
---------------------------
+-- Global map drawing constants and state variables
 local MAP_X = 0
 local MAP_Y = 0
 local DIST_SAMPLES = 10
 
--- map support
+-- Map support state
 local posUpdated = false
 local myScreenX, myScreenY
 local homeScreenX, homeScreenY
 local estimatedHomeScreenX, estimatedHomeScreenY
-local tile_x,tile_y,offset_x,offset_y
+local tile_x, tile_y, offset_x, offset_y
 local tiles = {}
-local tiles_path_to_idx = {} -- path to idx cache
+local tiles_path_to_idx = {} -- path to index cache
 local mapBitmapByPath = {}
 local nomap = nil
 local world_tiles
@@ -68,48 +68,44 @@ local lastProcessCycle = getTime()
 local processCycle = 0
 
 local avgDistSamples = {}
-local avgDist = 0;
-local avgDistSum = 0;
-local avgDistSample = 0;
-local avgDistSampleCount = 0;
-local avgDistLastSampleTime = getTime();
+local avgDist = 0
+local avgDistSum = 0
+local avgDistSample = 0
+local avgDistSampleCount = 0
+local avgDistLastSampleTime = getTime()
 avgDistSamples[0] = 0
 
 local coord_to_tiles = nil
 local tiles_to_path = nil
-local MinLatitude = -85.05112878;
-local MaxLatitude = 85.05112878;
-local MinLongitude = -180;
-local MaxLongitude = 180;
+local MinLatitude = -85.05112878
+local MaxLatitude = 85.05112878
+local MinLongitude = -180
+local MaxLongitude = 180
 
 local TILES_X = 8
 local TILES_Y = 3
 local TILES_SIZE = 100
 local TILES_DIM = 76.5
 local TILES_IDX_BMP = 1
-local TILES_IDX_PATH  = 2
+local TILES_IDX_PATH = 2
 
 local zoomUpdateTimer = getTime()
 local zoomUpdate = false
 
-local n1,n2
-
 local lastHeavyUpdate = getTime()
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
--- === PHASE 3: Trail + Garbage-Optimierung ===
+
 local lastTrailUpdate = getTime()
-local TRAIL_UPDATE_INTERVAL = 50   -- 500 ms = alle 0.5 Sekunden (reicht vollkommen)
-
--- === MULTI-WIDGET-FIX: Offsets pro Widget statt global ===
--- (verhindert Springen bei 2+ Widgets)
-
+local TRAIL_UPDATE_INTERVAL = 50
 
 function mapLib.clip(n, min, max)
+  -- Clamps a value between min and max
   return math.min(math.max(n, min), max)
 end
 
 function mapLib.tiles_on_level(level)
+  -- Returns number of tiles on one axis for given zoom level
   if status.conf.mapProvider == 1 then
     return 2^(17-level)
   else
@@ -121,8 +117,9 @@ end
   total tiles on the web mercator projection = 2^zoom*2^zoom
 --]]
 function mapLib.get_tile_matrix_size_pixel(level)
-    local size = 2^level * TILES_SIZE
-    return size, size
+  -- Returns total pixel size of the map at given zoom level
+  local size = 2^level * TILES_SIZE
+  return size, size
 end
 
 --[[
@@ -130,6 +127,7 @@ end
   https://github.com/judero01col/GMap.NET
 --]]
 function mapLib.google_coord_to_tiles(lat, lng, level)
+  -- Converts GPS coordinates to tile coordinates + pixel offsets (Google Mercator)
   lat = mapLib.clip(lat, MinLatitude, MaxLatitude)
   lng = mapLib.clip(lng, MinLongitude, MaxLongitude)
 
@@ -139,14 +137,15 @@ function mapLib.google_coord_to_tiles(lat, lng, level)
 
   local mapSizeX, mapSizeY = mapLib.get_tile_matrix_size_pixel(level)
 
-  -- absolute pixel coordinates on the mercator projection at this zoom level
+    -- absolute pixel coordinates on the mercator projection at this zoom level
   local rx = mapLib.clip(x * mapSizeX + 0.5, 0, mapSizeX - 1)
   local ry = mapLib.clip(y * mapSizeY + 0.5, 0, mapSizeY - 1)
-  -- return tile_x, tile_y, offset_x, offset_y
+    -- return tile_x, tile_y, offset_x, offset_y
   return math.floor(rx/TILES_SIZE), math.floor(ry/TILES_SIZE), math.floor(rx%TILES_SIZE), math.floor(ry%TILES_SIZE)
 end
 
 function mapLib.gmapcatcher_coord_to_tiles(lat, lon, level)
+  -- Converts GPS coordinates to tile coordinates + pixel offsets (GMapCatcher)
   local x = world_tiles / 360 * (lon + 180)
   local e = math.sin(lat * (1/180 * math.pi))
   local y = world_tiles / 2 + 0.5 * math.log((1+e)/(1-e)) * -1 * tiles_per_radian
@@ -154,17 +153,19 @@ function mapLib.gmapcatcher_coord_to_tiles(lat, lon, level)
 end
 
 function mapLib.google_tiles_to_path(tile_x, tile_y, level)
+  -- Builds file path for Google map tiles
   return string.format("/%d/%.0f/s_%.0f.jpg", level, tile_y, tile_x)
 end
 
 function mapLib.gmapcatcher_tiles_to_path(tile_x, tile_y, level)
+  -- Builds file path for GMapCatcher map tiles
   return string.format("/%d/%.0f/%.0f/%.0f/s_%.0f.png", level, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
 end
 
 function mapLib.getTileBitmap(tilePath)
+  -- Loads tile bitmap from SD card (with caching and nomap fallback)
   local fullPath = "/bitmaps/ethosmaps/maps/" .. status.conf.mapType .. tilePath
   
-  -- Cache prüfen (bleibt superschnell)
   if mapBitmapByPath[tilePath] ~= nil then
     return mapBitmapByPath[tilePath]
   end
@@ -175,7 +176,6 @@ function mapLib.getTileBitmap(tilePath)
     mapBitmapByPath[tilePath] = lcd.loadBitmap(fullPath)
     return mapBitmapByPath[tilePath]
   else
-    -- nomap-Fallback
     if nomap == nil then
       nomap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/nomap.png")
     end
@@ -184,20 +184,19 @@ function mapLib.getTileBitmap(tilePath)
   end
 end
 
-function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
+function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level)
+  -- Loads and centers map tiles around current position (with throttling)
   local now = getTime()
   
-  -- Nur alle 250 ms oder bei echter Änderung laden
   if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
-    return   -- ← hier sparen wir CPU!
+    return
   end
   
   lastHeavyUpdate = now
   mapNeedsHeavyUpdate = false
 
-  local tilesChanged = false   -- NEU: Merkt sich, ob wirklich etwas geändert wurde
+  local tilesChanged = false
 
-  -- Der Rest bleibt 1:1 wie vorher (keine weiteren Änderungen nötig)
   for x=1,TILES_X do
     for y=1,TILES_Y do
       local tile_path = mapLib.tiles_to_path(tile_x + x - math.floor(TILES_X/2 + 0.5), tile_y + y - math.floor(TILES_Y/2 + 0.5), level)
@@ -217,7 +216,6 @@ function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
     end
   end
   
-  -- unused Tiles aus Cache werfen
   for path, bmp in pairs(mapBitmapByPath) do
     local remove = true
     for i=1,#tiles do
@@ -231,16 +229,15 @@ function mapLib.loadAndCenterTiles(tile_x,tile_y,offset_x,offset_y,width,level)
   end
   
   if tilesChanged then
-    collectgarbage()   -- nur noch bei echter Änderung
+    collectgarbage()
   end
 end
 
 
-function mapLib.drawTiles(width,xmin,xmax,ymin,ymax,color,level)
-  for x=1,TILES_X
-  do
-    for y=1,TILES_Y
-    do
+function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
+  -- Draws all loaded tiles and optional grid
+  for x=1,TILES_X do
+    for y=1,TILES_Y do
       local idx = width*(y-1)+x
       if tiles[idx] ~= nil then
         lcd.drawBitmap(xmin+(x-1)*TILES_SIZE, ymin+(y-1)*TILES_SIZE, mapLib.getTileBitmap(tiles[idx]))
@@ -258,33 +255,28 @@ function mapLib.drawTiles(width,xmin,xmax,ymin,ymax,color,level)
       lcd.drawLine(xmin,ymin+y*TILES_SIZE,xmax,ymin+y*TILES_SIZE)
     end
   end
-
-  local x = xmin
-  local y = ymax
 end
 
-function mapLib.getScreenCoordinates(minX,minY,tile_x,tile_y,offset_x,offset_y,level)
-  -- is this tile on screen ?
+function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offset_y, level)
+  -- Converts tile coordinates to screen pixel position
   local tile_path = mapLib.tiles_to_path(tile_x, tile_y, level)
   local tcache = tiles_path_to_idx[tile_path]
   if tcache ~= nil then
     if tiles[tcache[1]] ~= nil then
-      -- ok it's on screen
       return minX + (tcache[2]-1)*TILES_SIZE + offset_x, minY + (tcache[3]-1)*TILES_SIZE + offset_y
     end
   end
-  -- force offscreen up
   return status.widgetWidth / 2, -10
 end
 
 function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
+  -- Main map drawing function (tiles + UAV arrow + home + trail + zoom buttons)
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   if mapLib.tiles_to_path == nil or mapLib.coord_to_tiles == nil then
     return
   end
 
-  -- Initial-Tiles
   if #tiles == 0 or tiles[1] == nil then
     if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
@@ -294,11 +286,9 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
   end
 
-  -- Offset pro Widget-Instanz (wichtig für Fullscreen + Split gleichzeitig!)
   if widget.drawOffsetX == nil then widget.drawOffsetX = 0 end
   if widget.drawOffsetY == nil then widget.drawOffsetY = 0 end
 
-  -- Reset bei Größen- oder Zoom-Änderung
   if widget.lastW ~= w or widget.lastH ~= h or widget.lastZoom ~= level then
     widget.drawOffsetX = 0
     widget.drawOffsetY = 0
@@ -343,7 +333,6 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   local maxX = math.min(minX + w, minX + TILES_X * TILES_SIZE)
   local maxY = math.min(minY + h, minY + TILES_Y * TILES_SIZE)
 
-  -- Home + Trail
   if getTime() - lastHomePosUpdate > 20 then
     lastHomePosUpdate = getTime()
     if homeNeedsRefresh then
@@ -362,7 +351,6 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     end
   end
 
-  -- NEU Phase 3: Trail nur alle 500 ms aktualisieren
   local now = getTime()
   if now - lastTrailUpdate > TRAIL_UPDATE_INTERVAL and posUpdated then
     lastTrailUpdate = now
@@ -373,10 +361,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     sample = sampleCount % status.conf.mapTrailDots
   end
 
-  -- Tiles mit Offset
   mapLib.drawTiles(TILES_X, minX + widget.drawOffsetX, maxX + widget.drawOffsetX, minY + widget.drawOffsetY, maxY + widget.drawOffsetY, status.colors.yellow, level)
 
-  -- UAV-Pfeil mit Offset
   if myScreenX ~= nil and myScreenY ~= nil then
     local drawX = myScreenX + widget.drawOffsetX
     local drawY = myScreenY + widget.drawOffsetY
@@ -391,7 +377,6 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     end
   end
 
-  -- Home-Icon mit Offset + Widget-Bereich-Check (funktioniert jetzt bei Zoom 15/16)
   if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and homeScreenX ~= nil then
     local homeDrawX = homeScreenX + widget.drawOffsetX
     local homeDrawY = homeScreenY + widget.drawOffsetY
@@ -401,7 +386,6 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     end
   end
 
-  -- Trail mit Offset
   lcd.color(status.colors.yellow)
   for p = 0, math.min(sampleCount - 1, status.conf.mapTrailDots - 1) do
     if p ~= (sampleCount - 1) % status.conf.mapTrailDots then
@@ -420,29 +404,25 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     if getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
   end
 
-  -- === Fake Zoom-Buttons rechts (visuell, kleiner, quadratisch, weiße Linien) ===
-  local btnSize = 52 * status.scaleX          -- deutlich kleiner (früher 92)
+  local btnSize = 52 * status.scaleX
   local btnX     = x + w - btnSize - 18
   local btnYPlus  = y + 68
   local btnYMinus = y + h - btnSize - 88
-  -- Quadratischer, halbtransparenter Hintergrund
   lcd.color(lcd.RGB(0,0,0,0.42))
   lcd.drawFilledRectangle(btnX, btnYPlus, btnSize, btnSize)
   lcd.drawFilledRectangle(btnX, btnYMinus, btnSize, btnSize)
-  -- Weiße Linien statt +/-
   lcd.color(WHITE)
   lcd.pen(SOLID)
   local thick = 6 * status.scaleX
-  -- + Symbol
   lcd.drawLine(btnX + 10, btnYPlus + btnSize/2, btnX + btnSize - 10, btnYPlus + btnSize/2, thick)
   lcd.drawLine(btnX + btnSize/2, btnYPlus + 10, btnX + btnSize/2, btnYPlus + btnSize - 10, thick)
-  -- - Symbol
   lcd.drawLine(btnX + 10, btnYMinus + btnSize/2, btnX + btnSize - 10, btnYMinus + btnSize/2, thick)
   
   lcd.setClipping()
 end
 
 function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
+  -- Initializes map projection parameters when zoom or size changes
   if level == nil or tiles_x == nil or tiles_y == nil or x == nil or y == nil then
     return
   end
@@ -469,13 +449,13 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     if status.conf.mapProvider == 1 then
       mapLib.coord_to_tiles = mapLib.gmapcatcher_coord_to_tiles
       mapLib.tiles_to_path = mapLib.gmapcatcher_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale -- m or ft
+      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
       scaleLabel = string.format("%.0f%s",(status.conf.distUnitScale==1 and 1 or 3)*50*2^(level+2),status.conf.distUnitLabel)
       scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(level+2)/tile_dim)*TILES_SIZE
     elseif status.conf.mapProvider == 2 then
       mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
       mapLib.tiles_to_path = mapLib.google_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale -- m or ft
+      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
       scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
       scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
     end
@@ -484,12 +464,14 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 end
 
 function mapLib.init(param_status, param_libs)
+  -- Initializes the map library and stores references to status and libs
   status = param_status
   libs = param_libs
   return mapLib
 end
 
 function mapLib.calculateScale(level)
+  -- Calculates length and label of the scale bar for current zoom level
   local scaleLen, scaleLabel = 0, ""
 
   if level == nil then
@@ -497,7 +479,7 @@ function mapLib.calculateScale(level)
   end
 
   local world_tiles = mapLib.tiles_on_level(level)
-  local tile_dim = (40075017 / world_tiles) * status.conf.distUnitScale -- m or ft
+  local tile_dim = (40075017 / world_tiles) * status.conf.distUnitScale
 
   if status.conf.mapProvider == 1 then
     scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(level+2), status.conf.distUnitLabel)
@@ -511,6 +493,7 @@ function mapLib.calculateScale(level)
 end
 
 function mapLib.setNeedsHeavyUpdate()
+  -- Forces a full tile reload on next draw
   mapNeedsHeavyUpdate = true
 end
 

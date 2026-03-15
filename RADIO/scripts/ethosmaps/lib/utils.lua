@@ -1,3 +1,23 @@
+--
+-- A FRSKY SPort/FPort/FPort2 and TBS CRSF telemetry widget for the Ethos OS
+-- based on ArduPilot's passthrough telemetry protocol
+--
+-- Author: Alessandro Apostoli, https://github.com/yaapu
+--
+-- This program is free software; you can redistribute it and/or modify
+-- it under the terms of the GNU General Public License as published by
+-- the Free Software Foundation; either version 3 of the License, or
+-- (at your option) any later version.
+--
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY, without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+-- GNU General Public License for more details.
+--
+-- You should have received a copy of the GNU General Public License
+-- along with this program; if not, see <http://www.gnu.org/licenses>.
+
+
 local utils = {}
 
 local status = nil
@@ -8,6 +28,7 @@ local alwaysOff = system.getSource({category=0, member=1, options=0})
 local sources = {}
 
 function utils.getSourceValue(name)
+  -- Returns value of a telemetry source by name (caches source handle for performance)
   local src = sources[name]
   if src == nil then
     src = system.getSource(name)
@@ -17,10 +38,12 @@ function utils.getSourceValue(name)
 end
 
 function utils.getRSSI()
+  -- Returns current RSSI value from the radio
   return utils.getSourceValue("RSSI")
 end
 
 function utils.getBitmask(low, high)
+  -- Returns bitmask for extracting a range of bits (cached for performance)
   local key = tostring(low)..tostring(high)
   local res = bitmaskCache[key]
   if res == nil then
@@ -31,13 +54,16 @@ function utils.getBitmask(low, high)
 end
 
 function utils.bitExtract(value, start, len)
+  -- Extracts a range of bits from a value using bitmask
   return (value & utils.getBitmask(start,start+len-1)) >> start
 end
 
 function utils.processTelemetry(primID, data, now)
+  -- Placeholder for processing raw telemetry packets (not used in current version)
 end
 
 function utils.playTime(seconds)
+  -- Plays elapsed time as voice announcement (hours/minutes/seconds)
   if seconds > 3600 then
     system.playNumber(seconds / 3600, UNIT_HOUR)
     system.playNumber((seconds % 3600) / 60, UNIT_MINUTE)
@@ -49,21 +75,23 @@ function utils.playTime(seconds)
 end
 
 function utils.haversine(lat1, lon1, lat2, lon2)
-    lat1 = lat1 * math.pi / 180
-    lon1 = lon1 * math.pi / 180
-    lat2 = lat2 * math.pi / 180
-    lon2 = lon2 * math.pi / 180
+  -- Calculates great-circle distance between two GPS coordinates in meters
+  lat1 = lat1 * math.pi / 180
+  lon1 = lon1 * math.pi / 180
+  lat2 = lat2 * math.pi / 180
+  lon2 = lon2 * math.pi / 180
 
-    lat_dist = lat2-lat1
-    lon_dist = lon2-lon1
-    lat_hsin = math.sin(lat_dist/2)^2
-    lon_hsin = math.sin(lon_dist/2)^2
+  lat_dist = lat2-lat1
+  lon_dist = lon2-lon1
+  lat_hsin = math.sin(lat_dist/2)^2
+  lon_hsin = math.sin(lon_dist/2)^2
 
-    a = lat_hsin + math.cos(lat1) * math.cos(lat2) * lon_hsin
-    return 2 * 6372.8 * math.asin(math.sqrt(a)) * 1000
+  a = lat_hsin + math.cos(lat1) * math.cos(lat2) * lon_hsin
+  return 2 * 6372.8 * math.asin(math.sqrt(a)) * 1000
 end
 
 function utils.getAngleFromLatLon(lat1, lon1, lat2, lon2)
+  -- Calculates bearing angle (0-360°) from point 1 to point 2
   local la1 = math.rad(lat1)
   local lo1 = math.rad(lon1)
   local la2 = math.rad(lat2)
@@ -77,11 +105,13 @@ function utils.getAngleFromLatLon(lat1, lon1, lat2, lon2)
 end
 
 function utils.getMaxValue(value,idx)
+  -- Returns max value seen so far (used for min/max display)
   status.minmaxValues[idx] = math.max(value,status.minmaxValues[idx])
   return status.showMinMaxValues == true and status.minmaxValues[idx] or value
 end
 
 function utils.updateCog()
+  -- Updates Course Over Ground (COG) when GPS position changes
   if status.lastLat == nil then
     status.lastLat = status.telemetry.lat
   end
@@ -100,11 +130,13 @@ function utils.updateCog()
 end
 
 function utils.calcMinValue(value,min)
+  -- Returns the smaller of two values (used for minimum tracking)
   return min == 0 and value or math.min(value,min)
 end
 
 -- returns the actual minimun only if both are > 0
 function utils.getNonZeroMin(v1,v2)
+  -- Returns the smaller non-zero value of two numbers
   return v1 == 0 and v2 or ( v2 == 0 and v1 or math.min(v1,v2))
 end
 
@@ -131,6 +163,7 @@ function utils.getLatLonFromAngleAndDistance(angle, distance)
 end
 
 function utils.decToDMS(dec,lat)
+  -- Converts decimal degrees to DMS format (short version)
   local D = math.floor(math.abs(dec))
   local M = (math.abs(dec) - D)*60
   local S = (math.abs((math.abs(dec) - D)*60) - M)*60
@@ -138,6 +171,7 @@ function utils.decToDMS(dec,lat)
 end
 
 function utils.decToDMSFull(dec,lat)
+  -- Converts decimal degrees to full DMS format with minutes and seconds
   local D = math.floor(math.abs(dec))
   local M = math.floor((math.abs(dec) - D)*60)
   local S = (math.abs((math.abs(dec) - D)*60) - M)*60
@@ -145,14 +179,14 @@ function utils.decToDMSFull(dec,lat)
 end
 
 function utils.resetTimer()
-  --print("TIMER RESET")
+  -- Resets the Yaapu flight timer
   local timer = model.getTimer("Yaapu")
   timer:activeCondition( alwaysOff )
   timer:resetCondition( alwaysOn )
 end
 
 function utils.startTimer()
-  --print("TIMER START")
+  -- Starts the Yaapu flight timer
   status.lastTimerStart = getTime()/100
   local timer = model.getTimer("Yaapu")
   timer:activeCondition( alwaysOn )
@@ -160,7 +194,7 @@ function utils.startTimer()
 end
 
 function utils.stopTimer()
-  --print("TIMER STOP")
+  -- Stops the Yaapu flight timer
   status.lastTimerStart = 0
   local timer = model.getTimer("Yaapu")
   timer:activeCondition( alwaysOff )
@@ -168,6 +202,7 @@ function utils.stopTimer()
 end
 
 function utils.telemetryEnabled(widget)
+  -- Returns true if telemetry data is currently being received
   if utils.getRSSI() == 0 then
     status.noTelemetryData = 1
   end
@@ -175,6 +210,7 @@ function utils.telemetryEnabled(widget)
 end
 
 function utils.playSound(soundFile, skipHaptic)
+  -- Plays a sound file and optional haptic feedback
   if status.conf.enableHaptic and skipHaptic == nil then
     system.playHaptic(15,0)
   end
@@ -186,6 +222,7 @@ function utils.playSound(soundFile, skipHaptic)
 end
 
 function utils.init(param_status, param_libs)
+  -- Initializes the utils library and stores references to status and libs
   status = param_status
   libs = param_libs
   return utils

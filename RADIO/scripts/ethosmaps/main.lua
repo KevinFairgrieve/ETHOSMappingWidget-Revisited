@@ -19,24 +19,25 @@
 
 
 local function getTime()
-  return os.clock()*100 -- 1/100th
+  -- Returns current time in centiseconds (1/100th second) for timing and throttling
+  return os.clock()*100
 end
 
 
 local mapStatus = {
-  -- telemetry
+  -- Telemetry data received from the radio (GPS, home position, speed, etc.)
   telemetry = {
     yaw = nil,
     roll = nil,
     pitch = nil,
-    -- GPS
+    -- GPS data
     lat = nil,
     lon = nil,
     strLat = "---",
     strLon = "---",
     groundSpeed = 0,
     cog = 0,
-    -- HOME
+    -- HOME position
     homeLat = nil,
     homeLon = nil,
     homeAngle = 0,
@@ -46,13 +47,13 @@ local mapStatus = {
     rssiCRSF = 0,
   },
 
-  -- configuration
+  -- Configuration values stored in radio settings
   conf = {
     horSpeedUnit = 1,
-    horSpeedMultiplier=1,
+    horSpeedMultiplier = 1,
     horSpeedLabel = "m/s",
     vertSpeedUnit = 1,
-    vertSpeedMultiplier=1,
+    vertSpeedMultiplier = 1,
     vertSpeedLabel = "m/s",
     distUnit = 1,
     distUnitLabel = "m",
@@ -61,8 +62,8 @@ local mapStatus = {
     distUnitLongLabel = "km",
     distUnitLongScale = 0.001,
     language = "en",
-    -- map support
-    mapProvider = 2,
+    -- Map settings
+    mapProvider = 2, -- 1 = GMapCatcher, 2 = Google
     mapType = "GoogleSatelliteMap",
     mapZoomLevel = 19,
     mapZoomMax = 20,
@@ -72,30 +73,30 @@ local mapStatus = {
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
-    gpsFormat = 0,
-    -- layout
+    gpsFormat = 0, -- 0 = decimal, 1 = DMS
+    -- Layout settings
     layout = 1,
   },
 
-  -- panels
+  -- Panels and layout management
   layoutFilenames = { "layout_default" },
   counter = 0,
 
-  -- layout
+  -- Current screen and layout state
   lastScreen = 1,
   loadCycle = 0,
   layout = { nil },
 
-  -- telemetry status
+  -- Telemetry status flags
   noTelemetryData = 1,
   hideNoTelemetry = false,
 
-  -- maps
+  -- Maps state (used for throttling and drawing)
   screenTogglePage = 1,
   mapZoomLevel = 19,
   lastLat = nil,
   lastLon = nil,
-  mapLastLat = nil,
+  mapLastLat = nil,   -- Dedicated for map throttling (does not interfere with COG)
   mapLastLon = nil,
   mapLastZoom = 0,
 
@@ -109,16 +110,16 @@ local mapStatus = {
     value = 0,
   },
 
-  -- top bar
+  -- Top bar sources
   linkQualitySource = nil,
   userSensor1 = nil,
   userSensor2 = nil,
   userSensor3 = nil,
 
-  -- blinking support
+  -- Blinking support
   blinkon = false,
 
-  -- UNIT CONVERSION + COLORS
+  -- Unit conversion tables and colors
   unitConversion = {},
   battPercByVoltage = {},
   colors = {
@@ -142,12 +143,13 @@ local mapStatus = {
     background = lcd.RGB(60, 60, 60)
   },
 
-  -- AUTOMATIC SCALING
+  -- Automatic scaling for different widget sizes
   widgetWidth = 800,
   widgetHeight = 480,
   scaleX = 1.0,
   scaleY = 1.0,
 }
+
 
 -- { value, decimals, unit}
 mapStatus.luaSourcesConfig = {}
@@ -156,6 +158,7 @@ mapStatus.luaSourcesConfig.CourseOverGround =  {0, 0, UNIT_DEGREE, "cog", 1}
 mapStatus.luaSourcesConfig.GroundSpeed =  {0, 1, UNIT_METER_PER_SECOND, "groundSpeed", 1}
 
 local function sourceWakeup(source)
+  -- Updates custom telemetry sources (HomeDistance, GroundSpeed, COG) for use in other widgets
   if source ~= nil then
     local v = mapStatus.luaSourcesConfig[source:name()]
     if v[2] == 0 then
@@ -174,6 +177,7 @@ local mapLibs = {
 }
 
 function loadLib(name)
+  -- Loads a library file and calls its init() function if it exists
   local lib = dofile("/scripts/ethosmaps/lib/"..name..".lua")
   if lib.init ~= nil then
     lib.init(mapStatus, mapLibs)
@@ -182,6 +186,7 @@ function loadLib(name)
 end
 
 local function initLibs()
+  -- Initializes all required libraries (called once at widget creation)
   if mapLibs.utils == nil then mapLibs.utils = loadLib("utils") end
   if mapLibs.drawLib == nil then mapLibs.drawLib = loadLib("drawlib") end
   if mapLibs.resetLib == nil then mapLibs.resetLib = loadLib("resetlib") end
@@ -189,6 +194,7 @@ local function initLibs()
 end
 
 local function checkSize(widget)
+  -- Updates widget size and scaling factors (called every paint cycle)
   local w, h = lcd.getWindowSize()
   mapStatus.widgetWidth = w
   mapStatus.widgetHeight = h
@@ -201,14 +207,17 @@ local function checkSize(widget)
 end
 
 local function createOnce(widget)
+  -- Called only once per widget instance to enable background tasks
   widget.runBgTasks = true
 end
 
 local function reset(widget)
+  -- Resets layout and clears memory (called from menu)
   mapLibs.resetLib.reset(widget)
 end
 
 local function loadLayout(widget)
+  -- Shows loading screen and loads the layout library for the current screen
   lcd.pen(SOLID)
   lcd.color(lcd.RGB(20, 20, 20))
   lcd.drawFilledRectangle(mapStatus.widgetWidth/4, mapStatus.widgetHeight/4, mapStatus.widgetWidth/2, mapStatus.widgetHeight/4)
@@ -228,6 +237,7 @@ mapStatus.blinkTimer = getTime()
 local bgclock = 0
 
 local function bgtasks(widget)
+  -- Background tasks (GPS processing, averaging, blinking, COG update)
   local now = getTime()
   mapStatus.counter = mapStatus.counter + 1
 
@@ -288,10 +298,12 @@ local function bgtasks(widget)
 end
 
 local function gpsDataAvailable(lat,lon)
+  -- Returns true if valid GPS fix is available
   return lat ~= nil and lon ~= nil and lat ~= 0 and lon ~= 0
 end
 
 local function paint(widget)
+  -- Main drawing function called by Ethos every frame
   lcd.color(mapStatus.colors.background)
   lcd.pen(SOLID)
   lcd.drawFilledRectangle(0, 0, mapStatus.widgetWidth, mapStatus.widgetHeight)
@@ -318,6 +330,7 @@ local function paint(widget)
 end
 
 local function event(widget, category, value, x, y)
+  -- Handles touch events (zoom in/out on right side of screen)
   local kill = false
   if category == EVT_TOUCH and value == 16641 then
     kill = true
@@ -338,11 +351,13 @@ local function event(widget, category, value, x, y)
 end
 
 local function setHome(widget)
+  -- Sets current GPS position as home (called from menu)
   mapStatus.telemetry.homeLat = mapStatus.telemetry.lat
   mapStatus.telemetry.homeLon = mapStatus.telemetry.lon
 end
 
 local function menu(widget)
+  -- Context menu (Reset, Set Home, Zoom in/out)
   if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
     return {
       { "Maps: Reset", function() reset(widget) end },
@@ -355,6 +370,7 @@ local function menu(widget)
 end
 
 local function wakeup(widget)
+  -- Called regularly by Ethos (background tasks + invalidate)
   local now = getTime()
   if mapStatus.initPending then
     createOnce(widget)
@@ -368,6 +384,7 @@ local function wakeup(widget)
 end
 
 local function create()
+  -- Called once when widget is created
   if not mapStatus.initPending then
     mapStatus.initPending = true
   end
@@ -396,17 +413,20 @@ local function create()
 end
 
 local function applyDefault(value, defaultValue, lookup)
+  -- Helper to apply default values and lookup tables
   local v = value ~= nil and value or defaultValue
   if lookup ~= nil then return lookup[v] end
   return v
 end
 
 local function storageToConfig(name, defaultValue, lookup)
+  -- Reads a value from storage and applies defaults
   local storageValue = storage.read(name)
   return applyDefault(storageValue, defaultValue, lookup)
 end
 
 local function configToStorage(value, lookup)
+  -- Converts value back to storage index
   if lookup == nil then return value end
   for i=1,#lookup do
     if lookup[i] == value then return i end
@@ -415,6 +435,7 @@ local function configToStorage(value, lookup)
 end
 
 local function applyConfig()
+  -- Applies unit conversions and map zoom limits based on current settings
   mapStatus.conf.horSpeedLabel = applyDefault(mapStatus.conf.horSpeedUnit, 1, {"m/s", "km/h", "mph", "kn"})
   mapStatus.conf.vertSpeedLabel = applyDefault(mapStatus.conf.vertSpeedUnit, 1, {"m/s", "ft/s", "ft/min"})
   mapStatus.conf.distUnitLabel = applyDefault(mapStatus.conf.distUnit, 1, {"m", "ft"})
@@ -439,6 +460,7 @@ local function applyConfig()
 end
 
 local function configure(widget)
+  -- Builds the widget settings menu
   local line = form.addLine("Widget version")
   form.addStaticText(line, nil, "1.0.0 beta2")
 
@@ -619,6 +641,7 @@ local function configure(widget)
 end
 
 local function read(widget)
+  -- Reads all settings from storage when widget is loaded
   widget.gpsSource = storageToConfig("gps", nil)
   mapStatus.conf.horSpeedUnit = storageToConfig("horSpeedUnit", 1)
   mapStatus.conf.vertSpeedUnit = storageToConfig("vertSpeedUnit",1)
@@ -643,6 +666,7 @@ local function read(widget)
 end
 
 local function write(widget)
+  -- Writes all settings to storage when widget is closed or changed
   storage.write("gps", widget.gpsSource)
   storage.write("horSpeedUnit", mapStatus.conf.horSpeedUnit)
   storage.write("vertSpeedUnit", mapStatus.conf.vertSpeedUnit)
@@ -668,18 +692,21 @@ local function write(widget)
 end
 
 local function sourceInit(source)
+  -- Initializes custom telemetry sources (HomeDistance, GroundSpeed, COG)
   source:value(mapStatus.luaSourcesConfig[source:name()][1])
   source:decimals(mapStatus.luaSourcesConfig[source:name()][2])
   source:unit(mapStatus.luaSourcesConfig[source:name()][3])
 end
 
 local function registerSources()
+  -- Registers custom telemetry sources for use in other widgets
   system.registerSource({key="YM_HOME", name="HomeDistance", init=sourceInit, wakeup=sourceWakeup})
   system.registerSource({key="YM_GSPD", name="GroundSpeed", init=sourceInit, wakeup=sourceWakeup})
   system.registerSource({key="YM_COG", name="CourseOverGround", init=sourceInit, wakeup=sourceWakeup})
 end
 
 local function init()
+  -- Widget registration (called once at radio startup)
   system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
   registerSources()
 end
