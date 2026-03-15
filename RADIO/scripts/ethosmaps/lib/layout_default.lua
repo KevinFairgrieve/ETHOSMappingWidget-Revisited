@@ -71,18 +71,31 @@ function panel.draw(widget)
   local curLon = status.telemetry.lon
   local hasFix = (curLat ~= nil and curLon ~= nil)
 
-  if hasFix and 
-     (curLat ~= (status.lastLat or 0) or 
-      curLon ~= (status.lastLon or 0) or 
-      status.mapZoomLevel ~= (status.lastZoom or 0)) then
-    
+  if status.telemetry.lat ~= (status.mapLastLat or 0) or 
+     status.telemetry.lon ~= (status.mapLastLon or 0) or 
+     status.mapZoomLevel ~= (status.mapLastZoom or 0) then
     libs.mapLib.setNeedsHeavyUpdate()
-    status.lastLat = curLat
-    status.lastLon = curLon
-    status.lastZoom = status.mapZoomLevel
+    status.mapLastLat = status.telemetry.lat
+    status.mapLastLon = status.telemetry.lon
+    status.mapLastZoom = status.mapZoomLevel
   end
 
   libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
+
+  -- === Künstlicher Horizont (HUD) – sicherer Aufruf ===
+  if status.conf.enableHUD == true and 
+     w >= 400 and h >= 250 then
+    -- pcall = "protected call" – wenn HUD crasht, läuft der Rest trotzdem weiter
+    local ok, err = pcall(function()
+      libs.hudLib.drawHud(widget)
+    end)
+    if not ok then
+      -- Nur für Debug: zeigt, dass HUD fehlschlägt (kann später weg)
+      lcd.color(RED)
+      lcd.font(FONT_S)
+      lcd.drawText(20, 20, "HUD Error", LEFT)
+    end
+  end
 
   -- === Top-Bar + GPS/Zoom-Text nur bei NICHT verticalTiny und NICHT horizontalTiny ===
   if not (horizontalTiny or verticalTiny) then

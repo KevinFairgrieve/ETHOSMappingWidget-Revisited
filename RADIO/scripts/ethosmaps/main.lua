@@ -70,6 +70,7 @@ local mapStatus = {
     mapZoomMin = 1,
     mapTrailDots = 30,
     enableMapGrid = true,
+    enableHUD = false,
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
@@ -98,6 +99,9 @@ local mapStatus = {
   mapZoomLevel = 19,
   lastLat = nil,
   lastLon = nil,
+  mapLastLat = nil,
+  mapLastLon = nil,
+  mapLastZoom = 0,
   avgSpeed = {
     lastSampleTime = nil,
     avgTravelDist = 0,
@@ -695,6 +699,9 @@ local function configure(widget)
 
   line = form.addLine("Enable map grid")
   form.addBooleanField(line, nil, function() return mapStatus.conf.enableMapGrid end, function(value) mapStatus.conf.enableMapGrid = value end)
+
+  line = form.addLine("Enable Artificial Horizon (HUD)")
+  form.addBooleanField(line, nil, function() return mapStatus.conf.enableHUD end, function(value) mapStatus.conf.enableHUD = value end)
 end
 
 --------------------------------------------------------------------
@@ -717,6 +724,7 @@ local function read(widget)
   mapStatus.conf.gmapZoomMin = storageToConfig("gmapZoomMin", -2)
   mapStatus.conf.gmapZoomMax = storageToConfig("gmapZoomMax", 17)
   mapStatus.conf.enableMapGrid = storageToConfig("enableMapGrid", true)
+  mapStatus.conf.enableHUD = storageToConfig("enableHUD", false)   -- NEU
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
   mapStatus.conf.telemetrySource = storageToConfig("telemetrySource", nil)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
@@ -742,6 +750,7 @@ local function write(widget)
   storage.write("gmapZoomMin", mapStatus.conf.gmapZoomMin)
   storage.write("gmapZoomMax", mapStatus.conf.gmapZoomMax)
   storage.write("enableMapGrid", mapStatus.conf.enableMapGrid)
+  storage.write("enableHUD", mapStatus.conf.enableHUD)   -- NEU
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
   storage.write("telemetrySource", mapStatus.conf.telemetrySource)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
