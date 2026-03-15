@@ -41,6 +41,12 @@ function drawLib.drawNumber(x, y, num, precision, font, color, flags, blink)
   end
 end
 
+function drawLib.resetBacklightTimeout()
+  if system and system.resetBacklightTimeout then
+    system.resetBacklightTimeout()
+  end
+end
+
 -- === Nur noch die wirklich aktiven Funktionen (alles andere Altlast raus) ===
 function drawLib.drawNoTelemetryData(widget)
   if not libs.utils.telemetryEnabled() then
