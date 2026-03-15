@@ -26,6 +26,78 @@ local libs = nil
 local alwaysOn = system.getSource({category=CATEGORY_ALWAYS_ON, member=1, options=0})
 local alwaysOff = system.getSource({category=0, member=1, options=0})
 local sources = {}
+-- NEW: Globaler Zähler für die Log-Datei (Performance)
+utils.debugLineCount = 0
+-- END NEW
+
+-- NEW: getTime() for the logger (was missing before)
+local function getTime()
+  return os.clock()*100
+end
+-- END NEW
+
+-- NEW: Debug Logger (Schritt 2)
+local debugFile = nil
+local debugLogPath = "/scripts/ethosmaps/debug.log"
+local maxLogLines = 1000
+local lastLogWrite = 0
+
+function utils.logDebug(category, message)
+  -- NEW: Rollender Log mit 5000 Zeilen – löscht älteste 2000 (deine Idee)
+  if not status.conf.enableDebugLog then return end
+
+  local now = getTime()
+  if now - lastLogWrite < 10 then return end
+  lastLogWrite = now
+
+  local timestamp = string.format("%02d:%02d:%02d.%02d",
+    math.floor(now/360000)%24,
+    math.floor(now/6000)%60,
+    math.floor(now/100)%60,
+    math.floor(now % 100))
+
+  local cat = string.format("%-8s", category)
+  local line = timestamp .. " | " .. cat .. " | " .. tostring(message) .. "\n"
+
+  local f = io.open(debugLogPath, "a")
+  if f then
+    f:write(line)
+    f:close()
+  end
+
+  -- Zeilen zählen
+  utils.debugLineCount = (utils.debugLineCount or 0) + 1
+
+  -- Bei 5000: Älteste 2000 löschen → immer die letzten 3000 bleiben
+  if utils.debugLineCount >= 5000 then
+    local f = io.open(debugLogPath, "r")
+    if f then
+      local lines = {}
+      for line in f:lines() do
+        table.insert(lines, line)
+      end
+      f:close()
+
+      -- Nur Zeilen 2001 bis Ende behalten + Marker
+      local keep = {}
+      for i = 2001, #lines do
+        table.insert(keep, lines[i])
+      end
+      table.insert(keep, "00:00:00.00 | SETTINGS | === DEBUG LOG ROLLED (oldest 2000 lines removed) ===")
+
+      -- Datei neu schreiben
+      local f2 = io.open(debugLogPath, "w")
+      if f2 then
+        for _, l in ipairs(keep) do
+          f2:write(l .. "\n")
+        end
+        f2:close()
+      end
+    end
+    utils.debugLineCount = 3000   -- Zähler auf die verbleibenden Zeilen setzen
+  end
+end
+-- END NEW
 
 function utils.getSourceValue(name)
   -- Returns value of a telemetry source by name (caches source handle for performance)

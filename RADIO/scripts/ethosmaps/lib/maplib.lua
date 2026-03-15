@@ -187,6 +187,12 @@ end
 function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level)
   -- Loads and centers map tiles around current position (with throttling)
   local now = getTime()
+
+  -- NEW: TILE-Log nur beim echten Laden (Zoom, Recenter, initial)
+  if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
+    libs.utils.logDebug("TILE", "loadAndCenterTiles called (tiles loaded/updated)")
+  end
+  -- END NEW
   
   if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
     return

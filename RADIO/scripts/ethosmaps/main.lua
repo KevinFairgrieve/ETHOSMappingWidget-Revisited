@@ -70,6 +70,7 @@ local mapStatus = {
     mapZoomMin = 1,
     mapTrailDots = 30,
     enableMapGrid = true,
+    enableDebugLog = false,   -- NEW: Debug Logger ein/aus
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
@@ -148,6 +149,7 @@ local mapStatus = {
   widgetHeight = 480,
   scaleX = 1.0,
   scaleY = 1.0,
+  sessionLogged = false,
 }
 
 
@@ -247,6 +249,19 @@ local function bgtasks(widget)
   if gpsData.lat ~= nil and gpsData.lon ~= nil then
     mapStatus.telemetry.lat = gpsData.lat
     mapStatus.telemetry.lon = gpsData.lon
+
+    -- NEW: GPS-Log nur bei echter Positionsänderung (wie du gewünscht hast)
+    if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then
+      local lat = mapStatus.telemetry.lat or 0
+      local lon = mapStatus.telemetry.lon or 0
+    
+      if lat ~= (mapStatus.mapLastLat or 0) or lon ~= (mapStatus.mapLastLon or 0) then
+        mapLibs.utils.logDebug("GPS", string.format("lat=%.6f lon=%.6f", lat, lon))
+        mapStatus.mapLastLat = lat
+        mapStatus.mapLastLon = lon
+      end
+    end
+    -- END NEW
   end
 
   if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
@@ -332,6 +347,13 @@ end
 local function event(widget, category, value, x, y)
   -- Handles touch events (zoom in/out on right side of screen)
   local kill = false
+
+  -- NEW: Touch-Log (sicherer nil-Check für main.lua)
+  if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and category == EVT_TOUCH then
+    mapLibs.utils.logDebug("TOUCH", string.format("value=%d x=%d y=%d", value, x, y))
+  end
+  -- END NEW
+
   if category == EVT_TOUCH and value == 16641 then
     kill = true
     local rightX = mapStatus.widgetWidth * 0.80
@@ -372,6 +394,7 @@ end
 local function wakeup(widget)
   -- Called regularly by Ethos (background tasks + invalidate)
   local now = getTime()
+
   if mapStatus.initPending then
     createOnce(widget)
     mapStatus.initPending = false
@@ -380,7 +403,8 @@ local function wakeup(widget)
   if widget.runBgTasks then
     bgtasks(widget)
   end
-  lcd.invalidate()
+
+  lcd.invalidate()   
 end
 
 local function create()
@@ -390,6 +414,13 @@ local function create()
   end
 
   initLibs()
+
+  -- NEW: Auffälliger Session-Start-Marker – nur einmal (Flag verhindert Doppelung)
+  if mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and not mapStatus.sessionLogged then
+    mapLibs.utils.logDebug("SETTINGS", "=== DEBUG SESSION STARTED ===")
+    mapStatus.sessionLogged = true
+  end
+  -- END NEW
 
   return {
     conf = mapStatus.conf,
@@ -638,6 +669,21 @@ local function configure(widget)
   line = form.addLine("Enable map grid")
   form.addBooleanField(line, nil, function() return mapStatus.conf.enableMapGrid end, function(value) mapStatus.conf.enableMapGrid = value end)
 
+  -- === DEBUG LOGGER SWITCH ===
+  line = form.addLine("Enable debug log")
+  form.addBooleanField(line, nil, 
+    function() return mapStatus.conf.enableDebugLog end, 
+    function(value) 
+      mapStatus.conf.enableDebugLog = value
+      
+      -- NEW: Nur ENABLED loggen (DISABLED ist nicht möglich, wie du gesagt hast)
+      if mapLibs and mapLibs.utils and value then
+        mapLibs.utils.logDebug("SETTINGS", "=== DEBUG LOG ENABLED ===")
+      end
+      -- END NEW
+    end
+  )
+
 end
 
 local function read(widget)
@@ -657,6 +703,7 @@ local function read(widget)
   mapStatus.conf.gmapZoomMin = storageToConfig("gmapZoomMin", -2)
   mapStatus.conf.gmapZoomMax = storageToConfig("gmapZoomMax", 17)
   mapStatus.conf.enableMapGrid = storageToConfig("enableMapGrid", true)
+  mapStatus.conf.enableDebugLog = storageToConfig("enableDebugLog", false)
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
   mapStatus.conf.userSensor2 = storageToConfig("userSensor2", nil)
@@ -682,6 +729,7 @@ local function write(widget)
   storage.write("gmapZoomMin", mapStatus.conf.gmapZoomMin)
   storage.write("gmapZoomMax", mapStatus.conf.gmapZoomMax)
   storage.write("enableMapGrid", mapStatus.conf.enableMapGrid)
+  storage.write("enableDebugLog", mapStatus.conf.enableDebugLog)
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
   storage.write("userSensor2", mapStatus.conf.userSensor2)
