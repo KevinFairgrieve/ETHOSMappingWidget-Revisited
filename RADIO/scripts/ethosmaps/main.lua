@@ -506,7 +506,24 @@ local function configure(widget)
       widget.googleZoomMaxField:enable(mapStatus.conf.mapProvider==2)
       return mapStatus.conf.googleZoomMax
     end,
-    function(value) mapStatus.conf.googleZoomMax = value end
+    function(value)
+      -- Enforce googleZoomMin <= googleZoomMax and clamp default into [min, max]
+      local min = mapStatus.conf.googleZoomMin or 1
+      if value < min then
+        value = min
+      end
+      mapStatus.conf.googleZoomMax = value
+      local def = mapStatus.conf.googleZoomDefault
+      if def == nil then
+        def = value
+      end
+      if def < min then
+        def = min
+      elseif def > value then
+        def = value
+      end
+      mapStatus.conf.googleZoomDefault = def
+    end
   )
 
   line = form.addLine("Google zoom min")
@@ -515,7 +532,24 @@ local function configure(widget)
       widget.googleZoomMinField:enable(mapStatus.conf.mapProvider==2)
       return mapStatus.conf.googleZoomMin
     end,
-    function(value) mapStatus.conf.googleZoomMin = value end
+    function(value)
+      -- Enforce googleZoomMin <= googleZoomMax and clamp default into [min, max]
+      local max = mapStatus.conf.googleZoomMax or 20
+      if value > max then
+        value = max
+      end
+      mapStatus.conf.googleZoomMin = value
+      local def = mapStatus.conf.googleZoomDefault
+      if def == nil then
+        def = value
+      end
+      if def < value then
+        def = value
+      elseif def > max then
+        def = max
+      end
+      mapStatus.conf.googleZoomDefault = def
+    end
   )
 
   line = form.addLine("GMapCatcher zoom")
@@ -533,7 +567,24 @@ local function configure(widget)
       widget.gmapZoomMaxField:enable(mapStatus.conf.mapProvider==1)
       return mapStatus.conf.gmapZoomMax
     end,
-    function(value) mapStatus.conf.gmapZoomMax = value end
+    function(value)
+      -- Enforce optional gmapZoomMin <= gmapZoomMax and clamp default into [min, max]
+      local min = mapStatus.conf.gmapZoomMin
+      if min ~= nil and value < min then
+        value = min
+      end
+      mapStatus.conf.gmapZoomMax = value
+      local def = mapStatus.conf.gmapZoomDefault
+      if def ~= nil then
+        if min ~= nil and def < min then
+          def = min
+        end
+        if def > value then
+          def = value
+        end
+        mapStatus.conf.gmapZoomDefault = def
+      end
+    end
   )
 
   line = form.addLine("GMapCatcher zoom min")
