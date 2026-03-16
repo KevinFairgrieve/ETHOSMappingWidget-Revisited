@@ -510,9 +510,6 @@ local function configure(widget)
   line = form.addLine("User sensor 3")
   form.addSourceField(line, nil, function() return mapStatus.conf.userSensor3 end, function(value) mapStatus.conf.userSensor3 = value end)
 
-  line = form.addLine("GPS Source")
-  widget.gpsField = form.addSourceField(line, nil, function() return widget.gpsSource end, function(value) widget.gpsSource = value end)
-
   line = form.addLine("Airspeed/Groundspeed unit")
   form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"km/h",2},{"mph",3},{"kn",4}}, function() return mapStatus.conf.horSpeedUnit end, function(value) mapStatus.conf.horSpeedUnit = value end)
 
@@ -691,7 +688,6 @@ end
 local function read(widget)
   if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
   -- Loads persisted widget settings from storage into the widget instance and shared config table.
-  widget.gpsSource = storageToConfig("gps", nil)
   mapStatus.conf.horSpeedUnit = storageToConfig("horSpeedUnit", 1)
   mapStatus.conf.vertSpeedUnit = storageToConfig("vertSpeedUnit",1)
   mapStatus.conf.distUnit = storageToConfig("distUnit", 1)
@@ -718,7 +714,6 @@ end
 local function write(widget)
   if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
   -- Persists the current widget settings to storage, reapplies derived config values, and resets the active layout.
-  storage.write("gps", widget.gpsSource)
   storage.write("horSpeedUnit", mapStatus.conf.horSpeedUnit)
   storage.write("vertSpeedUnit", mapStatus.conf.vertSpeedUnit)
   storage.write("distUnit", mapStatus.conf.distUnit)
