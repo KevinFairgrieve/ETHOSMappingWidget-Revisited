@@ -80,11 +80,19 @@ function utils.performRollover()
     f:close()
     f2:close()
     
-    os.rename(debugLogPath, backupPath)
-    os.rename(tmpPath, debugLogPath)
-    os.remove(backupPath)
+    -- NEW: pcall-Schutz für Datei-Operationen (verhindert Absturz bei Rechte-/Pfad-Problemen)
+    pcall(function()
+      os.rename(debugLogPath, backupPath)
+      os.rename(tmpPath, debugLogPath)
+      os.remove(backupPath)
+    end)
     
     utils.debugLineCount = keepCount + 1
+    else
+    -- NEW: Immer alle geöffneten Handles schließen und tmp aufräumen (Copilot-Medium-Fix)
+    if f then f:close() end
+    if f2 then f2:close() end
+    os.remove(tmpPath)
   end
 end
 
