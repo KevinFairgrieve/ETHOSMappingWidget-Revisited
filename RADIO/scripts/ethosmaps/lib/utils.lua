@@ -111,9 +111,9 @@ function utils.logDebug(category, message)
       os.rename(debugLogPath, backupPath)
       os.rename(tmpPath, debugLogPath)
       os.remove(backupPath)
+      
+      utils.debugLineCount = maxLogLines - deleteCount + 1
     end
-    
-    utils.debugLineCount = maxLogLines - deleteCount + 1
   end
   -- === ENDE STREAMING ROLLOVER ===
 end
