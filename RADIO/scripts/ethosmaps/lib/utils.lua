@@ -27,7 +27,6 @@ local alwaysOn = system.getSource({category=CATEGORY_ALWAYS_ON, member=1, option
 local alwaysOff = system.getSource({category=0, member=1, options=0})
 local sources = {}
 -- Debug logger state shared by rollover and write helpers.
-local debugFile = nil
 local debugLogPath = "/scripts/ethosmaps/debug.log"
 local maxLogLines = 5000
 local lastLogWrite = 0
