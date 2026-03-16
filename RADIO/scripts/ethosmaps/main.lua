@@ -192,9 +192,9 @@ end
 local function initLibs()
   -- Lazily loads shared libraries once and stores them in mapLibs for later callbacks.
   if mapLibs.utils == nil then mapLibs.utils = loadLib("utils") end
-  if mapLibs.drawLib == nil then mapLibs.drawLib = loadLib("drawLib") end
+  if mapLibs.drawLib == nil then mapLibs.drawLib = loadLib("drawlib") end
   if mapLibs.resetLib == nil then mapLibs.resetLib = loadLib("resetLib") end
-  if mapLibs.mapLib == nil then mapLibs.mapLib = loadLib("mapLib") end
+  if mapLibs.mapLib == nil then mapLibs.mapLib = loadLib("maplib") end
 end
 
 local function checkSize(widget)
