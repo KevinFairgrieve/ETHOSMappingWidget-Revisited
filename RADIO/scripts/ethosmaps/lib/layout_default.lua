@@ -19,7 +19,7 @@
 
 
 local function getTime()
-  -- Returns current time in centiseconds for timing and throttling
+  -- Converts Lua CPU time into centiseconds so layout timing stays aligned with the other libraries.
   return os.clock()*100
 end
 
@@ -30,7 +30,7 @@ local status = nil
 local libs = nil
 
 local function drawBarSensor(x, y, label, value, unit, font, label_font, unit_font, color, label_color, blink, flags)
-  -- Draws a sensor value with label and unit in top or bottom bar
+  -- Draws one labeled sensor readout for the layout bars and returns the width consumed by the rendered block.
   lcd.font(label_font)
   local lw, lh = lcd.getTextSize(label)
   local sw, sh = lcd.getTextSize(" ")
@@ -52,24 +52,24 @@ local function drawBarSensor(x, y, label, value, unit, font, label_font, unit_fo
 end
 
 function panel.draw(widget)
-  -- Main drawing routine for the default layout (map + bars + arrows + warnings)
+  -- Renders the default layout by combining the map, status bars, warnings, and navigation overlays from shared widget state.
   local w = status.widgetWidth
   local h = status.widgetHeight
   local sx = status.scaleX
   local sy = status.scaleY
 
-  -- Super tiny mode detection for different screen sizes
+  -- Detect compact screen classes so overlays can scale down without overlapping the map.
   local verticalTiny = (w < 350)
   local horizontalTiny = (h < 200)
   local ultraTiny = verticalTiny and horizontalTiny
 
-  -- Map area calculation
+  -- Derive the map viewport after reserving space for the top and bottom bars.
   local topH    = (horizontalTiny or verticalTiny) and 0 or math.floor(26 * sy)
   local bottomH = horizontalTiny and 0 or math.floor(46 * sy)
   local mapY    = topH
   local mapH    = h - topH - bottomH
 
-  -- Trigger heavy map update only on real change
+  -- Request a full tile refresh only when position or zoom state actually changed.
   if status.telemetry.lat ~= (status.mapLastLat or 0) or 
      status.telemetry.lon ~= (status.mapLastLon or 0) or 
      status.mapZoomLevel ~= (status.mapLastZoom or 0) then
@@ -81,7 +81,7 @@ function panel.draw(widget)
 
   libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
 
-  -- Top bar + GPS/Zoom text only on larger layouts
+  -- Draw the top bar and text overlays only when the layout has enough vertical space.
   if not (horizontalTiny or verticalTiny) then
     lcd.color(lcd.RGB(0,0,0))
     lcd.pen(SOLID)
@@ -108,7 +108,7 @@ function panel.draw(widget)
     lcd.drawText(12*sx, mapY + 9*sy, zoomText)
   end
 
-  -- Bottom bar (always shown except on horizontal tiny)
+  -- Draw the bottom flight-data bar except on the narrowest horizontal layouts.
   if not horizontalTiny then
     lcd.color(lcd.RGB(0,0,0))
     lcd.pen(SOLID)
@@ -149,7 +149,7 @@ function panel.draw(widget)
     end
   end
 
-  -- Home arrow – always visible
+  -- Draw the home-direction arrow whenever a home position is available.
   if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil then
     local arrowSize = math.floor(42 * math.min(sx, sy))
     local arrowX = w - arrowSize * 1.2
@@ -160,7 +160,7 @@ function panel.draw(widget)
     libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize, math.floor(homeHeading), status.colors.black)
   end
 
-  -- Home Not Set Warning
+  -- Warn the pilot when live GPS is present but no home position has been stored yet.
   if status.telemetry.lat ~= nil and (status.telemetry.homeLat == nil or status.telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
     local font = (w < 450) and FONT_S or FONT_L
@@ -191,7 +191,7 @@ function panel.draw(widget)
     libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2 - 3*sy, warningText, font, status.colors.yellow, CENTERED, true)
   end
 
-  -- Scale bar
+  -- Draw the map scale bar when the viewport is large enough to keep it readable.
   if not ultraTiny then
     local scaleLen, scaleLabel = libs.mapLib.calculateScale(status.mapZoomLevel)
     if scaleLen ~= 0 then
@@ -213,11 +213,11 @@ function panel.draw(widget)
 end
 
 function panel.background(widget)
-  -- Empty background function required by Ethos OS (called when widget is not visible)
+  -- Placeholder background callback required by Ethos when the widget is off-screen.
 end
 
 function panel.init(param_status, param_libs)
-  -- Initializes the layout panel and stores references to status and libs
+  -- Stores shared state references so the layout can read telemetry/config data and call drawing/map helpers.
   status = param_status
   libs = param_libs
   return panel

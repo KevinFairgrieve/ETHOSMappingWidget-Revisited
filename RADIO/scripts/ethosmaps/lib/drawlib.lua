@@ -25,7 +25,7 @@ local drawLib = {}
 local bitmaps = {}
 
 function drawLib.drawText(x, y, txt, font, color, flags, blink)
-  -- Draws text with optional blinking support
+  -- Draws text with the requested font and color, using the shared blink state to optionally suppress output.
   lcd.font(font)
   lcd.color(color)
   if status.blinkon == true or blink == nil or blink == false then
@@ -34,7 +34,7 @@ function drawLib.drawText(x, y, txt, font, color, flags, blink)
 end
 
 function drawLib.drawNumber(x, y, num, precision, font, color, flags, blink)
-  -- Draws a number with optional blinking support
+  -- Draws a formatted number with optional blink gating and sends it directly to the LCD.
   lcd.font(font)
   lcd.color(color)
   if status.blinkon == true or blink == nil or blink == false then
@@ -43,14 +43,14 @@ function drawLib.drawNumber(x, y, num, precision, font, color, flags, blink)
 end
 
 function drawLib.resetBacklightTimeout()
-  -- Resets the screen backlight timeout (Ethos API call)
+  -- Requests a backlight timeout reset through Ethos so user-facing alerts keep the screen awake.
   if system and system.resetBacklightTimeout then
     system.resetBacklightTimeout()
   end
 end
 
 function drawLib.drawNoTelemetryData(widget)
-  -- Shows "NO TELEMETRY" warning box when no data is received
+  -- Draws the telemetry-loss warning overlay after querying the utility layer for current link availability.
   if not libs.utils.telemetryEnabled() then
     local w = status.widgetWidth
     local h = status.widgetHeight
@@ -80,7 +80,7 @@ function drawLib.drawNoTelemetryData(widget)
 end
 
 function drawLib.drawNoGPSData(widget)
-  -- Shows "...waiting for GPS" warning box when no GPS fix
+  -- Draws the no-GPS overlay when the layout detects that no valid position is available.
   local w = status.widgetWidth
   local h = status.widgetHeight
   local sx = status.scaleX
@@ -107,15 +107,15 @@ function drawLib.drawNoGPSData(widget)
 end
 
 function drawLib.drawCompassRibbon(widget, ...)
-  -- Placeholder: HUD compass ribbon drawing is currently disabled
+  -- Placeholder for a future compass ribbon renderer.
 end
 
 function drawLib.drawWindArrow(widget, ...)
-  -- Placeholder: HUD wind arrow drawing is currently disabled
+  -- Placeholder for a future wind-arrow renderer.
 end
 
 function drawLib.drawTopBar(widget)
-  -- Draws the top black bar with model name, TX voltage and user sensors
+  -- Draws the top status bar by combining model info, system voltage, and user-selected telemetry sources.
   local w = status.widgetWidth
   local sx = status.scaleX
   local sy = status.scaleY
@@ -144,9 +144,9 @@ function drawLib.drawTopBar(widget)
 end
 
 function drawLib.drawTopBarSensor(widget, x, sensor, label)
-  -- Helper to draw a single sensor value in the top bar
+  -- Draws one top-bar sensor block by reading its current string value and writing the label/value pair to the LCD.
   if sensor == nil or sensor:name() == "---" then
-    return 80
+    return 80 -- Safeguard: skip invalid sensor handles and reserve a stable fallback width.
   end
 
   local barFont = (status.widgetWidth < 450) and FONT_S or FONT_L
@@ -169,7 +169,7 @@ function drawLib.drawTopBarSensor(widget, x, sensor, label)
 end
 
 function drawLib.drawRArrow(x,y,r,angle,color)
-  -- Draws a rotated arrow (used for home direction and UAV symbol)
+  -- Draws a rotated arrow primitive used by the map for aircraft heading and home direction overlays.
   local ang = math.rad(angle - 90)
   local x1 = x + r * math.cos(ang)
   local y1 = y + r * math.sin(ang)
@@ -195,19 +195,19 @@ function drawLib.drawRArrow(x,y,r,angle,color)
 end
 
 function drawLib.drawBitmap(x, y, bitmap, w, h)
-  -- Draws a cached bitmap from the bitmaps folder
+  -- Draws a named bitmap by resolving it through the local bitmap cache first.
   lcd.drawBitmap(x, y, drawLib.getBitmap(bitmap), w, h)
 end
 
 function drawLib.drawBlinkBitmap(x, y, bitmap, w, h)
-  -- Draws a bitmap only when blink is active
+  -- Draws a bitmap only on active blink phases so warning icons can flash without state duplication.
   if status.blinkon == true then
     lcd.drawBitmap(x, y, drawLib.getBitmap(bitmap), w, h)
   end
 end
 
 function drawLib.getBitmap(name)
-  -- Loads and caches bitmap from SD card (lazy loading)
+  -- Lazily loads a bitmap from the SD card and keeps it cached for repeated draw calls.
   if bitmaps[name] == nil then
     bitmaps[name] = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/"..name..".png")
   end
@@ -215,7 +215,7 @@ function drawLib.getBitmap(name)
 end
 
 function drawLib.unloadBitmap(name)
-  -- Unloads a bitmap from memory and forces garbage collection
+  -- Removes a cached bitmap from memory and nudges Lua garbage collection to reclaim it.
   if bitmaps[name] ~= nil then
     bitmaps[name] = nil
     collectgarbage()
@@ -224,14 +224,14 @@ function drawLib.unloadBitmap(name)
 end
 
 function drawLib.drawLineWithClippingXY(x0, y0, x1, y1, xmin, ymin, xmax, ymax)
-  -- Draws a line with clipping to a rectangular area
+  -- Draws a line segment inside a temporary clipping rectangle and restores unclipped drawing afterwards.
   lcd.setClipping(xmin, ymin, xmax-xmin, ymax-ymin)
   lcd.drawLine(x0,y0,x1,y1)
   lcd.setClipping()
 end
 
 function drawLib.drawLineWithClipping(ox, oy, angle, len, xmin,ymin, xmax, ymax)
-  -- Draws a line of given length and angle with clipping
+  -- Converts an origin, angle, and length into endpoints and forwards the result to the clipped line renderer.
   local xx = math.cos(math.rad(angle)) * len * 0.5
   local yy = math.sin(math.rad(angle)) * len * 0.5
 
@@ -244,7 +244,7 @@ function drawLib.drawLineWithClipping(ox, oy, angle, len, xmin,ymin, xmax, ymax)
 end
 
 function drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax)
-  -- Computes Cohen-Sutherland outcode for clipping tests
+  -- Computes a Cohen-Sutherland outcode so callers can test whether a point lies outside a viewport.
   local code = 0
   if x < xmin then code = code | 1 end
   if x > xmax then code = code | 2 end
@@ -254,17 +254,17 @@ function drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax)
 end
 
 function drawLib.isInside(x,y,xmin,ymin,xmax,ymax)
-  -- Returns true if point is inside the given rectangle
+  -- Returns whether a point falls inside the requested rectangle by reusing computeOutCode().
   return drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax) == 0
 end
 
 function drawLib.drawHomeIcon(x,y)
-  -- Draws the small orange home icon
+  -- Draws the compact home icon bitmap used by map overlays.
   drawLib.drawBitmap(x,y,"minihomeorange")
 end
 
 function drawLib.init(param_status, param_libs)
-  -- Initializes the draw library and stores references to status and libs
+  -- Stores shared state references so drawing helpers can read status values and call sibling libraries.
   status = param_status
   libs = param_libs
   return drawLib
