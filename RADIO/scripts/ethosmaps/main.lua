@@ -19,35 +19,35 @@
 
 
 local function getTime()
-  -- Returns current time in centiseconds (1/100th second) for timing and throttling
+  -- Converts Lua CPU time into centiseconds so widget callbacks can share one timing base for throttling and animations.
   return os.clock()*100
 end
 
 
 local mapStatus = {
-  -- Telemetry data received from the radio (GPS, home position, speed, etc.)
+  -- Runtime telemetry cache populated from Ethos sources and consumed by layout and map drawing code.
   telemetry = {
     yaw = nil,
     roll = nil,
     pitch = nil,
-    -- GPS data
+    -- GPS position and derived navigation values.
     lat = nil,
     lon = nil,
     strLat = "---",
     strLon = "---",
     groundSpeed = 0,
     cog = 0,
-    -- HOME position
+    -- Home position and vector from aircraft to home.
     homeLat = nil,
     homeLon = nil,
     homeAngle = 0,
     homeDist = 0,
-    -- RSSI
+    -- Link quality values mirrored from radio telemetry.
     rssi = 0,
     rssiCRSF = 0,
   },
 
-  -- Configuration values stored in radio settings
+  -- Persistent widget settings loaded from storage and used by UI, map, and unit conversions.
   conf = {
     horSpeedUnit = 1,
     horSpeedMultiplier = 1,
@@ -62,7 +62,7 @@ local mapStatus = {
     distUnitLongLabel = "km",
     distUnitLongScale = 0.001,
     language = "en",
-    -- Map settings
+    -- Map provider and rendering settings.
     mapProvider = 2, -- 1 = GMapCatcher, 2 = Google
     mapType = "GoogleSatelliteMap",
     mapZoomLevel = 19,
@@ -70,34 +70,34 @@ local mapStatus = {
     mapZoomMin = 1,
     mapTrailDots = 30,
     enableMapGrid = true,
-    enableDebugLog = false,   -- NEW: Debug Logger ein/aus
+    enableDebugLog = false,   -- Enables the on-device debug log.
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
     gpsFormat = 0, -- 0 = decimal, 1 = DMS
-    -- Layout settings
+    -- Layout selection persisted for future layout variants.
     layout = 1,
   },
 
-  -- Panels and layout management
+  -- Layout module registry and shared lifecycle counters.
   layoutFilenames = { "layout_default" },
   counter = 0,
 
-  -- Current screen and layout state
+  -- Current screen bookkeeping and per-screen loaded layout modules.
   lastScreen = 1,
   loadCycle = 0,
   layout = { nil },
 
-  -- Telemetry status flags
+  -- Telemetry visibility flags shared with warning overlays.
   noTelemetryData = 1,
   hideNoTelemetry = false,
 
-  -- Maps state (used for throttling and drawing)
+  -- Map state used for redraw throttling, trail updates, and debug logging.
   screenTogglePage = 1,
   mapZoomLevel = 19,
   lastLat = nil,
   lastLon = nil,
-  mapLastLat = nil,   -- Dedicated for map throttling (does not interfere with COG)
+  mapLastLat = nil,   -- Dedicated to map redraw throttling so COG tracking can use its own history.
   mapLastLon = nil,
   mapLastZoom = 0,
   lastLoggedLat = 0,
@@ -113,16 +113,16 @@ local mapStatus = {
     value = 0,
   },
 
-  -- Top bar sources
+  -- Optional top bar telemetry sources selected by the user.
   linkQualitySource = nil,
   userSensor1 = nil,
   userSensor2 = nil,
   userSensor3 = nil,
 
-  -- Blinking support
+  -- Shared blink state consumed by drawing helpers.
   blinkon = false,
 
-  -- Unit conversion tables and colors
+  -- Shared lookup tables and UI colors used across libraries.
   unitConversion = {},
   battPercByVoltage = {},
   colors = {
@@ -146,7 +146,7 @@ local mapStatus = {
     background = lcd.RGB(60, 60, 60)
   },
 
-  -- Automatic scaling for different widget sizes
+  -- Current widget dimensions and scale factors propagated to layouts and libraries.
   widgetWidth = 800,
   widgetHeight = 480,
   scaleX = 1.0,
@@ -155,14 +155,14 @@ local mapStatus = {
 }
 
 
--- { value, decimals, unit}
+-- Maps exported source names to default values, formatting metadata, and the telemetry field they mirror.
 mapStatus.luaSourcesConfig = {}
 mapStatus.luaSourcesConfig.HomeDistance =  {0, 0, UNIT_METER, "homeDist", 1}
 mapStatus.luaSourcesConfig.CourseOverGround =  {0, 0, UNIT_DEGREE, "cog", 1}
 mapStatus.luaSourcesConfig.GroundSpeed =  {0, 1, UNIT_METER_PER_SECOND, "groundSpeed", 1}
 
 local function sourceWakeup(source)
-  -- Updates custom telemetry sources (HomeDistance, GroundSpeed, COG) for use in other widgets
+  -- Pushes cached telemetry values from mapStatus into registered Ethos sources so other widgets can consume them.
   if source ~= nil then
     local v = mapStatus.luaSourcesConfig[source:name()]
     if v[2] == 0 then
@@ -181,7 +181,7 @@ local mapLibs = {
 }
 
 function loadLib(name)
-  -- Loads a library file and calls its init() function if it exists
+  -- Loads a library module from disk, injects shared state through init(), and returns the initialized library table.
   local lib = dofile("/scripts/ethosmaps/lib/"..name..".lua")
   if lib.init ~= nil then
     lib.init(mapStatus, mapLibs)
@@ -190,15 +190,15 @@ function loadLib(name)
 end
 
 local function initLibs()
-  -- Initializes all required libraries (called once at widget creation)
+  -- Lazily loads shared libraries once and stores them in mapLibs for later callbacks.
   if mapLibs.utils == nil then mapLibs.utils = loadLib("utils") end
   if mapLibs.drawLib == nil then mapLibs.drawLib = loadLib("drawlib") end
-  if mapLibs.resetLib == nil then mapLibs.resetLib = loadLib("resetlib") end
+  if mapLibs.resetLib == nil then mapLibs.resetLib = loadLib("resetLib") end
   if mapLibs.mapLib == nil then mapLibs.mapLib = loadLib("maplib") end
 end
 
 local function checkSize(widget)
-  -- Updates widget size and scaling factors (called every paint cycle)
+  -- Refreshes widget dimensions from the active LCD window and writes the derived scale back into mapStatus.
   local w, h = lcd.getWindowSize()
   mapStatus.widgetWidth = w
   mapStatus.widgetHeight = h
@@ -211,17 +211,17 @@ local function checkSize(widget)
 end
 
 local function createOnce(widget)
-  -- Called only once per widget instance to enable background tasks
+  -- Marks a widget instance as ready for background processing after the first valid lifecycle callback.
   widget.runBgTasks = true
 end
 
 local function reset(widget)
-  -- Resets layout and clears memory (called from menu)
+  -- Delegates a user-triggered reset to resetLib so layouts and cached map data are rebuilt.
   mapLibs.resetLib.reset(widget)
 end
 
 local function loadLayout(widget)
-  -- Shows loading screen and loads the layout library for the current screen
+  -- Draws a temporary loading overlay, then loads the layout module for the current screen into mapStatus.layout.
   lcd.pen(SOLID)
   lcd.color(lcd.RGB(20, 20, 20))
   lcd.drawFilledRectangle(mapStatus.widgetWidth/4, mapStatus.widgetHeight/4, mapStatus.widgetWidth/2, mapStatus.widgetHeight/4)
@@ -241,19 +241,20 @@ mapStatus.blinkTimer = getTime()
 local bgclock = 0
 
 local function bgtasks(widget)
-  -- Background tasks (GPS processing, averaging, blinking, COG update)
+  -- Collects telemetry from Ethos sources, derives navigation values, and writes the updated state back into mapStatus.
   local now = getTime()
   mapStatus.counter = mapStatus.counter + 1
-
+  local gpsSrcLat = system.getSource({name="GPS", options=OPTION_LATITUDE})
+  local gpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
   local gpsData = {}
-  gpsData.lat = system.getSource({name="GPS", options=OPTION_LATITUDE}):value()
-  gpsData.lon = system.getSource({name="GPS", options=OPTION_LONGITUDE}):value()
+  gpsData.lat = gpsSrcLat and gpsSrcLat:value() or nil
+  gpsData.lon = gpsSrcLon and gpsSrcLon:value() or nil
   if gpsData.lat ~= nil and gpsData.lon ~= nil then
     mapStatus.telemetry.lat = gpsData.lat
     mapStatus.telemetry.lon = gpsData.lon
 
-    -- NEW: GPS-Log nur bei echter Änderung – mit dedizierten Feldern (Copilot Fix)
-    if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then
+    -- Log GPS changes only when the debug logger is enabled and the utility library is available.
+    if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then -- Safeguard: avoid logger access before config and libraries are initialized.
       local lat = mapStatus.telemetry.lat or 0
       local lon = mapStatus.telemetry.lon or 0
     
@@ -263,7 +264,6 @@ local function bgtasks(widget)
         mapStatus.lastLoggedLon = lon
       end
     end
-  -- END NEW
   end
 
   if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
@@ -315,12 +315,13 @@ local function bgtasks(widget)
 end
 
 local function gpsDataAvailable(lat,lon)
-  -- Returns true if valid GPS fix is available
+  -- Validates a GPS fix before map and overlay code consume the coordinates.
   return lat ~= nil and lon ~= nil and lat ~= 0 and lon ~= 0
 end
 
 local function paint(widget)
-  -- Main drawing function called by Ethos every frame
+  -- Clears the widget area and routes drawing to the active layout using the latest shared state.
+  if not widget then return end -- Safeguard: Ethos can call paint before a widget instance is fully available.
   lcd.color(mapStatus.colors.background)
   lcd.pen(SOLID)
   lcd.drawFilledRectangle(0, 0, mapStatus.widgetWidth, mapStatus.widgetHeight)
@@ -347,14 +348,13 @@ local function paint(widget)
 end
 
 local function event(widget, category, value, x, y)
-  -- Handles touch events (zoom in/out on right side of screen)
+  -- Handles touch input from Ethos, updates zoom state, and consumes handled events before they reach other UI code.
   local kill = false
 
-  -- NEW: Touch-Log (sicherer nil-Check für main.lua)
-  if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and category == EVT_TOUCH then
+  -- Logs raw touch data when debug logging is active.
+  if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and category == EVT_TOUCH then -- Safeguard: only log once settings and logger references exist.
     mapLibs.utils.logDebug("TOUCH", string.format("value=%d x=%d y=%d", value, x, y))
   end
-  -- END NEW
 
   if category == EVT_TOUCH and value == 16641 then
     kill = true
@@ -375,13 +375,13 @@ local function event(widget, category, value, x, y)
 end
 
 local function setHome(widget)
-  -- Sets current GPS position as home (called from menu)
+  -- Copies the current aircraft position from telemetry into the stored home position used by map overlays.
   mapStatus.telemetry.homeLat = mapStatus.telemetry.lat
   mapStatus.telemetry.homeLon = mapStatus.telemetry.lon
 end
 
 local function menu(widget)
-  -- Context menu (Reset, Set Home, Zoom in/out)
+  -- Builds the widget context menu from the current telemetry state and dispatches actions back into shared status.
   if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
     return {
       { "Maps: Reset", function() reset(widget) end },
@@ -394,7 +394,8 @@ local function menu(widget)
 end
 
 local function wakeup(widget)
-  -- Called regularly by Ethos (background tasks + invalidate)
+  -- Runs recurring background work between paint calls and invalidates the LCD so Ethos schedules a redraw.
+  if not widget then return end -- Safeguard: Ethos can schedule wakeup before the widget handle is ready.
   local now = getTime()
 
   if mapStatus.initPending then
@@ -410,19 +411,18 @@ local function wakeup(widget)
 end
 
 local function create()
-  -- Called once when widget is created
+  -- Creates a fresh widget instance, initializes shared libraries, and returns the per-instance state table to Ethos.
   if not mapStatus.initPending then
     mapStatus.initPending = true
   end
 
   initLibs()
 
-  -- NEW: Auffälliger Session-Start-Marker – nur einmal (Flag verhindert Doppelung)
+  -- Emit a visible session marker once so each debug log session has a clear start record.
   if mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and not mapStatus.sessionLogged then
     mapLibs.utils.logDebug("SETTINGS", "=== DEBUG SESSION STARTED ===")
     mapStatus.sessionLogged = true
   end
-  -- END NEW
 
   return {
     conf = mapStatus.conf,
@@ -446,20 +446,20 @@ local function create()
 end
 
 local function applyDefault(value, defaultValue, lookup)
-  -- Helper to apply default values and lookup tables
+  -- Resolves a value through a default and optional lookup table before configuration fields consume it.
   local v = value ~= nil and value or defaultValue
   if lookup ~= nil then return lookup[v] end
   return v
 end
 
 local function storageToConfig(name, defaultValue, lookup)
-  -- Reads a value from storage and applies defaults
+  -- Reads a persisted setting from storage and normalizes it into the in-memory config format.
   local storageValue = storage.read(name)
   return applyDefault(storageValue, defaultValue, lookup)
 end
 
 local function configToStorage(value, lookup)
-  -- Converts value back to storage index
+  -- Converts an in-memory config value back into the stored lookup index when persistence needs it.
   if lookup == nil then return value end
   for i=1,#lookup do
     if lookup[i] == value then return i end
@@ -468,7 +468,7 @@ local function configToStorage(value, lookup)
 end
 
 local function applyConfig()
-  -- Applies unit conversions and map zoom limits based on current settings
+  -- Derives labels, unit multipliers, and active zoom limits from persisted settings and writes them into mapStatus.conf.
   mapStatus.conf.horSpeedLabel = applyDefault(mapStatus.conf.horSpeedUnit, 1, {"m/s", "km/h", "mph", "kn"})
   mapStatus.conf.vertSpeedLabel = applyDefault(mapStatus.conf.vertSpeedUnit, 1, {"m/s", "ft/s", "ft/min"})
   mapStatus.conf.distUnitLabel = applyDefault(mapStatus.conf.distUnit, 1, {"m", "ft"})
@@ -493,7 +493,8 @@ local function applyConfig()
 end
 
 local function configure(widget)
-  -- Builds the widget settings menu
+  -- Builds the Ethos configuration form, reading current values from mapStatus.conf and writing user edits back into it.
+  if not widget then return end -- Safeguard: configuration callbacks may arrive before the widget fields exist.
   local line = form.addLine("Widget version")
   form.addStaticText(line, nil, "1.0.0 beta2")
 
@@ -527,7 +528,7 @@ local function configure(widget)
   line = form.addLine("GPS coordinates format")
   form.addChoiceField(line, form.getFieldSlots(line)[0], {{"DMS",1},{"Decimal",2}}, function() return mapStatus.conf.gpsFormat end, function(value) mapStatus.conf.gpsFormat = value end)
 
-  -- === Map Provider zuerst (wie im Original) ===
+  -- Provider selection drives which zoom controls are enabled below.
   line = form.addLine("Map provider")
   form.addChoiceField(line, form.getFieldSlots(line)[0], {{"GMapCatcher", 1}, {"Google", 2}}, function() return mapStatus.conf.mapProvider end,
     function(value)
@@ -544,7 +545,7 @@ local function configure(widget)
   line = form.addLine("Map type")
   form.addChoiceField(line, form.getFieldSlots(line)[0], {{"Satellite",1},{"Hybrid",2},{"Map",3},{"Terrain",4}}, function() return mapStatus.conf.mapTypeId end, function(value) mapStatus.conf.mapTypeId = value end)
 
-  -- === Zoom-Felder danach mit originaler Abblend-Logik ===
+  -- Provider-specific zoom fields stay in sync with the current provider selection.
   line = form.addLine("Google zoom")
   widget.googleZoomField = form.addNumberField(line, nil, 1, 20,
     function()
@@ -561,7 +562,7 @@ local function configure(widget)
       return mapStatus.conf.googleZoomMax
     end,
     function(value)
-      -- Enforce googleZoomMin <= googleZoomMax and clamp default into [min, max]
+      -- Keep the Google zoom range valid and clamp the default zoom back into that range.
       local min = mapStatus.conf.googleZoomMin or 1
       if value < min then
         value = min
@@ -587,7 +588,7 @@ local function configure(widget)
       return mapStatus.conf.googleZoomMin
     end,
     function(value)
-      -- Enforce googleZoomMin <= googleZoomMax and clamp default into [min, max]
+      -- Keep the Google zoom range valid and clamp the default zoom back into that range.
       local max = mapStatus.conf.googleZoomMax or 20
       if value > max then
         value = max
@@ -622,7 +623,7 @@ local function configure(widget)
       return mapStatus.conf.gmapZoomMax
     end,
     function(value)
-      -- Enforce optional gmapZoomMin <= gmapZoomMax and clamp default into [min, max]
+      -- Keep the GMapCatcher zoom range valid and clamp the default zoom back into that range.
       local min = mapStatus.conf.gmapZoomMin
       if min ~= nil and value < min then
         value = min
@@ -648,7 +649,7 @@ local function configure(widget)
       return mapStatus.conf.gmapZoomMin
     end,
     function(value)
-      -- Enforce gmapZoomMin <= gmapZoomDefault <= gmapZoomMax when min changes
+      -- Keep the GMapCatcher minimum, maximum, and default zoom values consistent.
       local max = mapStatus.conf.gmapZoomMax
       if max ~= nil and value > max then
         max = value
@@ -671,25 +672,25 @@ local function configure(widget)
   line = form.addLine("Enable map grid")
   form.addBooleanField(line, nil, function() return mapStatus.conf.enableMapGrid end, function(value) mapStatus.conf.enableMapGrid = value end)
 
-  -- === DEBUG LOGGER SWITCH ===
+  -- Debug logging is opt-in because writes go to the SD card during runtime.
   line = form.addLine("Enable debug log")
   form.addBooleanField(line, nil, 
     function() return mapStatus.conf.enableDebugLog end, 
     function(value) 
       mapStatus.conf.enableDebugLog = value
       
-      -- NEW: Nur ENABLED loggen (DISABLED ist nicht möglich, wie du gesagt hast)
+      -- Only log the transition to enabled because logging cannot record its own disabled state.
       if mapLibs and mapLibs.utils and value then
         mapLibs.utils.logDebug("SETTINGS", "=== DEBUG LOG ENABLED ===")
       end
-      -- END NEW
     end
   )
 
 end
 
 local function read(widget)
-  -- Reads all settings from storage when widget is loaded
+  if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
+  -- Loads persisted widget settings from storage into the widget instance and shared config table.
   widget.gpsSource = storageToConfig("gps", nil)
   mapStatus.conf.horSpeedUnit = storageToConfig("horSpeedUnit", 1)
   mapStatus.conf.vertSpeedUnit = storageToConfig("vertSpeedUnit",1)
@@ -715,7 +716,8 @@ local function read(widget)
 end
 
 local function write(widget)
-  -- Writes all settings to storage when widget is closed or changed
+  if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
+  -- Persists the current widget settings to storage, reapplies derived config values, and resets the active layout.
   storage.write("gps", widget.gpsSource)
   storage.write("horSpeedUnit", mapStatus.conf.horSpeedUnit)
   storage.write("vertSpeedUnit", mapStatus.conf.vertSpeedUnit)
@@ -742,21 +744,21 @@ local function write(widget)
 end
 
 local function sourceInit(source)
-  -- Initializes custom telemetry sources (HomeDistance, GroundSpeed, COG)
+  -- Seeds each exported Ethos source with formatting metadata from luaSourcesConfig before wakeup updates its value.
   source:value(mapStatus.luaSourcesConfig[source:name()][1])
   source:decimals(mapStatus.luaSourcesConfig[source:name()][2])
   source:unit(mapStatus.luaSourcesConfig[source:name()][3])
 end
 
 local function registerSources()
-  -- Registers custom telemetry sources for use in other widgets
+  -- Registers exported telemetry sources so other Ethos widgets can read values computed by this widget.
   system.registerSource({key="YM_HOME", name="HomeDistance", init=sourceInit, wakeup=sourceWakeup})
   system.registerSource({key="YM_GSPD", name="GroundSpeed", init=sourceInit, wakeup=sourceWakeup})
   system.registerSource({key="YM_COG", name="CourseOverGround", init=sourceInit, wakeup=sourceWakeup})
 end
 
 local function init()
-  -- Widget registration (called once at radio startup)
+  -- Registers the widget lifecycle callbacks and exported sources with Ethos during radio startup.
   system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
   registerSources()
 end

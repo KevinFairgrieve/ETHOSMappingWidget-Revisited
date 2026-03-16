@@ -26,42 +26,111 @@ local libs = nil
 local alwaysOn = system.getSource({category=CATEGORY_ALWAYS_ON, member=1, options=0})
 local alwaysOff = system.getSource({category=0, member=1, options=0})
 local sources = {}
--- NEW: Globaler Zähler für die Log-Datei (Performance)
-utils.debugLineCount = 0
--- END NEW
-
--- NEW: getTime() for the logger (was missing before)
-local function getTime()
-  return os.clock()*100
-end
--- END NEW
-
--- NEW: Debug Logger (Schritt 2)
-local debugFile = nil
+-- Debug logger state shared by rollover and write helpers.
 local debugLogPath = "/scripts/ethosmaps/debug.log"
 local maxLogLines = 5000
 local lastLogWrite = 0
+utils.debugLineCount = nil   -- Keeps lazy initialization active across restarts and debug toggles.
+local bitmaskCache = {}
 
--- NEW: Debug Line Count nur initialisieren, wenn Logging aktiviert ist
+local function getTime()
+  -- Converts Lua CPU time into centiseconds so logger timestamps share the widget timing base.
+  return os.clock()*100
+end
+
+-- Compacts the debug log file when it reaches its size limit by copying only the newest lines into a fresh file.
+-- Ethos file handles use read("*l") reliably here, so rollover avoids iterator helpers and writes the retained log back to disk.
+function utils.performRollover()
+  local tmpPath  = debugLogPath .. ".tmp"
+  local backupPath = debugLogPath .. ".bak"
+  
+  -- Count the current number of log lines before choosing how much history to keep.
+  local totalLines = 0
+  local fCount = io.open(debugLogPath, "r")
+  if fCount then
+    local line = fCount:read("*l")
+    while line do
+      totalLines = totalLines + 1
+      line = fCount:read("*l")
+    end
+    fCount:close()
+  end
+
+  -- Copy only the newest 70% of the configured log limit into the replacement file.
+  local keepCount = math.floor(maxLogLines * 0.7)  -- Example: keep 3500 lines when the limit is 5000.
+  local skipCount = totalLines - keepCount         -- Skip the oldest lines first.
+
+  local f  = io.open(debugLogPath, "r")
+  local f2 = io.open(tmpPath, "w")
+  
+  if f and f2 then
+    local lineIndex = 0
+    local line = f:read("*l")
+    while line do
+      lineIndex = lineIndex + 1
+      if lineIndex > skipCount then
+        f2:write(line .. "\n")
+      end
+      line = f:read("*l")
+    end
+    
+    f2:write("00:00:00.00 | SETTINGS | === DEBUG LOG ROLLED (kept last " .. keepCount .. " lines) ===\n")
+    
+    f:close()
+    f2:close()
+    
+    -- NEW: pcall-Schutz für Datei-Operationen (verhindert Absturz bei Rechte-/Pfad-Problemen)
+    pcall(function()
+      os.rename(debugLogPath, backupPath)
+      os.rename(tmpPath, debugLogPath)
+      os.remove(backupPath)
+    end)
+    
+    utils.debugLineCount = keepCount + 1
+    else
+    -- NEW: Immer alle geöffneten Handles schließen und tmp aufräumen (Copilot-Medium-Fix)
+    if f then f:close() end
+    if f2 then f2:close() end
+    os.remove(tmpPath)
+  end
+end
+
 local function initDebugLineCount()
+  -- Counts existing log lines on demand so logDebug can append efficiently without scanning the file every call.
   if not status.conf.enableDebugLog then 
-    utils.debugLineCount = 0
+    utils.debugLineCount = nil
     return 
   end
 
   local count = 0
   local f = io.open(debugLogPath, "r")
   if f then
-    for _ in f:lines() do count = count + 1 end
+    local line = f:read("*l")
+    while line do
+      count = count + 1
+      line = f:read("*l")
+    end
     f:close()
   end
   utils.debugLineCount = count
+
+  -- Trigger rollover immediately once the existing file is already at the limit.
+  if utils.debugLineCount >= maxLogLines then
+    pcall(utils.performRollover)
+  end
 end
--- END NEW
 
 function utils.logDebug(category, message)
-  -- Defensive guard + Throttling
-  if not status or not status.conf or not status.conf.enableDebugLog then return end
+  -- Appends a throttled debug record to the on-device log after reading the current logger state from status.conf.
+  if not status or not status.conf or not status.conf.enableDebugLog then 
+    utils.debugLineCount = nil   -- Safeguard: reset lazy state when logging is unavailable or disabled.
+    return 
+  end
+
+  -- Lazily count existing lines only on the first write after startup or a debug toggle.
+  if utils.debugLineCount == nil then
+    initDebugLineCount()
+  end
 
   local now = getTime()
   if now - lastLogWrite < 10 then return end
@@ -84,42 +153,14 @@ function utils.logDebug(category, message)
 
   utils.debugLineCount = (utils.debugLineCount or 0) + 1
 
-  -- === STREAMING ROLLOVER – 30% der ältesten Zeilen löschen ===
+  -- Delegate file compaction to the shared rollover helper once the limit is reached.
   if utils.debugLineCount >= maxLogLines then
-    local tmpPath  = debugLogPath .. ".tmp"
-    local backupPath = debugLogPath .. ".bak"
-    
-    local f  = io.open(debugLogPath, "r")
-    local f2 = io.open(tmpPath, "w")
-    
-    if f and f2 then
-      local lineIndex = 0
-      local deleteCount = math.floor(maxLogLines * 0.3)
-      
-      for line in f:lines() do
-        lineIndex = lineIndex + 1
-        if lineIndex > deleteCount then
-          f2:write(line .. "\n")
-        end
-      end
-      
-      f2:write("00:00:00.00 | SETTINGS | === DEBUG LOG ROLLED (" .. deleteCount .. " oldest lines removed) ===\n")
-      
-      f:close()
-      f2:close()
-      
-      os.rename(debugLogPath, backupPath)
-      os.rename(tmpPath, debugLogPath)
-      os.remove(backupPath)
-      
-      utils.debugLineCount = maxLogLines - deleteCount + 1
-    end
+    pcall(utils.performRollover)
   end
-  -- === ENDE STREAMING ROLLOVER ===
 end
 
 function utils.getSourceValue(name)
-  -- Returns value of a telemetry source by name (caches source handle for performance)
+  -- Resolves a named Ethos source, caches the handle locally, and returns its current numeric value.
   local src = sources[name]
   if src == nil then
     src = system.getSource(name)
@@ -129,12 +170,12 @@ function utils.getSourceValue(name)
 end
 
 function utils.getRSSI()
-  -- Returns current RSSI value from the radio
+  -- Reads the current RSSI value through the shared source cache and returns it to telemetry callers.
   return utils.getSourceValue("RSSI")
 end
 
 function utils.getBitmask(low, high)
-  -- Returns bitmask for extracting a range of bits (cached for performance)
+  -- Builds or reuses a cached bitmask for bit extraction helpers and returns it to callers.
   local key = tostring(low)..tostring(high)
   local res = bitmaskCache[key]
   if res == nil then
@@ -145,16 +186,16 @@ function utils.getBitmask(low, high)
 end
 
 function utils.bitExtract(value, start, len)
-  -- Extracts a range of bits from a value using bitmask
+  -- Extracts a bit range from a numeric value and returns the normalized result to telemetry decoders.
   return (value & utils.getBitmask(start,start+len-1)) >> start
 end
 
 function utils.processTelemetry(primID, data, now)
-  -- Placeholder for processing raw telemetry packets (not used in current version)
+  -- Placeholder for raw telemetry decoding; reserved for future packet parsing paths.
 end
 
 function utils.playTime(seconds)
-  -- Plays elapsed time as voice announcement (hours/minutes/seconds)
+  -- Converts an elapsed time value into Ethos voice announcements and routes the segments to system.playNumber().
   if seconds > 3600 then
     system.playNumber(seconds / 3600, UNIT_HOUR)
     system.playNumber((seconds % 3600) / 60, UNIT_MINUTE)
@@ -166,7 +207,7 @@ function utils.playTime(seconds)
 end
 
 function utils.haversine(lat1, lon1, lat2, lon2)
-  -- Calculates great-circle distance between two GPS coordinates in meters
+  -- Converts two GPS coordinates into a great-circle distance in meters for speed, trail, and home calculations.
   local lat1 = lat1 * math.pi / 180
   local lon1 = lon1 * math.pi / 180
   local lat2 = lat2 * math.pi / 180
@@ -182,7 +223,7 @@ function utils.haversine(lat1, lon1, lat2, lon2)
 end
 
 function utils.getAngleFromLatLon(lat1, lon1, lat2, lon2)
-  -- Calculates bearing angle (0-360°) from point 1 to point 2
+  -- Calculates the bearing from one GPS coordinate to another and returns the heading in degrees.
   local la1 = math.rad(lat1)
   local lo1 = math.rad(lon1)
   local la2 = math.rad(lat2)
@@ -192,17 +233,17 @@ function utils.getAngleFromLatLon(lat1, lon1, lat2, lon2)
   local x = math.cos(la1)*math.sin(la2) - math.sin(la1)*math.cos(la2)*math.cos(lo2-lo1);
   local a = math.atan(y, x);
 
-  return (a*180/math.pi + 360) % 360 -- in degrees
+  return (a*180/math.pi + 360) % 360 -- Returned in degrees.
 end
 
 function utils.getMaxValue(value,idx)
-  -- Returns max value seen so far (used for min/max display)
+  -- Updates the tracked maximum for a metric and returns either the live or max value based on display mode.
   status.minmaxValues[idx] = math.max(value,status.minmaxValues[idx])
   return status.showMinMaxValues == true and status.minmaxValues[idx] or value
 end
 
 function utils.updateCog()
-  -- Updates Course Over Ground (COG) when GPS position changes
+  -- Derives course over ground from successive GPS samples and writes the result back into status.telemetry.cog.
   if status.lastLat == nil then
     status.lastLat = status.telemetry.lat
   end
@@ -214,20 +255,20 @@ function utils.updateCog()
     if cog ~= nil and status.telemetry.groundSpeed > 1 then
       status.telemetry.cog = cog
     end
-    -- update last GPS coords
+    -- Store the latest coordinates so the next call can derive movement direction from fresh samples.
     status.lastLat = status.telemetry.lat
     status.lastLon = status.telemetry.lon
   end
 end
 
 function utils.calcMinValue(value,min)
-  -- Returns the smaller of two values (used for minimum tracking)
+  -- Returns the smaller of the current and stored values for minimum tracking widgets.
   return min == 0 and value or math.min(value,min)
 end
 
--- returns the actual minimun only if both are > 0
+-- Returns the actual minimum only when both values are non-zero.
 function utils.getNonZeroMin(v1,v2)
-  -- Returns the smaller non-zero value of two numbers
+  -- Chooses the smaller non-zero value and passes through the other value when one side is zero.
   return v1 == 0 and v2 or ( v2 == 0 and v1 or math.min(v1,v2))
 end
 
@@ -242,19 +283,20 @@ function utils.getLatLonFromAngleAndDistance(angle, distance)
   la2 =  asin(sin la1 * cos Ad  + cos la1 * sin Ad * cos θ), and
   lo2 = lo1 + atan(sin θ * sin Ad * cos la1 , cos Ad – sin la1 * sin la2)
 --]]
+  -- Projects a point away from the current aircraft position using bearing and distance, then returns the estimated GPS coordinate.
   if status.telemetry.lat == nil or status.telemetry.lon == nil then
-    return nil,nil
+    return nil,nil -- Safeguard: projection requires a valid current GPS position.
   end
   local lat1 = math.rad(status.telemetry.lat)
   local lon1 = math.rad(status.telemetry.lon)
-  local Ad = distance/(6371000) --meters
+  local Ad = distance/(6371000) -- Angular distance in radians for Earth-radius based projection.
   local lat2 = math.asin( math.sin(lat1) * math.cos(Ad) + math.cos(lat1) * math.sin(Ad) * math.cos( math.rad(angle)) )
   local lon2 = lon1 + math.atan( math.sin( math.rad(angle) ) * math.sin(Ad) * math.cos(lat1) , math.cos(Ad) - math.sin(lat1) * math.sin(lat2))
   return math.deg(lat2), math.deg(lon2)
 end
 
 function utils.decToDMS(dec,lat)
-  -- Converts decimal degrees to DMS format (short version)
+  -- Converts decimal degrees into a compact DMS string for overlay text and telemetry labels.
   local D = math.floor(math.abs(dec))
   local M = (math.abs(dec) - D)*60
   local S = (math.abs((math.abs(dec) - D)*60) - M)*60
@@ -262,7 +304,7 @@ function utils.decToDMS(dec,lat)
 end
 
 function utils.decToDMSFull(dec,lat)
-  -- Converts decimal degrees to full DMS format with minutes and seconds
+  -- Converts decimal degrees into a full DMS string for detailed coordinate displays.
   local D = math.floor(math.abs(dec))
   local M = math.floor((math.abs(dec) - D)*60)
   local S = (math.abs((math.abs(dec) - D)*60) - M)*60
@@ -270,14 +312,14 @@ function utils.decToDMSFull(dec,lat)
 end
 
 function utils.resetTimer()
-  -- Resets the Yaapu flight timer
+  -- Resets the shared Yaapu model timer by driving its active and reset conditions through Ethos timer APIs.
   local timer = model.getTimer("Yaapu")
   timer:activeCondition( alwaysOff )
   timer:resetCondition( alwaysOn )
 end
 
 function utils.startTimer()
-  -- Starts the Yaapu flight timer
+  -- Starts the shared Yaapu model timer and stores the local start timestamp for elapsed-time features.
   status.lastTimerStart = getTime()/100
   local timer = model.getTimer("Yaapu")
   timer:activeCondition( alwaysOn )
@@ -285,7 +327,7 @@ function utils.startTimer()
 end
 
 function utils.stopTimer()
-  -- Stops the Yaapu flight timer
+  -- Stops the shared Yaapu model timer and clears the cached local start timestamp.
   status.lastTimerStart = 0
   local timer = model.getTimer("Yaapu")
   timer:activeCondition( alwaysOff )
@@ -293,7 +335,7 @@ function utils.stopTimer()
 end
 
 function utils.telemetryEnabled(widget)
-  -- Returns true if telemetry data is currently being received
+  -- Uses RSSI as the live telemetry heartbeat and returns whether the widget should consider telemetry available.
   if utils.getRSSI() == 0 then
     status.noTelemetryData = 1
   end
@@ -301,7 +343,7 @@ function utils.telemetryEnabled(widget)
 end
 
 function utils.playSound(soundFile, skipHaptic)
-  -- Plays a sound file and optional haptic feedback
+  -- Triggers optional haptic feedback, resets backlight timeout, and plays a localized sound file from the SD card.
   if status.conf.enableHaptic and skipHaptic == nil then
     system.playHaptic(15,0)
   end
@@ -313,11 +355,11 @@ function utils.playSound(soundFile, skipHaptic)
 end
 
 function utils.init(param_status, param_libs)
+  -- Stores shared status/library references for utility helpers and primes the debug logger state when enabled.
   status = param_status
   libs = param_libs
-  -- NEW: Nur zählen, wenn Debugging wirklich eingeschaltet ist
+  -- Initialize line counting only when debug logging is currently enabled.
   initDebugLineCount()
-  -- END NEW
   return utils
 end
 

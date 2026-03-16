@@ -19,7 +19,7 @@
 
 
 local function getTime()
-  -- Returns current time in centiseconds for timing and throttling
+  -- Converts Lua CPU time into centiseconds so map throttling uses the same timing base as the widget.
   return os.clock()*100
 end
 
@@ -28,20 +28,19 @@ local mapLib = {}
 local status = nil
 local libs = nil
 
--- MAP properties
--- Global map drawing constants and state variables
+-- Global map geometry constants and runtime state shared across draw calls.
 local MAP_X = 0
 local MAP_Y = 0
 local DIST_SAMPLES = 10
 
--- Map support state
+-- Cached map support state for tiles, screen coordinates, trail history, and redraw throttling.
 local posUpdated = false
 local myScreenX, myScreenY
 local homeScreenX, homeScreenY
 local estimatedHomeScreenX, estimatedHomeScreenY
 local tile_x, tile_y, offset_x, offset_y
 local tiles = {}
-local tiles_path_to_idx = {} -- path to index cache
+local tiles_path_to_idx = {} -- Maps tile file paths back to their active slot in the visible tile grid.
 local mapBitmapByPath = {}
 local nomap = nil
 local world_tiles
@@ -100,12 +99,12 @@ local lastTrailUpdate = getTime()
 local TRAIL_UPDATE_INTERVAL = 50
 
 function mapLib.clip(n, min, max)
-  -- Clamps a value between min and max
+  -- Constrains a numeric value to a valid range before projection and tile math use it.
   return math.min(math.max(n, min), max)
 end
 
 function mapLib.tiles_on_level(level)
-  -- Returns number of tiles on one axis for given zoom level
+  -- Converts a zoom level into the number of tiles on one map axis for the active provider.
   if status.conf.mapProvider == 1 then
     return 2^(17-level)
   else
@@ -117,7 +116,7 @@ end
   total tiles on the web mercator projection = 2^zoom*2^zoom
 --]]
 function mapLib.get_tile_matrix_size_pixel(level)
-  -- Returns total pixel size of the map at given zoom level
+  -- Converts a zoom level into the full Web Mercator pixel dimensions for projection math.
   local size = 2^level * TILES_SIZE
   return size, size
 end
@@ -127,7 +126,7 @@ end
   https://github.com/judero01col/GMap.NET
 --]]
 function mapLib.google_coord_to_tiles(lat, lng, level)
-  -- Converts GPS coordinates to tile coordinates + pixel offsets (Google Mercator)
+  -- Projects GPS coordinates into Google tile indexes and pixel offsets for the current zoom level.
   lat = mapLib.clip(lat, MinLatitude, MaxLatitude)
   lng = mapLib.clip(lng, MinLongitude, MaxLongitude)
 
@@ -137,15 +136,15 @@ function mapLib.google_coord_to_tiles(lat, lng, level)
 
   local mapSizeX, mapSizeY = mapLib.get_tile_matrix_size_pixel(level)
 
-    -- absolute pixel coordinates on the mercator projection at this zoom level
+    -- Convert the normalized Mercator position into absolute pixel coordinates for this zoom level.
   local rx = mapLib.clip(x * mapSizeX + 0.5, 0, mapSizeX - 1)
   local ry = mapLib.clip(y * mapSizeY + 0.5, 0, mapSizeY - 1)
-    -- return tile_x, tile_y, offset_x, offset_y
+    -- Return tile indexes plus the pixel offset inside the resolved tile.
   return math.floor(rx/TILES_SIZE), math.floor(ry/TILES_SIZE), math.floor(rx%TILES_SIZE), math.floor(ry%TILES_SIZE)
 end
 
 function mapLib.gmapcatcher_coord_to_tiles(lat, lon, level)
-  -- Converts GPS coordinates to tile coordinates + pixel offsets (GMapCatcher)
+  -- Projects GPS coordinates into GMapCatcher tile indexes and pixel offsets for the current zoom level.
   local x = world_tiles / 360 * (lon + 180)
   local e = math.sin(lat * (1/180 * math.pi))
   local y = world_tiles / 2 + 0.5 * math.log((1+e)/(1-e)) * -1 * tiles_per_radian
@@ -153,17 +152,17 @@ function mapLib.gmapcatcher_coord_to_tiles(lat, lon, level)
 end
 
 function mapLib.google_tiles_to_path(tile_x, tile_y, level)
-  -- Builds file path for Google map tiles
+  -- Builds the relative SD-card path for a Google map tile from tile coordinates and zoom.
   return string.format("/%d/%.0f/s_%.0f.jpg", level, tile_y, tile_x)
 end
 
 function mapLib.gmapcatcher_tiles_to_path(tile_x, tile_y, level)
-  -- Builds file path for GMapCatcher map tiles
+  -- Builds the relative SD-card path for a GMapCatcher tile from tile coordinates and zoom.
   return string.format("/%d/%.0f/%.0f/%.0f/s_%.0f.png", level, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
 end
 
 function mapLib.getTileBitmap(tilePath)
-  -- Loads tile bitmap from SD card (with caching and nomap fallback)
+  -- Loads a tile bitmap from the SD card, caches it in memory, and falls back to the shared no-map bitmap when missing.
   local fullPath = "/bitmaps/ethosmaps/maps/" .. status.conf.mapType .. tilePath
   
   if mapBitmapByPath[tilePath] ~= nil then
@@ -185,7 +184,7 @@ function mapLib.getTileBitmap(tilePath)
 end
 
 function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level)
-  -- Loads and centers map tiles around current position (with throttling)
+  -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
   local now = getTime()
 
   if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
@@ -238,7 +237,7 @@ end
 
 
 function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
-  -- Draws all loaded tiles and optional grid
+  -- Draws the active tile cache into the map viewport and overlays the optional grid when enabled.
   for x=1,TILES_X do
     for y=1,TILES_Y do
       local idx = width*(y-1)+x
@@ -261,7 +260,7 @@ function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
 end
 
 function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offset_y, level)
-  -- Converts tile coordinates to screen pixel position
+  -- Resolves tile-local coordinates back into screen coordinates using the current visible tile cache.
   local tile_path = mapLib.tiles_to_path(tile_x, tile_y, level)
   local tcache = tiles_path_to_idx[tile_path]
   if tcache ~= nil then
@@ -273,11 +272,11 @@ function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offse
 end
 
 function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
-  -- Main map drawing function (tiles + UAV arrow + home + trail + zoom buttons)
+  -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   if mapLib.tiles_to_path == nil or mapLib.coord_to_tiles == nil then
-    return
+    return -- Safeguard: projection helpers must exist before any tile lookup or overlay math runs.
   end
 
   if #tiles == 0 or tiles[1] == nil then
@@ -425,9 +424,9 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
 end
 
 function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
-  -- Initializes map projection parameters when zoom or size changes
+  -- Reconfigures projection helpers, tile caches, and scale metadata whenever map geometry or zoom changes.
   if level == nil or tiles_x == nil or tiles_y == nil or x == nil or y == nil then
-    return
+    return -- Safeguard: map initialization requires complete viewport and zoom information.
   end
 
   MAP_X = x
@@ -467,14 +466,14 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 end
 
 function mapLib.init(param_status, param_libs)
-  -- Initializes the map library and stores references to status and libs
+  -- Stores shared state references so map helpers can read telemetry/config data and call sibling libraries.
   status = param_status
   libs = param_libs
   return mapLib
 end
 
 function mapLib.calculateScale(level)
-  -- Calculates length and label of the scale bar for current zoom level
+  -- Converts the current zoom level into a scale-bar length and label for layout overlays.
   local scaleLen, scaleLabel = 0, ""
 
   if level == nil then
@@ -496,7 +495,7 @@ function mapLib.calculateScale(level)
 end
 
 function mapLib.setNeedsHeavyUpdate()
-  -- Forces a full tile reload on next draw
+  -- Flags the next draw cycle to rebuild the visible tile set instead of relying on throttled reuse.
   mapNeedsHeavyUpdate = true
 end
 
