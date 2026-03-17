@@ -570,7 +570,7 @@ local function configure(widget)
   -- Builds the Ethos configuration form, reading current values from mapStatus.conf and writing user edits back into it.
   if not widget then return end -- Safeguard: configuration callbacks may arrive before the widget fields exist.
   local line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0 beta2")
+  form.addStaticText(line, nil, "1.0.0 beta3")
 
   line = form.addLine("Link quality source")
   form.addSourceField(line, nil, function() return mapStatus.conf.linkQualitySource end, function(value) mapStatus.conf.linkQualitySource = value end)
