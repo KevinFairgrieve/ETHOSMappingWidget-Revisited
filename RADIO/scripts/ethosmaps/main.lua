@@ -152,6 +152,10 @@ local mapStatus = {
   widgetHeight = 480,
   scaleX = 1.0,
   scaleY = 1.0,
+  compactWidthThreshold = 450,
+  tinyWidthThreshold = 350,
+  tinyHeightThreshold = 190,
+  verticalMedium = false,
   sessionLogged = false,
 }
 
@@ -205,9 +209,8 @@ local function checkSize(widget)
   mapStatus.widgetHeight = h
   mapStatus.scaleX = w / 800
   mapStatus.scaleY = h / 480
-  text_w, text_h = lcd.getTextSize("")
-  lcd.font(FONT_STD)
-  lcd.drawText(w/2, (h - text_h)/2, w.." x "..h.." (scale "..string.format("%.2f",mapStatus.scaleX).."x"..string.format("%.2f",mapStatus.scaleY)..")", CENTERED)
+  mapStatus.verticalMedium = w < (mapStatus.compactWidthThreshold or 450)
+
   return true
 end
 
@@ -368,7 +371,9 @@ local function event(widget, category, value, x, y)
     local scaleFactor = 0.15 + 0.8 * mapStatus.scaleX
     local btnSize = math.floor(52 * scaleFactor)
     local btnX = 12 * mapStatus.scaleX
-    local ultraTiny = (mapStatus.widgetWidth < 350) and (mapStatus.widgetHeight < 200)
+    local ultraTiny =
+      (mapStatus.widgetWidth < (mapStatus.tinyWidthThreshold or 350)) and
+      (mapStatus.widgetHeight < (mapStatus.tinyHeightThreshold or 190))
 
     local btnYPlus, btnYMinus
     if ultraTiny then
