@@ -79,7 +79,28 @@ function panel.draw(widget)
     status.mapLastZoom = status.mapZoomLevel
   end
 
+  -- Draw the map viewport for the current layout.
   libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
+
+  -- Draw the dedicated left-side zoom buttons.
+  local scaleFactor = 0.15 + 0.8 * status.scaleX
+  local btnSize     = math.floor(52 * scaleFactor)
+  local btnX        = 12 * status.scaleX
+
+  -- In ultra-tiny mode, anchor buttons to top and bottom edges with symmetric margins.
+  local btnYPlus, btnYMinus
+  if ultraTiny then
+    local edgeMargin = btnX
+    btnYPlus  = edgeMargin
+    btnYMinus = status.widgetHeight - btnSize - edgeMargin
+  else
+    btnYPlus  = 0.27 * status.widgetHeight
+    btnYMinus = status.widgetHeight - 0.27 * status.widgetHeight - btnSize
+  end
+
+  -- Draw the actual zoom buttons.
+  libs.drawLib.drawBitmap(btnX, btnYPlus, "zoom_plus", btnSize, btnSize)
+  libs.drawLib.drawBitmap(btnX, btnYMinus, "zoom_minus", btnSize, btnSize)
 
   -- Draw the top bar and text overlays only when the layout has enough vertical space.
   if not (horizontalTiny or verticalTiny) then
@@ -164,22 +185,16 @@ function panel.draw(widget)
   if status.telemetry.lat ~= nil and (status.telemetry.homeLat == nil or status.telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
     local font = (w < 450) and FONT_S or FONT_L
+    lcd.font(font)
     local tw, th = lcd.getTextSize(warningText)
 
-    local basePadding = (w < 450) and 45*sx or 120*sx
-    local maxBoxW = math.floor(w * 0.85)
-    local boxW = math.min(tw + basePadding, maxBoxW)
-    local boxH = th + 18*sy
+    local padX = math.max(8, math.floor(14 * sx))
+    local padY = math.max(4, math.floor(8 * sy))
+    local boxW = tw + 2 * padX
+    local boxH = th + 2 * padY
     local boxX = math.floor((w - boxW) / 2)
 
-    local boxY
-    if horizontalTiny then
-      boxY = mapY + 40*sy
-    elseif w < 450 then
-      boxY = h - bottomH - boxH - 50*sy
-    else
-      boxY = h - bottomH - boxH - 5*sy
-    end
+    local boxY = math.floor((h - boxH) / 2)
 
     lcd.color(lcd.RGB(0, 0, 0, 0.45))
     lcd.drawFilledRectangle(boxX, boxY, boxW, boxH)
@@ -188,10 +203,10 @@ function panel.draw(widget)
     lcd.drawRectangle(boxX, boxY, boxW, boxH, 2)
 
     lcd.color(status.colors.yellow)
-    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2 - 3*sy, warningText, font, status.colors.yellow, CENTERED, true)
+    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2, warningText, font, status.colors.yellow, CENTERED, true)
   end
 
-  -- Draw the map scale bar when the viewport is large enough to keep it readable.
+    -- Draw the map scale bar when the viewport is large enough to keep it readable.
   if not ultraTiny then
     local scaleLen, scaleLabel = libs.mapLib.calculateScale(status.mapZoomLevel)
     if scaleLen ~= 0 then
@@ -210,6 +225,20 @@ function panel.draw(widget)
       lcd.drawText(12*sx, scaleY_label, scaleLabel)
     end
   end
+
+  local scaleFactor = 0.15 + 0.8 * status.scaleX
+  local btnSize = math.floor(52 * scaleFactor)
+  local btnX = 12 * status.scaleX
+  local btnYPlus, btnYMinus
+  if ultraTiny then
+    local edgeMargin = btnX
+    btnYPlus = edgeMargin
+    btnYMinus = status.widgetHeight - btnSize - edgeMargin
+  else
+    btnYPlus = 0.27 * status.widgetHeight
+    btnYMinus = status.widgetHeight - 0.27 * status.widgetHeight - btnSize
+  end
+
 end
 
 function panel.background(widget)

@@ -196,13 +196,19 @@ end
 
 function drawLib.drawBitmap(x, y, bitmap, w, h)
   -- Draws a named bitmap by resolving it through the local bitmap cache first.
-  lcd.drawBitmap(x, y, drawLib.getBitmap(bitmap), w, h)
+  local bmp = drawLib.getBitmap(bitmap)
+  if bmp ~= nil then
+    lcd.drawBitmap(x, y, bmp, w, h)
+  end
 end
 
 function drawLib.drawBlinkBitmap(x, y, bitmap, w, h)
   -- Draws a bitmap only on active blink phases so warning icons can flash without state duplication.
   if status.blinkon == true then
-    lcd.drawBitmap(x, y, drawLib.getBitmap(bitmap), w, h)
+    local bmp = drawLib.getBitmap(bitmap)
+    if bmp ~= nil then
+      lcd.drawBitmap(x, y, bmp, w, h)
+    end
   end
 end
 

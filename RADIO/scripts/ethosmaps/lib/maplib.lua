@@ -238,6 +238,7 @@ end
 
 function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
   -- Draws the active tile cache into the map viewport and overlays the optional grid when enabled.
+
   for x=1,TILES_X do
     for y=1,TILES_Y do
       local idx = width*(y-1)+x
@@ -259,6 +260,7 @@ function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
   end
 end
 
+
 function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offset_y, level)
   -- Resolves tile-local coordinates back into screen coordinates using the current visible tile cache.
   local tile_path = mapLib.tiles_to_path(tile_x, tile_y, level)
@@ -275,8 +277,24 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
+
+  -- On-screen status output for projection helper initialization.
+  lcd.color(lcd.RGB(0, 255, 255))   -- Cyan
+  lcd.font(FONT_L)
   if mapLib.tiles_to_path == nil or mapLib.coord_to_tiles == nil then
-    return -- Safeguard: projection helpers must exist before any tile lookup or overlay math runs.
+    lcd.drawText(x + 20, y + 20, "EARLY RETURN - tiles_to_path NIL!")
+    return
+  else
+    lcd.drawText(x + 20, y + 20, "setupMaps OK - proceeding...")
+  end
+
+  if #tiles == 0 or tiles[1] == nil then
+    if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
+    else
+      tile_x, tile_y, offset_x, offset_y = 0, 0, 0, 0
+    end
+    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
   end
 
   if #tiles == 0 or tiles[1] == nil then
@@ -405,29 +423,53 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     lcd.drawText(x + w/2, y + h/2 - 25*status.scaleY, string.format("ZOOM %d", level), CENTERED)
     if getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
   end
-
-  local btnSize = 52 * status.scaleX
-  local btnX     = x + w - btnSize - 18
-  local btnYPlus  = y + 68
-  local btnYMinus = y + h - btnSize - 88
-  lcd.color(lcd.RGB(0,0,0,0.42))
-  lcd.drawFilledRectangle(btnX, btnYPlus, btnSize, btnSize)
-  lcd.drawFilledRectangle(btnX, btnYMinus, btnSize, btnSize)
-  lcd.color(WHITE)
-  lcd.pen(SOLID)
-  local thick = 6 * status.scaleX
-  lcd.drawLine(btnX + 10, btnYPlus + btnSize/2, btnX + btnSize - 10, btnYPlus + btnSize/2, thick)
-  lcd.drawLine(btnX + btnSize/2, btnYPlus + 10, btnX + btnSize/2, btnYPlus + btnSize - 10, thick)
-  lcd.drawLine(btnX + 10, btnYMinus + btnSize/2, btnX + btnSize - 10, btnYMinus + btnSize/2, thick)
   
   lcd.setClipping()
 end
 
 function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   -- Reconfigures projection helpers, tile caches, and scale metadata whenever map geometry or zoom changes.
+
+  -- Normalize unset provider values to Google before selecting projection helpers.
+  if status.conf.mapProvider == 0 then
+    status.conf.mapProvider = 2   -- Keep provider defaults consistent with main.lua.
+  end
+
   if level == nil or tiles_x == nil or tiles_y == nil or x == nil or y == nil then
     return -- Safeguard: map initialization requires complete viewport and zoom information.
   end
+
+  -- Force first-run initialization (lastZoomLevel = -99)
+  if level ~= lastZoomLevel or lastZoomLevel == -99 then
+    zoomUpdateTimer = getTime()
+    zoomUpdate = true
+
+    libs.resetLib.clearTable(tiles)
+    libs.resetLib.clearTable(mapBitmapByPath)
+    libs.resetLib.clearTable(posHistory)
+
+    sample = 0
+    sampleCount = 0
+
+    world_tiles = mapLib.tiles_on_level(level)
+    tiles_per_radian = world_tiles / (2 * math.pi)
+
+    if status.conf.mapProvider == 1 then
+      mapLib.coord_to_tiles = mapLib.gmapcatcher_coord_to_tiles
+      mapLib.tiles_to_path = mapLib.gmapcatcher_tiles_to_path
+      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
+      scaleLabel = string.format("%.0f%s",(status.conf.distUnitScale==1 and 1 or 3)*50*2^(level+2),status.conf.distUnitLabel)
+      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(level+2)/tile_dim)*TILES_SIZE
+    elseif status.conf.mapProvider == 2 then
+      mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
+      mapLib.tiles_to_path = mapLib.google_tiles_to_path
+      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
+      scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
+      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
+    end
+    lastZoomLevel = level
+  end
+  -- ========================================================
 
   MAP_X = x
   MAP_Y = y

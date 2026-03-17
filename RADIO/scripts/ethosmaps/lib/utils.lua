@@ -30,6 +30,10 @@ local sources = {}
 local debugLogPath = "/scripts/ethosmaps/debug.log"
 local maxLogLines = 5000
 local lastLogWrite = 0
+local logFlushInterval = 100   -- Flush buffered log lines every 1 second (centiseconds).
+local maxBufferedLines = 40
+local lastLogFlush = 0
+local logBuffer = {}
 utils.debugLineCount = nil   -- Keeps lazy initialization active across restarts and debug toggles.
 local bitmaskCache = {}
 
@@ -79,7 +83,7 @@ function utils.performRollover()
     f:close()
     f2:close()
     
-    -- NEW: pcall-Schutz für Datei-Operationen (verhindert Absturz bei Rechte-/Pfad-Problemen)
+    -- Protect file operations with pcall to avoid runtime aborts on rename/remove failures.
     pcall(function()
       os.rename(debugLogPath, backupPath)
       os.rename(tmpPath, debugLogPath)
@@ -88,7 +92,7 @@ function utils.performRollover()
     
     utils.debugLineCount = keepCount + 1
     else
-    -- NEW: Immer alle geöffneten Handles schließen und tmp aufräumen (Copilot-Medium-Fix)
+    -- Ensure all opened handles are closed and the temporary file is cleaned up on failure.
     if f then f:close() end
     if f2 then f2:close() end
     os.remove(tmpPath)
@@ -120,9 +124,10 @@ local function initDebugLineCount()
   end
 end
 
-function utils.logDebug(category, message)
-  -- Appends a throttled debug record to the on-device log after reading the current logger state from status.conf.
+function utils.logDebug(category, message, force)
+  -- Buffers debug records in RAM and writes them to disk in batches to reduce SD-card I/O.
   if not status or not status.conf or not status.conf.enableDebugLog then 
+    logBuffer = {}
     utils.debugLineCount = nil   -- Safeguard: reset lazy state when logging is unavailable or disabled.
     return 
   end
@@ -133,7 +138,7 @@ function utils.logDebug(category, message)
   end
 
   local now = getTime()
-  if now - lastLogWrite < 10 then return end
+  if not force and now - lastLogWrite < 10 then return end
   lastLogWrite = now
 
   local timestamp = string.format("%02d:%02d:%02d.%02d",
@@ -145,18 +150,85 @@ function utils.logDebug(category, message)
   local cat = string.format("%-8s", category)
   local line = timestamp .. " | " .. cat .. " | " .. tostring(message) .. "\n"
 
+  local function writeLines(lines)
+    if #lines == 0 then
+      return
+    end
+    local f = io.open(debugLogPath, "a")
+    if f then
+      for i = 1, #lines do
+        f:write(lines[i])
+      end
+      f:close()
+      utils.debugLineCount = (utils.debugLineCount or 0) + #lines
+      if utils.debugLineCount >= maxLogLines then
+        pcall(utils.performRollover)
+      end
+    end
+  end
+
+  local function flushBuffer(forceFlush)
+    if #logBuffer == 0 then
+      return
+    end
+    if not forceFlush and (now - lastLogFlush) < logFlushInterval then
+      return
+    end
+    local pending = logBuffer
+    logBuffer = {}
+    writeLines(pending)
+    lastLogFlush = now
+  end
+
+  local immediate = force == true or category == "ERROR" or category == "CRASH" or category == "SETTINGS"
+  if immediate then
+    flushBuffer(true)
+    writeLines({line})
+    lastLogFlush = now
+  else
+    table.insert(logBuffer, line)
+    if #logBuffer >= maxBufferedLines then
+      flushBuffer(true)
+    else
+      flushBuffer(false)
+    end
+  end
+end
+
+function utils.flushLogs(force)
+  -- Flushes buffered log lines when the interval elapsed (or immediately when forced).
+  if not status or not status.conf or not status.conf.enableDebugLog then
+    logBuffer = {}
+    return
+  end
+
+  if #logBuffer == 0 then
+    return
+  end
+
+  if utils.debugLineCount == nil then
+    initDebugLineCount()
+  end
+
+  local now = getTime()
+  if not force and (now - lastLogFlush) < logFlushInterval then
+    return
+  end
+
   local f = io.open(debugLogPath, "a")
   if f then
-    f:write(line)
+    for i = 1, #logBuffer do
+      f:write(logBuffer[i])
+    end
     f:close()
+    utils.debugLineCount = (utils.debugLineCount or 0) + #logBuffer
+    if utils.debugLineCount >= maxLogLines then
+      pcall(utils.performRollover)
+    end
   end
 
-  utils.debugLineCount = (utils.debugLineCount or 0) + 1
-
-  -- Delegate file compaction to the shared rollover helper once the limit is reached.
-  if utils.debugLineCount >= maxLogLines then
-    pcall(utils.performRollover)
-  end
+  logBuffer = {}
+  lastLogFlush = now
 end
 
 function utils.getSourceValue(name)
