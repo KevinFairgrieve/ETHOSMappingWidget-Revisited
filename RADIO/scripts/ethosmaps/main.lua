@@ -102,6 +102,7 @@ local mapStatus = {
   mapLastZoom = 0,
   lastLoggedLat = 0,
   lastLoggedLon = 0,
+  consumeZoomRelease = false,
 
   avgSpeed = {
     lastSampleTime = nil,
@@ -151,6 +152,10 @@ local mapStatus = {
   widgetHeight = 480,
   scaleX = 1.0,
   scaleY = 1.0,
+  compactWidthThreshold = 450,
+  tinyWidthThreshold = 350,
+  tinyHeightThreshold = 190,
+  verticalMedium = false,
   sessionLogged = false,
 }
 
@@ -204,9 +209,8 @@ local function checkSize(widget)
   mapStatus.widgetHeight = h
   mapStatus.scaleX = w / 800
   mapStatus.scaleY = h / 480
-  text_w, text_h = lcd.getTextSize("")
-  lcd.font(FONT_STD)
-  lcd.drawText(w/2, (h - text_h)/2, w.." x "..h.." (scale "..string.format("%.2f",mapStatus.scaleX).."x"..string.format("%.2f",mapStatus.scaleY)..")", CENTERED)
+  mapStatus.verticalMedium = w < (mapStatus.compactWidthThreshold or 450)
+
   return true
 end
 
@@ -351,22 +355,88 @@ local function event(widget, category, value, x, y)
   -- Handles touch input from Ethos, updates zoom state, and consumes handled events before they reach other UI code.
   local kill = false
 
-  -- Logs raw touch data when debug logging is active.
-  if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and category == EVT_TOUCH then -- Safeguard: only log once settings and logger references exist.
-    mapLibs.utils.logDebug("TOUCH", string.format("value=%d x=%d y=%d", value, x, y))
-  end
+  if category == EVT_TOUCH and x ~= nil and y ~= nil then
+    local w, h = lcd.getWindowSize()
+    if w ~= nil and h ~= nil and w > 0 and h > 0 then
+      mapStatus.widgetWidth = w
+      mapStatus.widgetHeight = h
+      mapStatus.scaleX = w / 800
+      mapStatus.scaleY = h / 480
+    end
 
-  if category == EVT_TOUCH and value == 16641 then
-    kill = true
-    local rightX = mapStatus.widgetWidth * 0.80
-    if mapLibs.drawLib.isInside(x, y, rightX, 0, mapStatus.widgetWidth, mapStatus.widgetHeight/2) then
-      mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1)
-    elseif mapLibs.drawLib.isInside(x, y, rightX, mapStatus.widgetHeight/2, mapStatus.widgetWidth, mapStatus.widgetHeight) then
-      mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1)
+    if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then
+      mapLibs.utils.logDebug("TOUCH", string.format("value=%s x=%s y=%s", tostring(value), tostring(x), tostring(y)))
+    end
+
+    local scaleFactor = 0.15 + 0.8 * mapStatus.scaleX
+    local btnSize = math.floor(52 * scaleFactor)
+    local btnX = 12 * mapStatus.scaleX
+    local ultraTiny =
+      (mapStatus.widgetWidth < (mapStatus.tinyWidthThreshold or 350)) and
+      (mapStatus.widgetHeight < (mapStatus.tinyHeightThreshold or 190))
+
+    local btnYPlus, btnYMinus
+    if ultraTiny then
+      local edgeMargin = btnX
+      btnYPlus = edgeMargin
+      btnYMinus = mapStatus.widgetHeight - btnSize - edgeMargin
     else
+      btnYPlus = 0.27 * mapStatus.widgetHeight
+      btnYMinus = mapStatus.widgetHeight - 0.27 * mapStatus.widgetHeight - btnSize
+    end
+
+    local touchPadding
+    if ultraTiny then
+      local maxUltraPadding = math.floor((mapStatus.widgetHeight - 2 * (btnSize + btnX)) / 2) - 1
+      if maxUltraPadding < 0 then
+        maxUltraPadding = 0
+      end
+      touchPadding = math.min(12, maxUltraPadding)
+    else
+      touchPadding = 20
+    end
+
+    local touchSize = btnSize + 2 * touchPadding
+    local plusLeft = btnX - touchPadding
+    local plusTop = btnYPlus - touchPadding
+    local minusLeft = btnX - touchPadding
+    local minusTop = btnYMinus - touchPadding
+
+    local hitPlus = mapLibs.drawLib.isInside(x, y, plusLeft, plusTop, plusLeft + touchSize, plusTop + touchSize)
+    local hitMinus = mapLibs.drawLib.isInside(x, y, minusLeft, minusTop, minusLeft + touchSize, minusTop + touchSize)
+
+    if value == 16641 then
+      if mapStatus.consumeZoomRelease or hitPlus or hitMinus then
+        mapStatus.consumeZoomRelease = false
+        system.killEvents(value)
+        return true
+      end
+      return false
+    end
+
+    if value ~= 16640 then
+      return false -- Process zoom only on press events; release events must not trigger zoom.
+    end
+    kill = true
+
+    -- Evaluate minus first so lower-zone taps win in edge overlap scenarios.
+    if hitMinus then
+      mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
+      mapStatus.consumeZoomRelease = true
+      mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
+
+    elseif hitPlus then
+      mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
+      mapStatus.consumeZoomRelease = true
+      mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
+
+    else
+      mapStatus.consumeZoomRelease = false
       kill = false
     end
   end
+
+  
   if kill then
     system.killEvents(value)
     return true
@@ -405,6 +475,10 @@ local function wakeup(widget)
 
   if widget.runBgTasks then
     bgtasks(widget)
+  end
+
+  if mapLibs and mapLibs.utils and mapLibs.utils.flushLogs then
+    mapLibs.utils.flushLogs(false)
   end
 
   lcd.invalidate()   
@@ -509,9 +583,6 @@ local function configure(widget)
 
   line = form.addLine("User sensor 3")
   form.addSourceField(line, nil, function() return mapStatus.conf.userSensor3 end, function(value) mapStatus.conf.userSensor3 = value end)
-
-  line = form.addLine("GPS Source")
-  widget.gpsField = form.addSourceField(line, nil, function() return widget.gpsSource end, function(value) widget.gpsSource = value end)
 
   line = form.addLine("Airspeed/Groundspeed unit")
   form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"km/h",2},{"mph",3},{"kn",4}}, function() return mapStatus.conf.horSpeedUnit end, function(value) mapStatus.conf.horSpeedUnit = value end)
@@ -691,7 +762,6 @@ end
 local function read(widget)
   if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
   -- Loads persisted widget settings from storage into the widget instance and shared config table.
-  widget.gpsSource = storageToConfig("gps", nil)
   mapStatus.conf.horSpeedUnit = storageToConfig("horSpeedUnit", 1)
   mapStatus.conf.vertSpeedUnit = storageToConfig("vertSpeedUnit",1)
   mapStatus.conf.distUnit = storageToConfig("distUnit", 1)
@@ -718,7 +788,6 @@ end
 local function write(widget)
   if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
   -- Persists the current widget settings to storage, reapplies derived config values, and resets the active layout.
-  storage.write("gps", widget.gpsSource)
   storage.write("horSpeedUnit", mapStatus.conf.horSpeedUnit)
   storage.write("vertSpeedUnit", mapStatus.conf.vertSpeedUnit)
   storage.write("distUnit", mapStatus.conf.distUnit)

@@ -23,6 +23,43 @@ local libs = nil
 
 local drawLib = {}
 local bitmaps = {}
+local topBarUnifiedFont = nil
+
+local function getFontRank(font)
+  if font == FONT_XS then
+    return 1
+  elseif font == FONT_S then
+    return 2
+  elseif font == FONT_L then
+    return 3
+  end
+  return 0
+end
+
+local function getTopBarSensorName(sensor, label, compactNames)
+  local name = label or sensor:name()
+  if compactNames then
+    name = string.sub(name, 1, 4)
+  end
+  return name
+end
+
+local function getTopBarSensorBlockWidth(name, valueText, barFont, labelFont)
+  lcd.font(barFont)
+  local valW = lcd.getTextSize(valueText)
+  lcd.font(labelFont)
+  local lblW = lcd.getTextSize(name)
+  return valW + lblW + 10, valW
+end
+
+local function getTopBarLabelFont(valueFont)
+  if valueFont == FONT_L then
+    return FONT_XS
+  elseif valueFont == FONT_S then
+    return FONT_XS
+  end
+  return FONT_XS
+end
 
 function drawLib.drawText(x, y, txt, font, color, flags, blink)
   -- Draws text with the requested font and color, using the shared blink state to optionally suppress output.
@@ -56,9 +93,10 @@ function drawLib.drawNoTelemetryData(widget)
     local h = status.widgetHeight
     local sx = status.scaleX
     local sy = status.scaleY
+    local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
 
-    local fontBig = (w < 450) and FONT_L or FONT_XXL
-    local fontSmall = (w < 450) and FONT_S or FONT_STD
+    local fontBig = verticalMedium and FONT_L or FONT_XXL
+    local fontSmall = verticalMedium and FONT_S or FONT_STD
 
     lcd.font(fontBig)
     local textW, textH = lcd.getTextSize("NO TELEMETRY")
@@ -85,8 +123,9 @@ function drawLib.drawNoGPSData(widget)
   local h = status.widgetHeight
   local sx = status.scaleX
   local sy = status.scaleY
+  local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
 
-  local fontBig = (w < 450) and FONT_L or FONT_XXL
+  local fontBig = verticalMedium and FONT_L or FONT_XXL
 
   lcd.font(fontBig)
   local textW, textH = lcd.getTextSize("...waiting for GPS")
@@ -119,53 +158,107 @@ function drawLib.drawTopBar(widget)
   local w = status.widgetWidth
   local sx = status.scaleX
   local sy = status.scaleY
+  local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
+  local verticalTiny = w < (status.tinyWidthThreshold or 350)
+  local showModelName = w >= 600
+  local compactNames = verticalMedium
+
+  local sensorEntries = {
+    { sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}), label = "TX" },
+    { sensor = status.conf.linkQualitySource, label = nil },
+  }
+  if not verticalTiny and status.conf.userSensor1 and status.conf.userSensor1:name() ~= "---" then
+    table.insert(sensorEntries, { sensor = status.conf.userSensor1, label = nil })
+  end
+  if not verticalTiny and status.conf.userSensor2 and status.conf.userSensor2:name() ~= "---" then
+    table.insert(sensorEntries, { sensor = status.conf.userSensor2, label = nil })
+  end
+  if not verticalTiny and status.conf.userSensor3 and status.conf.userSensor3:name() ~= "---" then
+    table.insert(sensorEntries, { sensor = status.conf.userSensor3, label = nil })
+  end
+
+  local candidateFonts = verticalMedium and {FONT_S, FONT_XS} or {FONT_L, FONT_S, FONT_XS}
+  local modelText = status.modelString or model.name()
+  local selectedFont = candidateFonts[#candidateFonts]
+  local selectedUsedWidth = 0
+  local selectedAvailableWidth = 0
+  for i = 1, #candidateFonts do
+    local candidateFont = candidateFonts[i]
+    local candidateLabelFont = getTopBarLabelFont(candidateFont)
+
+    local minTelemetryX = 6 * sx
+    if showModelName then
+      lcd.font(candidateFont)
+      local modelW = lcd.getTextSize(modelText)
+      minTelemetryX = 8 * sx + modelW + 12 * sx
+    end
+
+    local usedWidth = 0
+    for e = 1, #sensorEntries do
+      local entry = sensorEntries[e]
+      if entry.sensor ~= nil and entry.sensor:name() ~= "---" then
+        local name = getTopBarSensorName(entry.sensor, entry.label, compactNames)
+        local valueText = entry.sensor:stringValue()
+        local blockW = getTopBarSensorBlockWidth(name, valueText, candidateFont, candidateLabelFont)
+        usedWidth = usedWidth + blockW
+      end
+    end
+
+    local availableWidth = math.max(20, (w - 12 * sx) - minTelemetryX)
+    selectedFont = candidateFont
+    selectedUsedWidth = usedWidth
+    selectedAvailableWidth = availableWidth
+    if usedWidth <= availableWidth then
+      break
+    end
+  end
+
+  local cachedFont = topBarUnifiedFont
+  if cachedFont ~= nil and getFontRank(selectedFont) > getFontRank(cachedFont) then
+    if (selectedAvailableWidth - selectedUsedWidth) < 12 then
+      selectedFont = cachedFont
+    end
+  end
+  topBarUnifiedFont = selectedFont
+
+  local selectedLabelFont = getTopBarLabelFont(selectedFont)
+  local minTelemetryX = 6 * sx
 
   lcd.color(status.colors.barBackground)
   lcd.pen(SOLID)
   lcd.drawFilledRectangle(0, 0, w, math.floor(26 * sy))
 
-  if w >= 450 then
-    drawLib.drawText(8*sx, 2*sy, status.modelString or model.name(), FONT_L, status.colors.barText, LEFT)
+  if showModelName then
+    drawLib.drawText(8*sx, 2*sy, modelText, selectedFont, status.colors.barText, LEFT)
+    lcd.font(selectedFont)
+    local modelW = lcd.getTextSize(modelText)
+    minTelemetryX = 8 * sx + modelW + 12 * sx
   end
 
   local offset = 12*sx
-  offset = offset + drawLib.drawTopBarSensor(widget, w - offset, system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}), "TX")
-  offset = offset + drawLib.drawTopBarSensor(widget, w - offset, status.conf.linkQualitySource)
-
-  if status.conf.userSensor1 and status.conf.userSensor1:name() ~= "---" then
-    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, status.conf.userSensor1)
-  end
-  if status.conf.userSensor2 and status.conf.userSensor2:name() ~= "---" then
-    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, status.conf.userSensor2)
-  end
-  if status.conf.userSensor3 and status.conf.userSensor3:name() ~= "---" then
-    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, status.conf.userSensor3)
+  for e = 1, #sensorEntries do
+    local entry = sensorEntries[e]
+    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, selectedLabelFont, compactNames)
   end
 end
 
-function drawLib.drawTopBarSensor(widget, x, sensor, label)
+function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, labelFont, compactNames)
   -- Draws one top-bar sensor block by reading its current string value and writing the label/value pair to the LCD.
   if sensor == nil or sensor:name() == "---" then
     return 80 -- Safeguard: skip invalid sensor handles and reserve a stable fallback width.
   end
 
-  local barFont = (status.widgetWidth < 450) and FONT_S or FONT_L
-  local lblFont = FONT_XS
+  local name = getTopBarSensorName(sensor, label, compactNames)
+  local valueText = sensor:stringValue()
+  local blockW, valW = getTopBarSensorBlockWidth(name, valueText, barFont, labelFont)
 
-  local name = label or sensor:name()
-  if status.widgetWidth < 450 then
-    name = string.sub(name, 1, 4)
-  end
+  local valueY = 0
+  local labelY = 0
 
-  lcd.font(barFont)
-  local valW = lcd.getTextSize(sensor:stringValue())
-  lcd.font(lblFont)
-  local lblW = lcd.getTextSize(name)
+  drawLib.drawText(x - valW - 2, labelY, name, labelFont, status.colors.barText, RIGHT)
+  drawLib.drawText(x - valW, valueY, valueText, barFont, status.colors.barText, LEFT)
 
-  drawLib.drawText(x - valW - 2, 2, name, lblFont, status.colors.barText, RIGHT)
-  drawLib.drawText(x - valW, 0, sensor:stringValue(), barFont, status.colors.barText, LEFT)
-
-  return valW + lblW + 10
+  return blockW
 end
 
 function drawLib.drawRArrow(x,y,r,angle,color)
@@ -196,13 +289,19 @@ end
 
 function drawLib.drawBitmap(x, y, bitmap, w, h)
   -- Draws a named bitmap by resolving it through the local bitmap cache first.
-  lcd.drawBitmap(x, y, drawLib.getBitmap(bitmap), w, h)
+  local bmp = drawLib.getBitmap(bitmap)
+  if bmp ~= nil then
+    lcd.drawBitmap(x, y, bmp, w, h)
+  end
 end
 
 function drawLib.drawBlinkBitmap(x, y, bitmap, w, h)
   -- Draws a bitmap only on active blink phases so warning icons can flash without state duplication.
   if status.blinkon == true then
-    lcd.drawBitmap(x, y, drawLib.getBitmap(bitmap), w, h)
+    local bmp = drawLib.getBitmap(bitmap)
+    if bmp ~= nil then
+      lcd.drawBitmap(x, y, bmp, w, h)
+    end
   end
 end
 

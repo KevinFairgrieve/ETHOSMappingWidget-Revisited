@@ -40,13 +40,13 @@ local function drawBarSensor(x, y, label, value, unit, font, label_font, unit_fo
   local vw, vh = lcd.getTextSize(value)
 
   if flags == RIGHT then
-    libs.drawLib.drawText(x, y+vh-uh, unit, unit_font, color, RIGHT, blink)
+    libs.drawLib.drawText(x, y, unit, unit_font, color, RIGHT, blink)
     libs.drawLib.drawText(x-uw, y, value, font, color, RIGHT, blink)
-    libs.drawLib.drawText(x-(uw+sw+vw), y+vh-lh, label, label_font, label_color, RIGHT, blink)
+    libs.drawLib.drawText(x-(uw+sw+vw), y, label, label_font, label_color, RIGHT, blink)
   else
-    libs.drawLib.drawText(x, y+vh-lh, label, label_font, label_color, LEFT, blink)
+    libs.drawLib.drawText(x, y, label, label_font, label_color, LEFT, blink)
     libs.drawLib.drawText(x+lw+sw, y, value, font, color, LEFT, blink)
-    libs.drawLib.drawText(x+lw+sw+vw, y+vh-uh, unit, unit_font, color, LEFT, blink)
+    libs.drawLib.drawText(x+lw+sw+vw, y, unit, unit_font, color, LEFT, blink)
   end
   return lw + vw + uw + 3*sw
 end
@@ -58,13 +58,37 @@ function panel.draw(widget)
   local sx = status.scaleX
   local sy = status.scaleY
 
+  -- Guard: widget area too small to render meaningfully.
+  if w < 200 or h < 100 then
+    lcd.color(lcd.RGB(255, 220, 0))
+    lcd.drawFilledRectangle(0, 0, w, h)
+    lcd.color(lcd.RGB(0, 0, 0))
+    lcd.font(FONT_STD)
+    local line1 = "TOO SMALL!"
+    local line2 = w .. " x " .. h .. " px"
+    local line3 = "Min. 200x100"
+    local tw1, th1 = lcd.getTextSize(line1)
+    local tw2, th2 = lcd.getTextSize(line2)
+    lcd.font(FONT_XS)
+    local tw3, th3 = lcd.getTextSize(line3)
+    local totalH = th1 + 4 + th2 + 2 + th3
+    local startY = math.floor((h - totalH) / 2)
+    lcd.font(FONT_STD)
+    lcd.drawText(math.floor((w - tw1) / 2), startY, line1)
+    lcd.drawText(math.floor((w - tw2) / 2), startY + th1 + 4, line2)
+    lcd.font(FONT_XS)
+    lcd.drawText(math.floor((w - tw3) / 2), startY + th1 + 4 + th2 + 2, line3)
+    return
+  end
+
   -- Detect compact screen classes so overlays can scale down without overlapping the map.
-  local verticalTiny = (w < 350)
-  local horizontalTiny = (h < 200)
+  local verticalTiny = (w < (status.tinyWidthThreshold or 350))
+  local horizontalTiny = (h < (status.tinyHeightThreshold or 190))
+  local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
   local ultraTiny = verticalTiny and horizontalTiny
 
   -- Derive the map viewport after reserving space for the top and bottom bars.
-  local topH    = (horizontalTiny or verticalTiny) and 0 or math.floor(26 * sy)
+  local topH    = horizontalTiny and 0 or math.floor(26 * sy)
   local bottomH = horizontalTiny and 0 or math.floor(46 * sy)
   local mapY    = topH
   local mapH    = h - topH - bottomH
@@ -79,10 +103,31 @@ function panel.draw(widget)
     status.mapLastZoom = status.mapZoomLevel
   end
 
+  -- Draw the map viewport for the current layout.
   libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
 
+  -- Draw the dedicated left-side zoom buttons.
+  local scaleFactor = 0.15 + 0.8 * status.scaleX
+  local btnSize     = math.floor(52 * scaleFactor)
+  local btnX        = 12 * status.scaleX
+
+  -- In ultra-tiny mode, anchor buttons to top and bottom edges with symmetric margins.
+  local btnYPlus, btnYMinus
+  if ultraTiny then
+    local edgeMargin = btnX
+    btnYPlus  = edgeMargin
+    btnYMinus = status.widgetHeight - btnSize - edgeMargin
+  else
+    btnYPlus  = 0.27 * status.widgetHeight
+    btnYMinus = status.widgetHeight - 0.27 * status.widgetHeight - btnSize
+  end
+
+  -- Draw the actual zoom buttons.
+  libs.drawLib.drawBitmap(btnX, btnYPlus, "zoom_plus", btnSize, btnSize)
+  libs.drawLib.drawBitmap(btnX, btnYMinus, "zoom_minus", btnSize, btnSize)
+
   -- Draw the top bar and text overlays only when the layout has enough vertical space.
-  if not (horizontalTiny or verticalTiny) then
+  if not horizontalTiny then
     lcd.color(lcd.RGB(0,0,0))
     lcd.pen(SOLID)
     lcd.drawFilledRectangle(0, 0, w, topH)
@@ -90,22 +135,36 @@ function panel.draw(widget)
 
     libs.drawLib.drawTopBar()
 
-    local overlayFont = (w < 450) and FONT_S or FONT_L
+    local overlayFont = verticalMedium and FONT_XS or FONT_L
     lcd.font(overlayFont)
 
+    local overlayPadX = math.max(6, math.floor(8 * sx))
+    local overlayPadY = math.max(3, math.floor(4 * sy))
+    local overlayMargin = math.max(6, math.floor(8 * sx))
+
     local gpsText = status.telemetry.strLat .. " " .. status.telemetry.strLon
-    local tw, th = lcd.getTextSize(gpsText)
+    local gpsTw, gpsTh = lcd.getTextSize(gpsText)
+    local gpsBoxW = gpsTw + 2 * overlayPadX
+    local gpsBoxH = gpsTh + 2 * overlayPadY
+    local gpsBoxX = math.max(overlayMargin, w - gpsBoxW - overlayMargin)
+    local gpsBoxY = mapY + overlayMargin
+
     lcd.color(lcd.RGB(0,0,0,0.45))
-    lcd.drawFilledRectangle(w - tw - 12*sx, mapY + 8*sy, tw + 12*sx, th + 6*sy)
+    lcd.drawFilledRectangle(gpsBoxX, gpsBoxY, gpsBoxW, gpsBoxH)
     lcd.color(status.colors.white)
-    lcd.drawText(w - tw - 6*sx, mapY + 9*sy, gpsText)
+    lcd.drawText(gpsBoxX + math.floor((gpsBoxW - gpsTw) / 2), gpsBoxY + math.floor((gpsBoxH - gpsTh) / 2), gpsText)
 
     local zoomText = "zoom " .. tostring(status.mapZoomLevel)
-    local zw, zh = lcd.getTextSize(zoomText)
+    local zoomTw, zoomTh = lcd.getTextSize(zoomText)
+    local zoomBoxW = zoomTw + 2 * overlayPadX
+    local zoomBoxH = zoomTh + 2 * overlayPadY
+    local zoomBoxX = overlayMargin
+    local zoomBoxY = mapY + overlayMargin
+
     lcd.color(lcd.RGB(0,0,0,0.45))
-    lcd.drawFilledRectangle(8*sx, mapY + 8*sy, zw + 12*sx, zh + 6*sy)
+    lcd.drawFilledRectangle(zoomBoxX, zoomBoxY, zoomBoxW, zoomBoxH)
     lcd.color(status.colors.white)
-    lcd.drawText(12*sx, mapY + 9*sy, zoomText)
+    lcd.drawText(zoomBoxX + math.floor((zoomBoxW - zoomTw) / 2), zoomBoxY + math.floor((zoomBoxH - zoomTh) / 2), zoomText)
   end
 
   -- Draw the bottom flight-data bar except on the narrowest horizontal layouts.
@@ -116,44 +175,53 @@ function panel.draw(widget)
 
     local labelColor = lcd.RGB(170,170,170)
     local yBottom = h - bottomH + 6*sy
-    local barFont = (w < 450) and FONT_S or FONT_L
-    local spacing = (w < 450) and 8*sx or 22*sx
+    local barFont = verticalMedium and FONT_S or FONT_L
+    local barMetaFont = FONT_XS
+    local spacing = verticalMedium and 8*sx or 22*sx
+    local hideHomeDistAndHeading = w < (status.tinyWidthThreshold or 350)
 
-    local gspdLabel   = (w < 450) and "GS" or "GSpd"
-    local homeLabel   = (w < 450) and "HD" or "HomeDist"
+    local gspdLabel   = verticalMedium and "GS" or "GSpd"
+    local homeLabel   = verticalMedium and "HD" or "HomeDist"
 
-    if verticalTiny then
-      local offset = drawBarSensor(12*sx, yBottom, gspdLabel,
+    if hideHomeDistAndHeading then
+      drawBarSensor(12*sx, yBottom, gspdLabel,
         string.format("%.01f", status.avgSpeed.value * status.conf.horSpeedMultiplier),
-        status.conf.horSpeedLabel, barFont, FONT_S, FONT_S, status.colors.white, labelColor, false)
+        status.conf.horSpeedLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false)
 
-      drawBarSensor(w - 120*sx, yBottom, homeLabel,
-        string.format("%.01f", status.telemetry.homeDist * status.conf.distUnitScale),
-        status.conf.distUnitLabel, barFont, FONT_S, FONT_S, status.colors.white, labelColor, false, RIGHT)
+      drawBarSensor(w - 12*sx, yBottom, "TR",
+        string.format("%.01f", status.avgSpeed.travelDist * status.conf.distUnitLongScale),
+        status.conf.distUnitLongLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false, RIGHT)
     else
       local offset = drawBarSensor(12*sx, yBottom, gspdLabel,
         string.format("%.01f", status.avgSpeed.value * status.conf.horSpeedMultiplier),
-        status.conf.horSpeedLabel, barFont, FONT_S, FONT_S, status.colors.white, labelColor, false)
+        status.conf.horSpeedLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false)
 
-      offset = offset + drawBarSensor(offset + spacing, yBottom, "HDG",
+      offset = offset + drawBarSensor(12*sx + offset + spacing, yBottom, "HDG",
         string.format("%.0f", status.telemetry.cog or 0), "°",
-        barFont, FONT_S, FONT_STD, status.colors.white, labelColor, false)
+        barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false)
 
       local travelOffset = drawBarSensor(w, yBottom, "TR",
         string.format("%.01f", status.avgSpeed.travelDist * status.conf.distUnitLongScale),
-        status.conf.distUnitLongLabel, barFont, FONT_S, FONT_S, status.colors.white, labelColor, false, RIGHT)
+        status.conf.distUnitLongLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false, RIGHT)
 
       drawBarSensor(w - travelOffset - spacing - 15*sx, yBottom, homeLabel,
         string.format("%.01f", status.telemetry.homeDist * status.conf.distUnitScale),
-        status.conf.distUnitLabel, barFont, FONT_S, FONT_S, status.colors.white, labelColor, false, RIGHT)
+        status.conf.distUnitLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false, RIGHT)
     end
   end
 
   -- Draw the home-direction arrow whenever a home position is available.
   if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil then
-    local arrowSize = math.floor(42 * math.min(sx, sy))
+    local baseArrowSize = math.floor(42 * math.min(sx, sy))
+    local arrowSize = baseArrowSize
+    if ultraTiny then
+      arrowSize = math.min(math.max(math.floor(baseArrowSize * 1.2), baseArrowSize + 4), baseArrowSize + 10)
+    elseif horizontalTiny or verticalTiny then
+      arrowSize = math.min(math.max(math.floor(baseArrowSize * 1.15), baseArrowSize + 2), baseArrowSize + 8)
+    end
+
     local arrowX = w - arrowSize * 1.2
-    local arrowY = horizontalTiny and (h - 55*sy) or (h - bottomH + (bottomH / 2) - 60*sy)
+    local arrowY = horizontalTiny and (h - 55*sy - 20) or (h - bottomH + (bottomH / 2) - 60*sy - 20)
 
     local homeHeading = status.telemetry.homeAngle - (status.telemetry.yaw or status.telemetry.cog or 0)
     libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize - 7, math.floor(homeHeading), status.colors.yellow)
@@ -163,23 +231,17 @@ function panel.draw(widget)
   -- Warn the pilot when live GPS is present but no home position has been stored yet.
   if status.telemetry.lat ~= nil and (status.telemetry.homeLat == nil or status.telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
-    local font = (w < 450) and FONT_S or FONT_L
+    local font = verticalMedium and FONT_S or FONT_L
+    lcd.font(font)
     local tw, th = lcd.getTextSize(warningText)
 
-    local basePadding = (w < 450) and 45*sx or 120*sx
-    local maxBoxW = math.floor(w * 0.85)
-    local boxW = math.min(tw + basePadding, maxBoxW)
-    local boxH = th + 18*sy
+    local padX = math.max(8, math.floor(14 * sx))
+    local padY = math.max(4, math.floor(8 * sy))
+    local boxW = tw + 2 * padX
+    local boxH = th + 2 * padY
     local boxX = math.floor((w - boxW) / 2)
 
-    local boxY
-    if horizontalTiny then
-      boxY = mapY + 40*sy
-    elseif w < 450 then
-      boxY = h - bottomH - boxH - 50*sy
-    else
-      boxY = h - bottomH - boxH - 5*sy
-    end
+    local boxY = math.floor((h - boxH) / 2)
 
     lcd.color(lcd.RGB(0, 0, 0, 0.45))
     lcd.drawFilledRectangle(boxX, boxY, boxW, boxH)
@@ -188,14 +250,14 @@ function panel.draw(widget)
     lcd.drawRectangle(boxX, boxY, boxW, boxH, 2)
 
     lcd.color(status.colors.yellow)
-    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2 - 3*sy, warningText, font, status.colors.yellow, CENTERED, true)
+    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2, warningText, font, status.colors.yellow, CENTERED, true)
   end
 
-  -- Draw the map scale bar when the viewport is large enough to keep it readable.
+    -- Draw the map scale bar when the viewport is large enough to keep it readable.
   if not ultraTiny then
     local scaleLen, scaleLabel = libs.mapLib.calculateScale(status.mapZoomLevel)
     if scaleLen ~= 0 then
-      local scaleFont = (w < 450) and FONT_S or FONT_STD
+      local scaleFont = verticalMedium and FONT_S or FONT_STD
       lcd.font(scaleFont)
       local labelW, labelH = lcd.getTextSize(scaleLabel)
 
@@ -210,6 +272,7 @@ function panel.draw(widget)
       lcd.drawText(12*sx, scaleY_label, scaleLabel)
     end
   end
+
 end
 
 function panel.background(widget)
