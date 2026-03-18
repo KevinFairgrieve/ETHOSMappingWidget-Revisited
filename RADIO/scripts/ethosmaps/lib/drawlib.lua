@@ -25,6 +25,39 @@ local drawLib = {}
 local bitmaps = {}
 local topBarUnifiedFont = nil
 
+local function safeSensorName(sensor)
+  if sensor == nil then
+    return nil
+  end
+  local ok, value = pcall(function() return sensor:name() end)
+  if not ok or value == nil then
+    return nil
+  end
+  value = tostring(value)
+  if value == "" or value == "---" then
+    return nil
+  end
+  return value
+end
+
+local function safeSensorValueText(sensor)
+  if sensor == nil then
+    return "--"
+  end
+
+  local okStr, text = pcall(function() return sensor:stringValue() end)
+  if okStr and text ~= nil then
+    return tostring(text)
+  end
+
+  local okVal, value = pcall(function() return sensor:value() end)
+  if okVal and value ~= nil then
+    return tostring(value)
+  end
+
+  return "--"
+end
+
 local function getFontRank(font)
   if font == FONT_XS then
     return 1
@@ -37,7 +70,8 @@ local function getFontRank(font)
 end
 
 local function getTopBarSensorName(sensor, label, compactNames)
-  local name = label or sensor:name()
+  local sensorName = safeSensorName(sensor)
+  local name = label or sensorName or "SRC"
   if compactNames then
     name = string.sub(name, 1, 4)
   end
@@ -46,9 +80,9 @@ end
 
 local function getTopBarSensorBlockWidth(name, valueText, barFont, labelFont)
   lcd.font(barFont)
-  local valW = lcd.getTextSize(valueText)
+  local valW = lcd.getTextSize(tostring(valueText or "--"))
   lcd.font(labelFont)
-  local lblW = lcd.getTextSize(name)
+  local lblW = lcd.getTextSize(tostring(name or "SRC"))
   return valW + lblW + 10, valW
 end
 
@@ -167,13 +201,13 @@ function drawLib.drawTopBar(widget)
     { sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}), label = "TX" },
     { sensor = status.conf.linkQualitySource, label = nil },
   }
-  if not verticalTiny and status.conf.userSensor1 and status.conf.userSensor1:name() ~= "---" then
+  if not verticalTiny and safeSensorName(status.conf.userSensor1) ~= nil then
     table.insert(sensorEntries, { sensor = status.conf.userSensor1, label = nil })
   end
-  if not verticalTiny and status.conf.userSensor2 and status.conf.userSensor2:name() ~= "---" then
+  if not verticalTiny and safeSensorName(status.conf.userSensor2) ~= nil then
     table.insert(sensorEntries, { sensor = status.conf.userSensor2, label = nil })
   end
-  if not verticalTiny and status.conf.userSensor3 and status.conf.userSensor3:name() ~= "---" then
+  if not verticalTiny and safeSensorName(status.conf.userSensor3) ~= nil then
     table.insert(sensorEntries, { sensor = status.conf.userSensor3, label = nil })
   end
 
@@ -196,9 +230,9 @@ function drawLib.drawTopBar(widget)
     local usedWidth = 0
     for e = 1, #sensorEntries do
       local entry = sensorEntries[e]
-      if entry.sensor ~= nil and entry.sensor:name() ~= "---" then
+      if safeSensorName(entry.sensor) ~= nil then
         local name = getTopBarSensorName(entry.sensor, entry.label, compactNames)
-        local valueText = entry.sensor:stringValue()
+        local valueText = safeSensorValueText(entry.sensor)
         local blockW = getTopBarSensorBlockWidth(name, valueText, candidateFont, candidateLabelFont)
         usedWidth = usedWidth + blockW
       end
@@ -244,12 +278,12 @@ end
 
 function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, labelFont, compactNames)
   -- Draws one top-bar sensor block by reading its current string value and writing the label/value pair to the LCD.
-  if sensor == nil or sensor:name() == "---" then
+  if safeSensorName(sensor) == nil then
     return 80 -- Safeguard: skip invalid sensor handles and reserve a stable fallback width.
   end
 
   local name = getTopBarSensorName(sensor, label, compactNames)
-  local valueText = sensor:stringValue()
+  local valueText = safeSensorValueText(sensor)
   local blockW, valW = getTopBarSensorBlockWidth(name, valueText, barFont, labelFont)
 
   local valueY = 0
