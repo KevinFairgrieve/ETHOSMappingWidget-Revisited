@@ -23,6 +23,13 @@ local function getTime()
   return os.clock()*100
 end
 
+local hasLfs, lfs = pcall(require, "lfs")
+if not hasLfs then
+  lfs = nil
+end
+
+local logDebugSessionStart
+
 
 local mapStatus = {
   -- Runtime telemetry cache populated from Ethos sources and consumed by layout and map drawing code.
@@ -64,7 +71,7 @@ local mapStatus = {
     language = "en",
     -- Map provider and rendering settings.
     mapProvider = 2, -- 1 = GMapCatcher, 2 = Google
-    mapType = "GoogleSatelliteMap",
+    mapType = "Satellite",
     mapZoomLevel = 19,
     mapZoomMax = 20,
     mapZoomMin = 1,
@@ -102,6 +109,9 @@ local mapStatus = {
   mapLastZoom = 0,
   lastLoggedLat = 0,
   lastLoggedLon = 0,
+  lastSelectionAutoFixKey = nil,
+  cachedProviderChoices = nil,
+  cachedMapTypeChoices = {},  -- keyed by provider
   consumeZoomRelease = false,
 
   avgSpeed = {
@@ -493,10 +503,7 @@ local function create()
   initLibs()
 
   -- Emit a visible session marker once so each debug log session has a clear start record.
-  if mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and not mapStatus.sessionLogged then
-    mapLibs.utils.logDebug("SETTINGS", "=== DEBUG SESSION STARTED ===")
-    mapStatus.sessionLogged = true
-  end
+  logDebugSessionStart("widget create")
 
   return {
     conf = mapStatus.conf,
@@ -532,6 +539,20 @@ local function storageToConfig(name, defaultValue, lookup)
   return applyDefault(storageValue, defaultValue, lookup)
 end
 
+local function storageToConfigWithFallback(name, defaultValue, fallbackNames, lookup)
+  -- Reads a setting from primary storage key and falls back to legacy keys for backward compatibility.
+  local storageValue = storage.read(name)
+  if storageValue == nil and fallbackNames ~= nil then
+    for i=1,#fallbackNames do
+      storageValue = storage.read(fallbackNames[i])
+      if storageValue ~= nil then
+        break
+      end
+    end
+  end
+  return applyDefault(storageValue, defaultValue, lookup)
+end
+
 local function configToStorage(value, lookup)
   -- Converts an in-memory config value back into the stored lookup index when persistence needs it.
   if lookup == nil then return value end
@@ -541,8 +562,511 @@ local function configToStorage(value, lookup)
   return 1
 end
 
+local MAP_PROVIDER_LABELS = {
+  [1] = "GMapCatcher (Yaapu)",
+  [2] = "Google",
+  [3] = "ESRI",
+  [4] = "OSM",
+}
+
+local MAP_TYPE_LABELS = {
+  [1] = "Satellite",
+  [2] = "Hybrid",
+  [3] = "Map",
+  [4] = "Terrain",
+  [5] = "Street",
+}
+
+-- On-disk folder names for each map provider under /bitmaps/ethosmaps/maps/
+local PROVIDER_FOLDER_NAMES = {
+  [2] = "GOOGLE",
+  [3] = "ESRI",
+  [4] = "OSM",
+}
+
+local function pathExists(path)
+  if path == nil or path == "" then
+    return false
+  end
+  local f = io.open(path, "r")
+  if f ~= nil then
+    io.close(f)
+    return true
+  end
+  local ok, _, code = os.rename(path, path)
+  if ok then
+    return true
+  end
+  return code == 13
+end
+
+local function getProviderRootCandidates(provider)
+  local roots = {}
+  if provider == 1 then
+    table.insert(roots, "/bitmaps/yaapu/maps")
+    return roots
+  end
+  local folderName = PROVIDER_FOLDER_NAMES[provider] or ("PROVIDER" .. tostring(provider or ""))
+  table.insert(roots, "/bitmaps/ethosmaps/maps/" .. folderName)
+  return roots
+end
+
+local function getMapTypeFolder(provider, mapTypeId)
+  if provider == 0 or mapTypeId == 0 then
+    return nil
+  end
+  if provider == 1 then
+    -- GMapCatcher/Yaapu internal folder names.
+    return applyDefault(mapTypeId, 1, {"sat_tiles","tiles","tiles","ter_tiles"})
+  end
+  if provider == 3 then
+    -- ESRI: Satellite, Hybrid, Street.
+    if mapTypeId == 1 then return "Satellite" end
+    if mapTypeId == 2 then return "Hybrid" end
+    if mapTypeId == 5 then return "Street" end
+    return nil
+  end
+  if provider == 4 then
+    -- OSM: Street only.
+    if mapTypeId == 5 then return "Street" end
+    return nil
+  end
+  -- Google (provider 2): existing folder names preserved for backward compatibility.
+  return applyDefault(mapTypeId, 1, {"Satellite","Hybrid","Map","Terrain"})
+end
+
+local function getGoogleMapTypeYaapuName(mapTypeId)
+  -- Maps Google map type IDs to their Yaapu folder names (for fallback).
+  return applyDefault(mapTypeId, 1, {"GoogleSatelliteMap","GoogleHybridMap","GoogleMap","GoogleTerrainMap"})
+end
+
+local function mapTypeFolderExists(provider, mapTypeId)
+  local folder = getMapTypeFolder(provider, mapTypeId)
+  if folder == nil then
+    return false
+  end
+  
+  if provider == 2 then
+    -- For Google, check BOTH ethosmaps and Yaapu paths for availability.
+    local ethosmapsRoot = "/bitmaps/ethosmaps/maps/GOOGLE"
+    if pathExists(ethosmapsRoot .. "/" .. folder) then
+      return true
+    end
+    local yaapuFolder = getGoogleMapTypeYaapuName(mapTypeId)
+    if pathExists("/bitmaps/yaapu/maps/" .. yaapuFolder) then
+      return true
+    end
+    return false
+  end
+  
+  local roots = getProviderRootCandidates(provider)
+  for r=1,#roots do
+    if pathExists(roots[r] .. "/" .. folder) then
+      return true
+    end
+  end
+  return false
+end
+
+local function choiceContainsValue(choices, value)
+  for i=1,#choices do
+    if choices[i][2] == value then
+      return true
+    end
+  end
+  return false
+end
+
+local function invalidateAvailabilityCaches(provider)
+  -- Kept for compatibility with existing call sites; availability now uses live scanning.
+  mapStatus.cachedProviderChoices = nil
+  mapStatus.cachedMapTypeChoices = {}
+end
+
+local function getAvailableProviderChoices(forceRefresh)
+  local choices = {}
+  for provider=1,4 do
+    local available = false
+    for typeId=1,5 do
+      if mapTypeFolderExists(provider, typeId) then
+        available = true
+        break
+      end
+    end
+    if available then
+      table.insert(choices, {MAP_PROVIDER_LABELS[provider], provider})
+    end
+  end
+
+  if #choices == 0 then
+    table.insert(choices, {"NONE", 0})
+  end
+  return choices
+end
+
+local function getAvailableMapTypeChoices(provider, forceRefresh)
+  if provider == 0 then
+    return {{"NONE", 0}}
+  end
+
+  local choices = {}
+  for typeId=1,5 do
+    local folder = getMapTypeFolder(provider, typeId)
+    if folder ~= nil and mapTypeFolderExists(provider, typeId) then
+      table.insert(choices, {MAP_TYPE_LABELS[typeId], typeId})
+    end
+  end
+
+  if #choices == 0 then
+    table.insert(choices, {"NONE", 0})
+  end
+  return choices
+end
+
+local function replaceChoices(targetChoices, sourceChoices)
+  if targetChoices == nil then
+    return
+  end
+  for i = #targetChoices, 1, -1 do
+    targetChoices[i] = nil
+  end
+  for i = 1, #sourceChoices do
+    targetChoices[i] = {sourceChoices[i][1], sourceChoices[i][2]}
+  end
+end
+
+local function refreshConfigureForm()
+  if form == nil then
+    return false
+  end
+
+  local refreshMethods = { "reinit", "invalidate", "refresh", "reload" }
+  for i = 1, #refreshMethods do
+    local methodName = refreshMethods[i]
+    local method = form[methodName]
+    if type(method) == "function" then
+      local ok = pcall(method)
+      if ok then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function syncMapTypeChoicesForProvider(widget, provider, forceRefresh)
+  local availableTypes = getAvailableMapTypeChoices(provider, forceRefresh)
+  local oldMapTypeId = mapStatus.conf.mapTypeId
+
+  if not choiceContainsValue(availableTypes, mapStatus.conf.mapTypeId) then
+    mapStatus.conf.mapTypeId = availableTypes[1][2]
+  end
+
+  if widget ~= nil and widget.mapTypeChoices ~= nil then
+    replaceChoices(widget.mapTypeChoices, availableTypes)
+  end
+
+  if widget ~= nil and widget.mapTypeField ~= nil then
+    widget.mapTypeField:enable(provider ~= 0)
+  end
+
+  return availableTypes, oldMapTypeId
+end
+
+local function logMapSelectionAutofix(message)
+  if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
+    mapLibs.utils.logDebug("SETTINGS", message, true)
+  end
+end
+
+local function toLogValue(value)
+  if value == nil then
+    return "nil"
+  end
+  local valueType = type(value)
+  if valueType == "boolean" then
+    return value and "true" or "false"
+  end
+  return tostring(value)
+end
+
+local function getSortedDirectories(path)
+  if system and type(system.listFiles) == "function" then
+    local ok, entries = pcall(system.listFiles, path)
+    if ok and type(entries) == "table" then
+      local result = {}
+      local seen = {}
+      for i = 1, #entries do
+        local rawName = entries[i]
+        if type(rawName) == "string" and rawName ~= "." and rawName ~= ".." and rawName ~= "" then
+          local name = rawName:gsub("/+$", "")
+          if not seen[name] then
+            seen[name] = true
+            table.insert(result, name)
+          end
+        end
+      end
+      table.sort(result)
+      return result, nil
+    end
+  end
+
+  if lfs ~= nil then
+    local attr = lfs.attributes(path)
+    if not attr or attr.mode ~= "directory" then
+      return {}, nil
+    end
+
+    local result = {}
+    for entry in lfs.dir(path) do
+      if entry ~= "." and entry ~= ".." then
+        local fullPath = path .. "/" .. entry
+        local entryAttr = lfs.attributes(fullPath)
+        if entryAttr and entryAttr.mode == "directory" then
+          table.insert(result, entry)
+        end
+      end
+    end
+    table.sort(result)
+    return result, nil
+  end
+
+  if type(dir) == "function" then
+    local ok, iterator = pcall(dir, path)
+    if not ok or type(iterator) ~= "function" then
+      return {}, nil
+    end
+
+    local result = {}
+    local seen = {}
+
+    while true do
+      local entry, entryAttr = iterator()
+      if entry == nil then
+        break
+      end
+      if entry ~= "." and entry ~= ".." then
+        local isDirectory = false
+
+        if type(entryAttr) == "table" then
+          if entryAttr.mode == "directory" or entryAttr.isdir == true or entryAttr.directory == true then
+            isDirectory = true
+          end
+        end
+
+        if not isDirectory then
+          local fullPath = path .. "/" .. entry
+          local file = io.open(fullPath, "r")
+          if file then
+            io.close(file)
+          elseif pathExists(fullPath) then
+            isDirectory = true
+          end
+        end
+
+        if isDirectory and not seen[entry] then
+          seen[entry] = true
+          table.insert(result, entry)
+        end
+      end
+    end
+
+    table.sort(result)
+    return result, nil
+  end
+
+  return nil, "no_directory_api"
+end
+
+local function getRootPathCandidates(rootPath)
+  local candidates = {}
+  local seen = {}
+
+  local function addCandidate(path)
+    if path ~= nil and path ~= "" and not seen[path] then
+      seen[path] = true
+      table.insert(candidates, path)
+    end
+  end
+
+  addCandidate(rootPath)
+  addCandidate(rootPath:gsub("^/", ""))
+  if rootPath:sub(1, 1) ~= "/" then
+    addCandidate("/" .. rootPath)
+  end
+
+  return candidates
+end
+
+local function logDirectoryTree(rootPath, title)
+  if not (mapLibs and mapLibs.utils and mapLibs.utils.logDebug) then
+    return
+  end
+
+  mapLibs.utils.logDebug("SETTINGS", "=== " .. title .. " ===", true)
+  local activeRootPath = rootPath
+  local providerDirs = nil
+  local providerErr = nil
+
+  local candidates = getRootPathCandidates(rootPath)
+  for i = 1, #candidates do
+    local candidate = candidates[i]
+    local dirs, err = getSortedDirectories(candidate)
+    if err == nil then
+      activeRootPath = candidate
+      providerDirs = dirs
+      providerErr = nil
+      if #dirs > 0 then
+        break
+      end
+    else
+      providerErr = err
+    end
+  end
+
+  mapLibs.utils.logDebug("SETTINGS", activeRootPath, true)
+
+  if providerErr ~= nil then
+    mapLibs.utils.logDebug("SETTINGS", "(directory listing unavailable: no filesystem directory API)", true)
+    mapLibs.utils.logDebug("SETTINGS", "=== END " .. title .. " ===", true)
+    return
+  end
+
+  providerDirs = providerDirs or {}
+  if #providerDirs == 0 then
+    mapLibs.utils.logDebug("SETTINGS", "(empty or missing)", true)
+    mapLibs.utils.logDebug("SETTINGS", "=== END " .. title .. " ===", true)
+    return
+  end
+
+  local normalizedRoot = activeRootPath:gsub("^/", ""):lower()
+  local yaapuReducedDepth = normalizedRoot == "bitmaps/yaapu/maps"
+
+  for i = 1, #providerDirs do
+    local providerName = providerDirs[i]
+    local providerPath = activeRootPath .. "/" .. providerName
+    local providerPrefix = (i < #providerDirs) and "|-- " or "`-- "
+    local mapTypeIndent = (i < #providerDirs) and "|   " or "    "
+    mapLibs.utils.logDebug("SETTINGS", providerPrefix .. providerName .. "/", true)
+
+    local mapTypeDirs = getSortedDirectories(providerPath) or {}
+    if #mapTypeDirs == 0 then
+      mapLibs.utils.logDebug("SETTINGS", mapTypeIndent .. "(no subfolders)", true)
+    else
+      for j = 1, #mapTypeDirs do
+        local mapTypeName = mapTypeDirs[j]
+        local mapTypePath = providerPath .. "/" .. mapTypeName
+        local mapTypePrefix = (j < #mapTypeDirs) and "|-- " or "`-- "
+        local zoomIndent = mapTypeIndent .. ((j < #mapTypeDirs) and "|   " or "    ")
+        mapLibs.utils.logDebug("SETTINGS", mapTypeIndent .. mapTypePrefix .. mapTypeName .. "/", true)
+
+        if not yaapuReducedDepth then
+          local zoomDirs = getSortedDirectories(mapTypePath) or {}
+          if #zoomDirs == 0 then
+            mapLibs.utils.logDebug("SETTINGS", zoomIndent .. "(no subfolders)", true)
+          else
+            for k = 1, #zoomDirs do
+              local zoomPrefix = (k < #zoomDirs) and "|-- " or "`-- "
+              mapLibs.utils.logDebug("SETTINGS", zoomIndent .. zoomPrefix .. zoomDirs[k] .. "/", true)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  mapLibs.utils.logDebug("SETTINGS", "=== END " .. title .. " ===", true)
+end
+
+local function logSettingsSnapshot()
+  if not (mapLibs and mapLibs.utils and mapLibs.utils.logDebug) then
+    return
+  end
+
+  mapLibs.utils.logDebug("SETTINGS", "=== SETTINGS SNAPSHOT ===", true)
+
+  local keys = {}
+  for key in pairs(mapStatus.conf) do
+    table.insert(keys, key)
+  end
+  table.sort(keys)
+
+  for i = 1, #keys do
+    local key = keys[i]
+    mapLibs.utils.logDebug("SETTINGS", key .. " = " .. toLogValue(mapStatus.conf[key]), true)
+  end
+
+  mapLibs.utils.logDebug("SETTINGS", "=== END SETTINGS SNAPSHOT ===", true)
+end
+
+logDebugSessionStart = function(reason)
+  if not (mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and mapLibs.utils.logDebug) then
+    return
+  end
+  if mapStatus.sessionLogged then
+    return
+  end
+
+  local marker = "=== DEBUG SESSION STARTED ==="
+  if reason and reason ~= "" then
+    marker = marker .. " (" .. reason .. ")"
+  end
+
+  mapLibs.utils.logDebug("SETTINGS", marker, true)
+  logSettingsSnapshot()
+  logDirectoryTree("/bitmaps/ethosmaps/maps", "FOLDER TREE SNAPSHOT: ethosmaps/maps")
+  logDirectoryTree("/bitmaps/yaapu/maps", "FOLDER TREE SNAPSHOT: yaapu/maps")
+  mapStatus.sessionLogged = true
+end
+
+local function providerLabelById(providerId)
+  if providerId == 0 then
+    return "NONE"
+  end
+  return MAP_PROVIDER_LABELS[providerId] or tostring(providerId)
+end
+
+local function mapTypeLabelById(mapTypeId)
+  if mapTypeId == 0 then
+    return "NONE"
+  end
+  return MAP_TYPE_LABELS[mapTypeId] or tostring(mapTypeId)
+end
+
+local function ensureAvailableMapSelections()
+  local oldProvider = mapStatus.conf.mapProvider
+  local oldMapTypeId = mapStatus.conf.mapTypeId
+
+  -- Migrate legacy Street id (3) used in earlier ESRI/OSM builds to dedicated Street id (5).
+  if (mapStatus.conf.mapProvider == 3 or mapStatus.conf.mapProvider == 4) and mapStatus.conf.mapTypeId == 3 then
+    mapStatus.conf.mapTypeId = 5
+  end
+
+  local providerChoices = getAvailableProviderChoices()
+  if not choiceContainsValue(providerChoices, mapStatus.conf.mapProvider) then
+    mapStatus.conf.mapProvider = providerChoices[1][2]
+  end
+
+  local mapTypeChoices = getAvailableMapTypeChoices(mapStatus.conf.mapProvider)
+  if not choiceContainsValue(mapTypeChoices, mapStatus.conf.mapTypeId) then
+    mapStatus.conf.mapTypeId = mapTypeChoices[1][2]
+  end
+
+  if oldProvider ~= mapStatus.conf.mapProvider or oldMapTypeId ~= mapStatus.conf.mapTypeId then
+    local key = string.format("provider:%s->%s|mapType:%s->%s", tostring(oldProvider), tostring(mapStatus.conf.mapProvider), tostring(oldMapTypeId), tostring(mapStatus.conf.mapTypeId))
+    if mapStatus.lastSelectionAutoFixKey ~= key then
+      logMapSelectionAutofix("Auto-adjusted map selection because configured provider/map type folders are not available (" .. key .. ")")
+      mapStatus.lastSelectionAutoFixKey = key
+    end
+  end
+
+  return providerChoices, mapTypeChoices
+end
+
 local function applyConfig()
   -- Derives labels, unit multipliers, and active zoom limits from persisted settings and writes them into mapStatus.conf.
+  ensureAvailableMapSelections()
+
   mapStatus.conf.horSpeedLabel = applyDefault(mapStatus.conf.horSpeedUnit, 1, {"m/s", "km/h", "mph", "kn"})
   mapStatus.conf.vertSpeedLabel = applyDefault(mapStatus.conf.vertSpeedUnit, 1, {"m/s", "ft/s", "ft/min"})
   mapStatus.conf.distUnitLabel = applyDefault(mapStatus.conf.distUnit, 1, {"m", "ft"})
@@ -553,22 +1077,39 @@ local function applyConfig()
   mapStatus.conf.distUnitScale = applyDefault(mapStatus.conf.distUnit, 1, {1, 3.28084})
   mapStatus.conf.distUnitLongScale = applyDefault(mapStatus.conf.distUnitLong, 1, {1/1000, 1/1609.34})
 
-  mapStatus.conf.mapType = applyDefault(mapStatus.conf.mapTypeId, 1, mapStatus.conf.mapProvider == 1 and {"sat_tiles","tiles","tiles","ter_tiles"} or {"GoogleSatelliteMap","GoogleHybridMap","GoogleMap","GoogleTerrainMap"})
-
-  if mapStatus.conf.mapProvider == 1 then
-    mapStatus.mapZoomLevel = mapStatus.conf.gmapZoomDefault
-    mapStatus.conf.mapZoomMin = mapStatus.conf.gmapZoomMin
-    mapStatus.conf.mapZoomMax = mapStatus.conf.gmapZoomMax
+  if mapStatus.conf.mapProvider == 0 or mapStatus.conf.mapTypeId == 0 then
+    mapStatus.conf.mapType = "NONE"
   else
-    mapStatus.mapZoomLevel = mapStatus.conf.googleZoomDefault
-    mapStatus.conf.mapZoomMin = mapStatus.conf.googleZoomMin
-    mapStatus.conf.mapZoomMax = mapStatus.conf.googleZoomMax
+    mapStatus.conf.mapType = getMapTypeFolder(mapStatus.conf.mapProvider, mapStatus.conf.mapTypeId) or "NONE"
+  end
+
+  if mapStatus.conf.mapProvider == 0 then
+    mapStatus.mapZoomLevel = math.max(1, mapStatus.conf.mapZoomMin or 1)
+  else
+    local min = mapStatus.conf.mapZoomMin or 1
+    local max = mapStatus.conf.mapZoomMax or 20
+    local def = mapStatus.conf.mapZoomDefault or 18
+
+    if max < min then
+      max = min
+      mapStatus.conf.mapZoomMax = max
+    end
+    if def < min then
+      def = min
+    elseif def > max then
+      def = max
+    end
+
+    mapStatus.conf.mapZoomDefault = def
+    mapStatus.mapZoomLevel = def
   end
 end
 
 local function configure(widget)
   -- Builds the Ethos configuration form, reading current values from mapStatus.conf and writing user edits back into it.
   if not widget then return end -- Safeguard: configuration callbacks may arrive before the widget fields exist.
+  local providerChoices, mapTypeChoices = ensureAvailableMapSelections()
+
   local line = form.addLine("Widget version")
   form.addStaticText(line, nil, "1.0.0 beta3")
 
@@ -601,45 +1142,106 @@ local function configure(widget)
 
   -- Provider selection drives which zoom controls are enabled below.
   line = form.addLine("Map provider")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"GMapCatcher", 1}, {"Google", 2}}, function() return mapStatus.conf.mapProvider end,
+  widget.mapProviderField = form.addChoiceField(line, form.getFieldSlots(line)[0], providerChoices, function() return mapStatus.conf.mapProvider end,
     function(value)
+      local oldProvider = mapStatus.conf.mapProvider
       mapStatus.conf.mapProvider = value
-      widget.googleZoomField:enable(value==2)
-      widget.googleZoomMaxField:enable(value==2)
-      widget.googleZoomMinField:enable(value==2)
-      widget.gmapZoomField:enable(value==1)
-      widget.gmapZoomMaxField:enable(value==1)
-      widget.gmapZoomMinField:enable(value==1)
+
+      if (value == 3 or value == 4) and mapStatus.conf.mapTypeId == 3 then
+        mapStatus.conf.mapTypeId = 5
+      end
+
+      if oldProvider ~= value then
+        logMapSelectionAutofix("Provider changed: " .. providerLabelById(oldProvider) .. " -> " .. providerLabelById(value))
+      end
+
+      -- Force a fresh scan for provider/map type availability when provider changes.
+      -- This avoids stale settings choices and prevents temporary "???" labels.
+      invalidateAvailabilityCaches()
+      local _, oldMapTypeId = syncMapTypeChoicesForProvider(widget, value, true)
+      local mapTypeAdjusted = oldMapTypeId ~= mapStatus.conf.mapTypeId
+      if oldMapTypeId ~= mapStatus.conf.mapTypeId then
+        logMapSelectionAutofix("Map type adjusted after provider change: " .. mapTypeLabelById(oldMapTypeId) .. " -> " .. mapTypeLabelById(mapStatus.conf.mapTypeId))
+      end
+      applyConfig()
+
+      -- Rebuild the settings form only when the previous map type became invalid and had to fallback.
+      if mapTypeAdjusted then
+        if form ~= nil and type(form.clear) == "function" then
+          local ok = pcall(form.clear)
+          if ok then
+            configure(widget)
+            return
+          end
+        end
+
+        -- Fallback for Ethos variants without form.clear().
+        local refreshed = refreshConfigureForm()
+        if not refreshed and mapStatus.conf.enableDebugLog then
+          logMapSelectionAutofix("Form refresh API unavailable after map type fallback; choices may update only after reopening settings")
+        end
+      end
+
+      if widget.mapZoomField ~= nil then
+        widget.mapZoomField:enable(value ~= 0)
+      end
+      if widget.mapZoomMaxField ~= nil then
+        widget.mapZoomMaxField:enable(value ~= 0)
+      end
+      if widget.mapZoomMinField ~= nil then
+        widget.mapZoomMinField:enable(value ~= 0)
+      end
+    end
+  )
+  widget.mapProviderField:enable(not (#providerChoices == 1 and providerChoices[1][2] == 0))
+
+  line = form.addLine("Map type")
+  widget.mapTypeChoices = {}
+  replaceChoices(widget.mapTypeChoices, mapTypeChoices)
+  widget.mapTypeField = form.addChoiceField(line, form.getFieldSlots(line)[0], widget.mapTypeChoices, function() return mapStatus.conf.mapTypeId end,
+    function(value)
+      local oldMapTypeId = mapStatus.conf.mapTypeId
+      mapStatus.conf.mapTypeId = value
+      if oldMapTypeId ~= value then
+        logMapSelectionAutofix("Map type changed: " .. mapTypeLabelById(oldMapTypeId) .. " -> " .. mapTypeLabelById(value))
+      end
+    end
+  )
+  widget.mapTypeField:enable(mapStatus.conf.mapProvider ~= 0)
+  syncMapTypeChoicesForProvider(widget, mapStatus.conf.mapProvider, false)
+
+  line = form.addLine("Map zoom")
+  widget.mapZoomField = form.addNumberField(line, nil, 1, 20,
+    function()
+      widget.mapZoomField:enable(mapStatus.conf.mapProvider ~= 0)
+      return mapStatus.conf.mapZoomDefault
+    end,
+    function(value)
+      local min = mapStatus.conf.mapZoomMin or 1
+      local max = mapStatus.conf.mapZoomMax or 20
+      if value < min then
+        value = min
+      elseif value > max then
+        value = max
+      end
+      mapStatus.conf.mapZoomDefault = value
     end
   )
 
-  line = form.addLine("Map type")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"Satellite",1},{"Hybrid",2},{"Map",3},{"Terrain",4}}, function() return mapStatus.conf.mapTypeId end, function(value) mapStatus.conf.mapTypeId = value end)
-
-  -- Provider-specific zoom fields stay in sync with the current provider selection.
-  line = form.addLine("Google zoom")
-  widget.googleZoomField = form.addNumberField(line, nil, 1, 20,
+  line = form.addLine("Map zoom max")
+  widget.mapZoomMaxField = form.addNumberField(line, nil, 1, 20,
     function()
-      widget.googleZoomField:enable(mapStatus.conf.mapProvider==2)
-      return mapStatus.conf.googleZoomDefault
-    end,
-    function(value) mapStatus.conf.googleZoomDefault = value end
-  )
-
-  line = form.addLine("Google zoom max")
-  widget.googleZoomMaxField = form.addNumberField(line, nil, 1, 20,
-    function()
-      widget.googleZoomMaxField:enable(mapStatus.conf.mapProvider==2)
-      return mapStatus.conf.googleZoomMax
+      widget.mapZoomMaxField:enable(mapStatus.conf.mapProvider ~= 0)
+      return mapStatus.conf.mapZoomMax
     end,
     function(value)
-      -- Keep the Google zoom range valid and clamp the default zoom back into that range.
-      local min = mapStatus.conf.googleZoomMin or 1
+      -- Keep unified zoom range valid and clamp default zoom into that range.
+      local min = mapStatus.conf.mapZoomMin or 1
       if value < min then
         value = min
       end
-      mapStatus.conf.googleZoomMax = value
-      local def = mapStatus.conf.googleZoomDefault
+      mapStatus.conf.mapZoomMax = value
+      local def = mapStatus.conf.mapZoomDefault
       if def == nil then
         def = value
       end
@@ -648,24 +1250,24 @@ local function configure(widget)
       elseif def > value then
         def = value
       end
-      mapStatus.conf.googleZoomDefault = def
+      mapStatus.conf.mapZoomDefault = def
     end
   )
 
-  line = form.addLine("Google zoom min")
-  widget.googleZoomMinField = form.addNumberField(line, nil, 1, 20,
+  line = form.addLine("Map zoom min")
+  widget.mapZoomMinField = form.addNumberField(line, nil, 1, 20,
     function()
-      widget.googleZoomMinField:enable(mapStatus.conf.mapProvider==2)
-      return mapStatus.conf.googleZoomMin
+      widget.mapZoomMinField:enable(mapStatus.conf.mapProvider ~= 0)
+      return mapStatus.conf.mapZoomMin
     end,
     function(value)
-      -- Keep the Google zoom range valid and clamp the default zoom back into that range.
-      local max = mapStatus.conf.googleZoomMax or 20
+      -- Keep unified zoom range valid and clamp default zoom into that range.
+      local max = mapStatus.conf.mapZoomMax or 20
       if value > max then
         value = max
       end
-      mapStatus.conf.googleZoomMin = value
-      local def = mapStatus.conf.googleZoomDefault
+      mapStatus.conf.mapZoomMin = value
+      local def = mapStatus.conf.mapZoomDefault
       if def == nil then
         def = value
       end
@@ -674,69 +1276,7 @@ local function configure(widget)
       elseif def > max then
         def = max
       end
-      mapStatus.conf.googleZoomDefault = def
-    end
-  )
-
-  line = form.addLine("GMapCatcher zoom")
-  widget.gmapZoomField = form.addNumberField(line, nil, -2, 17,
-    function()
-      widget.gmapZoomField:enable(mapStatus.conf.mapProvider==1)
-      return mapStatus.conf.gmapZoomDefault
-    end,
-    function(value) mapStatus.conf.gmapZoomDefault = value end
-  )
-
-  line = form.addLine("GMapCatcher zoom max")
-  widget.gmapZoomMaxField = form.addNumberField(line, nil, -2, 17,
-    function()
-      widget.gmapZoomMaxField:enable(mapStatus.conf.mapProvider==1)
-      return mapStatus.conf.gmapZoomMax
-    end,
-    function(value)
-      -- Keep the GMapCatcher zoom range valid and clamp the default zoom back into that range.
-      local min = mapStatus.conf.gmapZoomMin
-      if min ~= nil and value < min then
-        value = min
-      end
-      mapStatus.conf.gmapZoomMax = value
-      local def = mapStatus.conf.gmapZoomDefault
-      if def ~= nil then
-        if min ~= nil and def < min then
-          def = min
-        end
-        if def > value then
-          def = value
-        end
-        mapStatus.conf.gmapZoomDefault = def
-      end
-    end
-  )
-
-  line = form.addLine("GMapCatcher zoom min")
-  widget.gmapZoomMinField = form.addNumberField(line, nil, -2, 17,
-    function()
-      widget.gmapZoomMinField:enable(mapStatus.conf.mapProvider==1)
-      return mapStatus.conf.gmapZoomMin
-    end,
-    function(value)
-      -- Keep the GMapCatcher minimum, maximum, and default zoom values consistent.
-      local max = mapStatus.conf.gmapZoomMax
-      if max ~= nil and value > max then
-        max = value
-        mapStatus.conf.gmapZoomMax = max
-      end
-      mapStatus.conf.gmapZoomMin = value
-      local def = mapStatus.conf.gmapZoomDefault
-      if def ~= nil then
-        if def < value then
-          def = value
-        end
-        if max ~= nil and def > max then
-          def = max
-        end
-        mapStatus.conf.gmapZoomDefault = def
-      end
+      mapStatus.conf.mapZoomDefault = def
     end
   )
 
@@ -748,11 +1288,20 @@ local function configure(widget)
   form.addBooleanField(line, nil, 
     function() return mapStatus.conf.enableDebugLog end, 
     function(value) 
-      mapStatus.conf.enableDebugLog = value
-      
-      -- Only log the transition to enabled because logging cannot record its own disabled state.
-      if mapLibs and mapLibs.utils and value then
-        mapLibs.utils.logDebug("SETTINGS", "=== DEBUG LOG ENABLED ===")
+      local previous = mapStatus.conf.enableDebugLog
+
+      if value and not previous then
+        mapStatus.conf.enableDebugLog = true
+        mapStatus.sessionLogged = false
+        logDebugSessionStart("debug enabled")
+      elseif (not value) and previous then
+        if mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
+          mapLibs.utils.logDebug("SETTINGS", "=== DEBUG LOG DISABLED ===", true)
+        end
+        mapStatus.conf.enableDebugLog = false
+        mapStatus.sessionLogged = false
+      else
+        mapStatus.conf.enableDebugLog = value
       end
     end
   )
@@ -769,12 +1318,9 @@ local function read(widget)
   mapStatus.conf.gpsFormat = storageToConfig("gpsFormat", 2)
   mapStatus.conf.mapProvider = storageToConfig("mapProvider", 2)
   mapStatus.conf.mapTypeId = storageToConfig("mapTypeId", 1)
-  mapStatus.conf.googleZoomDefault = storageToConfig("googleZoomDefault", 18)
-  mapStatus.conf.googleZoomMin = storageToConfig("googleZoomMin", 1)
-  mapStatus.conf.googleZoomMax = storageToConfig("googleZoomMax", 20)
-  mapStatus.conf.gmapZoomDefault = storageToConfig("gmapZoomDefault", 0)
-  mapStatus.conf.gmapZoomMin = storageToConfig("gmapZoomMin", -2)
-  mapStatus.conf.gmapZoomMax = storageToConfig("gmapZoomMax", 17)
+  mapStatus.conf.mapZoomDefault = storageToConfigWithFallback("mapZoomDefault", 18, {"googleZoomDefault", "gmapZoomDefault"})
+  mapStatus.conf.mapZoomMin = storageToConfigWithFallback("mapZoomMin", 1, {"googleZoomMin", "gmapZoomMin"})
+  mapStatus.conf.mapZoomMax = storageToConfigWithFallback("mapZoomMax", 20, {"googleZoomMax", "gmapZoomMax"})
   mapStatus.conf.enableMapGrid = storageToConfig("enableMapGrid", true)
   mapStatus.conf.enableDebugLog = storageToConfig("enableDebugLog", false)
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
@@ -795,12 +1341,9 @@ local function write(widget)
   storage.write("gpsFormat", mapStatus.conf.gpsFormat)
   storage.write("mapProvider", mapStatus.conf.mapProvider)
   storage.write("mapTypeId", mapStatus.conf.mapTypeId)
-  storage.write("googleZoomDefault", mapStatus.conf.googleZoomDefault)
-  storage.write("googleZoomMin", mapStatus.conf.googleZoomMin)
-  storage.write("googleZoomMax", mapStatus.conf.googleZoomMax)
-  storage.write("gmapZoomDefault", mapStatus.conf.gmapZoomDefault)
-  storage.write("gmapZoomMin", mapStatus.conf.gmapZoomMin)
-  storage.write("gmapZoomMax", mapStatus.conf.gmapZoomMax)
+  storage.write("mapZoomDefault", mapStatus.conf.mapZoomDefault)
+  storage.write("mapZoomMin", mapStatus.conf.mapZoomMin)
+  storage.write("mapZoomMax", mapStatus.conf.mapZoomMax)
   storage.write("enableMapGrid", mapStatus.conf.enableMapGrid)
   storage.write("enableDebugLog", mapStatus.conf.enableDebugLog)
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
