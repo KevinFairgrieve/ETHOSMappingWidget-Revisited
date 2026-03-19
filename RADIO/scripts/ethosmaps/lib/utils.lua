@@ -28,7 +28,8 @@ local alwaysOff = system.getSource({category=0, member=1, options=0})
 local sources = {}
 -- Debug logger state shared by rollover and write helpers.
 local debugLogPath = "/scripts/ethosmaps/debug.log"
-local maxLogLines = 5000
+local maxLogLines = 1000
+local maxScanLines = 8000      -- Safety cap for line-by-line scans to avoid ETHOS instruction-limit aborts.
 local lastLogWrite = 0
 local logFlushInterval = 100   -- Flush buffered log lines every 1 second (centiseconds).
 local maxBufferedLines = 40
@@ -55,6 +56,9 @@ function utils.performRollover()
     local line = fCount:read("*l")
     while line do
       totalLines = totalLines + 1
+      if totalLines >= maxScanLines then
+        break
+      end
       line = fCount:read("*l")
     end
     fCount:close()
@@ -91,6 +95,11 @@ function utils.performRollover()
     end)
     
     utils.debugLineCount = keepCount + 1
+
+    -- After a rollover the session header and settings snapshot are gone; trigger a fresh one.
+    if status then
+      status.sessionLogged = false
+    end
     else
     -- Ensure all opened handles are closed and the temporary file is cleaned up on failure.
     if f then f:close() end
@@ -112,6 +121,11 @@ local function initDebugLineCount()
     local line = f:read("*l")
     while line do
       count = count + 1
+      if count >= maxScanLines then
+        -- Treat over-limit files as "full" without scanning to EOF to stay below instruction limits.
+        count = maxLogLines
+        break
+      end
       line = f:read("*l")
     end
     f:close()

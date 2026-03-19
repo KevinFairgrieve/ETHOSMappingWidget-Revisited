@@ -351,6 +351,9 @@ function drawLib.unloadBitmap(name)
   -- Removes a cached bitmap from memory and nudges Lua garbage collection to reclaim it.
   if bitmaps[name] ~= nil then
     bitmaps[name] = nil
+    if status and status.perfProfileInc and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile then
+      status.perfProfileInc("gc_count", 2)
+    end
     collectgarbage()
     collectgarbage()
   end

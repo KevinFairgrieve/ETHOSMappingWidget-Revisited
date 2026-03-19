@@ -22,6 +22,9 @@ function resetLib.resetLayout(widget)
   status.layout = { nil }
   widget.ready = false
 
+  if status and status.perfProfileInc and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile then
+    status.perfProfileInc("gc_count", 2)
+  end
   collectgarbage()
   collectgarbage()
 end
@@ -29,6 +32,9 @@ end
 function resetLib.reset(widget)
   -- Performs a full widget reset by clearing layout state and forcing Lua garbage collection afterwards.
   resetLib.resetLayout(widget)
+  if status and status.perfProfileInc and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile then
+    status.perfProfileInc("gc_count", 2)
+  end
   collectgarbage()
   collectgarbage()
 end

@@ -304,6 +304,13 @@ end
 
 function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
+  -- Use truthy checks (not == true) because ETHOS storage may return 1/0 integers instead of booleans.
+  local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = os.clock() * 1000
+    status.perfProfileInc("tile_update_calls", 1)
+  end
   local now = getTime()
 
   if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
@@ -347,10 +354,20 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   end
   
   if tilesChanged then
+    if perfActive then
+      status.perfProfileInc("tile_rebuild_count", 1)
+    end
+    if perfActive then
+      status.perfProfileInc("gc_count", 1)
+    end
     collectgarbage()
     if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
       libs.utils.logDebug("TILE", "loadAndCenterTiles: tiles changed (load/zoom/recenter)")
     end
+  end
+
+  if perfActive then
+    status.perfProfileAddMs("tile_update_ms", os.clock() * 1000 - perfStartMs)
   end
 end
 

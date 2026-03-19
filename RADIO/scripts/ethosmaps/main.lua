@@ -79,6 +79,7 @@ local mapStatus = {
     mapTrailDots = 30,
     enableMapGrid = true,
     enableDebugLog = false,   -- Enables the on-device debug log.
+    enablePerfProfile = false, -- Emits 5s performance summaries into debug.log.
     screenToggleChannelId = 0,
     screenWheelChannelId = 0,
     screenWheelChannelDelay = 20,
@@ -168,8 +169,177 @@ local mapStatus = {
   tinyHeightThreshold = 190,
   verticalMedium = false,
   sessionLogged = false,
+
+  perfProfile = {
+    windowMs = 5000,
+    windowStartMs = 0,
+    metrics = {},
+    counters = {},
+  },
 }
 
+-- Performance profiler helper functions (must be defined before paint/wakeup/event use them).
+local function perfNowMs()
+  return os.clock() * 1000
+end
+
+local function perfWindowNowMs()
+  -- Use wall-clock seconds for window scheduling; os.clock() is CPU-time and can stall under low load.
+  local wallSec = os.time()
+  if type(wallSec) == "number" and wallSec > 0 then
+    return wallSec * 1000
+  end
+  -- Fallback to widget timer when RTC is unavailable.
+  return getTime() * 10
+end
+
+-- Dedicated perf window timer state, independent from mutable config/status tables.
+local perfWindowStartMs = nil
+
+local function configFlagEnabled(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local normalized = string.lower(value)
+    return normalized == "true" or normalized == "1" or normalized == "on"
+  end
+  return false
+end
+
+local function perfProfileEnabled()
+  return mapStatus ~= nil and mapStatus.conf ~= nil and configFlagEnabled(mapStatus.conf.enablePerfProfile) and configFlagEnabled(mapStatus.conf.enableDebugLog)
+end
+
+local function perfEnsureMetric(metricName)
+  local metrics = mapStatus.perfProfile.metrics
+  local metric = metrics[metricName]
+  if metric == nil then
+    metric = { sum = 0, count = 0, max = 0 }
+    metrics[metricName] = metric
+  end
+  return metric
+end
+
+local function perfAddMs(metricName, elapsedMs)
+  if not perfProfileEnabled() then
+    return
+  end
+  if type(elapsedMs) ~= "number" then
+    return
+  end
+  if elapsedMs < 0 then
+    elapsedMs = 0
+  end
+  local metric = perfEnsureMetric(metricName)
+  metric.sum = metric.sum + elapsedMs
+  metric.count = metric.count + 1
+  if elapsedMs > metric.max then
+    metric.max = elapsedMs
+  end
+end
+
+local function perfInc(counterName, delta)
+  if not perfProfileEnabled() then
+    return
+  end
+  if mapStatus.perfProfile.counters[counterName] == nil then
+    mapStatus.perfProfile.counters[counterName] = 0
+  end
+  mapStatus.perfProfile.counters[counterName] = mapStatus.perfProfile.counters[counterName] + (delta or 1)
+end
+
+local function perfResetWindow(nowMs)
+  mapStatus.perfProfile.metrics = {}
+  mapStatus.perfProfile.counters = {}
+  perfWindowStartMs = nowMs
+  mapStatus.perfProfile.windowStartMs = nowMs
+end
+
+local function perfMetricAvg(metricName)
+  local metric = mapStatus.perfProfile.metrics[metricName]
+  if metric == nil or metric.count == 0 then
+    return 0
+  end
+  return metric.sum / metric.count
+end
+
+local function perfValueText(value, decimals)
+  local scale = 10 ^ (decimals or 0)
+  return tostring(math.floor(value * scale + 0.5) / scale)
+end
+
+local function perfTableCell(label, value)
+  return string.format("%-16s", label .. "=" .. tostring(value))
+end
+
+local function perfTableRow(rowLabel, firstCell, secondCell, thirdCell)
+  return string.format("| %-8s | %-16s | %-16s | %-16s |", rowLabel, firstCell, secondCell, thirdCell)
+end
+
+local function perfLogWindow(nowMs)
+  if not perfProfileEnabled() then
+    return
+  end
+  local startMs = perfWindowStartMs or tonumber(mapStatus.perfProfile.windowStartMs) or 0
+  if startMs == 0 then
+    perfWindowStartMs = nowMs
+    mapStatus.perfProfile.windowStartMs = nowMs
+    return
+  end
+
+  local windowMs = tonumber(mapStatus.perfProfile.windowMs) or 5000
+  local elapsedMs = nowMs - startMs
+  if elapsedMs < windowMs then
+    return
+  end
+
+  if not (mapLibs and mapLibs.utils and mapLibs.utils.logDebug) then
+    perfResetWindow(nowMs)
+    return
+  end
+
+  local elapsedSec = elapsedMs / 1000
+  local paintCalls = mapStatus.perfProfile.counters.paint_calls or 0
+  local wakeupCalls = mapStatus.perfProfile.counters.wakeup_calls or 0
+  local fps = 0
+  if elapsedSec > 0 then
+    fps = paintCalls / elapsedSec
+  end
+
+  local ok, err = pcall(function()
+    local summary = "WIN secs=" .. tostring(math.floor(elapsedSec * 10 + 0.5) / 10)
+      .. " fps=" .. tostring(math.floor(fps * 100 + 0.5) / 100)
+      .. " wake=" .. tostring(wakeupCalls)
+      .. " paint=" .. tostring(math.floor(perfMetricAvg("paint_total_ms") * 100 + 0.5) / 100)
+      .. " layout=" .. tostring(math.floor(perfMetricAvg("layout_draw_ms") * 100 + 0.5) / 100)
+      .. " tile=" .. tostring(math.floor(perfMetricAvg("tile_update_ms") * 100 + 0.5) / 100)
+      .. " bg=" .. tostring(math.floor(perfMetricAvg("bgtasks_ms") * 100 + 0.5) / 100)
+      .. " flush=" .. tostring(math.floor(perfMetricAvg("log_flush_ms") * 100 + 0.5) / 100)
+      .. " event=" .. tostring(math.floor(perfMetricAvg("event_total_ms") * 100 + 0.5) / 100)
+      .. " rebuilds=" .. tostring(mapStatus.perfProfile.counters.tile_rebuild_count or 0)
+      .. " tileCalls=" .. tostring(mapStatus.perfProfile.counters.tile_update_calls or 0)
+      .. " touches=" .. tostring(mapStatus.perfProfile.counters.touch_events or 0)
+
+    mapLibs.utils.logDebug("PERF", "WINDOW HIT elapsedMs=" .. tostring(elapsedMs), true)
+    mapLibs.utils.logDebug("PERF", summary, true)
+  end)
+
+  if not ok then
+    mapLibs.utils.logDebug("PERF", "window emit error: " .. tostring(err), true)
+  end
+
+  mapStatus.perfProfile.windowCount = (mapStatus.perfProfile.windowCount or 0) + 1
+  perfResetWindow(nowMs)
+end
+
+-- Export performance profiler callbacks to mapStatus so libraries can access them.
+mapStatus.perfProfileInc = perfInc
+mapStatus.perfProfileAddMs = perfAddMs
 
 -- Maps exported source names to default values, formatting metadata, and the telemetry field they mirror.
 mapStatus.luaSourcesConfig = {}
@@ -259,6 +429,11 @@ local function bgtasks(widget)
   -- Collects telemetry from Ethos sources, derives navigation values, and writes the updated state back into mapStatus.
   local now = getTime()
   mapStatus.counter = mapStatus.counter + 1
+
+  -- Re-emit session header if it was skipped (e.g. after a log rollover or a failed first attempt).
+  if not mapStatus.sessionLogged then
+    logDebugSessionStart("bgtasks-retry")
+  end
   local gpsSrcLat = system.getSource({name="GPS", options=OPTION_LATITUDE})
   local gpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
   local gpsData = {}
@@ -268,13 +443,14 @@ local function bgtasks(widget)
     mapStatus.telemetry.lat = gpsData.lat
     mapStatus.telemetry.lon = gpsData.lon
 
-    -- Log GPS changes only when the debug logger is enabled and the utility library is available.
+    -- Log GPS position at most once every 15 seconds to avoid flooding the debug log.
     if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then -- Safeguard: avoid logger access before config and libraries are initialized.
       local lat = mapStatus.telemetry.lat or 0
       local lon = mapStatus.telemetry.lon or 0
-    
-      if lat ~= (mapStatus.lastLoggedLat or 0) or lon ~= (mapStatus.lastLoggedLon or 0) then
+      local gpsLogInterval = 1500 -- centiseconds (15 seconds)
+      if now - (mapStatus.lastGpsLogTime or 0) >= gpsLogInterval then
         mapLibs.utils.logDebug("GPS", string.format("lat=%.6f lon=%.6f", lat, lon))
+        mapStatus.lastGpsLogTime = now
         mapStatus.lastLoggedLat = lat
         mapStatus.lastLoggedLon = lon
       end
@@ -336,6 +512,12 @@ end
 
 local function paint(widget)
   -- Clears the widget area and routes drawing to the active layout using the latest shared state.
+  local perfActive = perfProfileEnabled() -- Performance profiler trigger (disabled unless debug + perf profile are both enabled).
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = perfNowMs()
+    perfInc("paint_calls", 1)
+  end
   if not widget then return end -- Safeguard: Ethos can call paint before a widget instance is fully available.
   lcd.color(mapStatus.colors.background)
   lcd.pen(SOLID)
@@ -351,7 +533,14 @@ local function paint(widget)
     loadLayout(widget)
   else
     if mapStatus.layout[widget.screen] ~= nil then
+      local drawStartMs = nil
+      if perfActive then
+        drawStartMs = perfNowMs()
+      end
       mapStatus.layout[widget.screen].draw(widget)
+      if perfActive then
+        perfAddMs("layout_draw_ms", perfNowMs() - drawStartMs)
+      end
     else
       loadLayout(widget)
     end
@@ -360,13 +549,31 @@ local function paint(widget)
   if not gpsDataAvailable(mapStatus.telemetry.lat, mapStatus.telemetry.lon) then
     mapLibs.drawLib.drawNoGPSData(widget)
   end
+  if perfActive then
+    local paintElapsedMs = perfNowMs() - perfStartMs
+    perfAddMs("paint_total_ms", paintElapsedMs)
+    if paintElapsedMs >= 100 then
+      perfInc("long_frame_count_100ms", 1)
+    end
+    if paintElapsedMs >= 200 then
+      perfInc("long_frame_count_200ms", 1)
+    end
+  end
 end
 
 local function event(widget, category, value, x, y)
   -- Handles touch input from Ethos, updates zoom state, and consumes handled events before they reach other UI code.
+  local perfActive = perfProfileEnabled() -- Performance profiler trigger (disabled unless debug + perf profile are both enabled).
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = perfNowMs()
+  end
   local kill = false
 
   if category == EVT_TOUCH and x ~= nil and y ~= nil then
+    if perfActive then
+      perfInc("touch_events", 1)
+    end
     local w, h = lcd.getWindowSize()
     if w ~= nil and h ~= nil and w > 0 and h > 0 then
       mapStatus.widgetWidth = w
@@ -450,7 +657,13 @@ local function event(widget, category, value, x, y)
   
   if kill then
     system.killEvents(value)
+    if perfActive then
+      perfAddMs("event_total_ms", perfNowMs() - perfStartMs)
+    end
     return true
+  end
+  if perfActive then
+    perfAddMs("event_total_ms", perfNowMs() - perfStartMs)
   end
   return false
 end
@@ -476,6 +689,12 @@ end
 
 local function wakeup(widget)
   -- Runs recurring background work between paint calls and invalidates the LCD so Ethos schedules a redraw.
+  local perfActive = perfProfileEnabled() -- Performance profiler trigger (disabled unless debug + perf profile are both enabled).
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = perfNowMs()
+    perfInc("wakeup_calls", 1)
+  end
   if not widget then return end -- Safeguard: Ethos can schedule wakeup before the widget handle is ready.
   local now = getTime()
 
@@ -485,13 +704,135 @@ local function wakeup(widget)
   end
 
   if widget.runBgTasks then
+    local bgStartMs = nil
+    if perfActive then
+      bgStartMs = perfNowMs()
+    end
     bgtasks(widget)
+    if perfActive then
+      perfAddMs("bgtasks_ms", perfNowMs() - bgStartMs)
+    end
   end
 
   if mapLibs and mapLibs.utils and mapLibs.utils.flushLogs then
+    local flushStartMs = nil
+    if perfActive then
+      flushStartMs = perfNowMs()
+    end
     mapLibs.utils.flushLogs(false)
+    if perfActive then
+      perfAddMs("log_flush_ms", perfNowMs() - flushStartMs)
+    end
   end
 
+  if perfActive then
+    perfAddMs("wakeup_total_ms", perfNowMs() - perfStartMs)
+    local perfNowWallMs = perfWindowNowMs()
+    local startMs = perfWindowStartMs or tonumber(mapStatus.perfProfile.windowStartMs) or 0
+    local windowMs = tonumber(mapStatus.perfProfile.windowMs) or 5000
+
+    if startMs == 0 then
+      perfWindowStartMs = perfNowWallMs
+      mapStatus.perfProfile.windowStartMs = perfNowWallMs
+      startMs = perfNowWallMs
+    end
+
+    local elapsedMs = perfNowWallMs - startMs
+    if elapsedMs >= windowMs and mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
+      local elapsedSec = elapsedMs / 1000
+      local wakeupCalls = mapStatus.perfProfile.counters.wakeup_calls or 0
+      local paintCalls = mapStatus.perfProfile.counters.paint_calls or 0
+      local fps = 0
+      if elapsedSec > 0 then
+        fps = paintCalls / elapsedSec
+      end
+
+      mapLibs.utils.logDebug("PERF", "=== PERF WINDOW " .. perfValueText(elapsedSec, 1) .. "s ===", true)
+      mapLibs.utils.logDebug("PERF", "+----------+------------------+------------------+------------------+", true)
+      mapLibs.utils.logDebug(
+        "PERF",
+        perfTableRow(
+          "rate",
+          perfTableCell("fps", perfValueText(fps, 2)),
+          perfTableCell("wakeups", wakeupCalls),
+          perfTableCell("paints", paintCalls)
+        ),
+        true
+      )
+      mapLibs.utils.logDebug(
+        "PERF",
+        perfTableRow(
+          "draw",
+          perfTableCell("paintMs", perfValueText(perfMetricAvg("paint_total_ms"), 2)),
+          perfTableCell("layoutMs", perfValueText(perfMetricAvg("layout_draw_ms"), 2)),
+          perfTableCell("tileMs", perfValueText(perfMetricAvg("tile_update_ms"), 2))
+        ),
+        true
+      )
+      mapLibs.utils.logDebug(
+        "PERF",
+        perfTableRow(
+          "misc",
+          perfTableCell("bgMs", perfValueText(perfMetricAvg("bgtasks_ms"), 2)),
+          perfTableCell("flushMs", perfValueText(perfMetricAvg("log_flush_ms"), 2)),
+          perfTableCell("eventMs", perfValueText(perfMetricAvg("event_total_ms"), 2))
+        ),
+        true
+      )
+      mapLibs.utils.logDebug(
+        "PERF",
+        perfTableRow(
+          "counts",
+          perfTableCell("rebuilds", mapStatus.perfProfile.counters.tile_rebuild_count or 0),
+          perfTableCell("tileCalls", mapStatus.perfProfile.counters.tile_update_calls or 0),
+          perfTableCell("touches", mapStatus.perfProfile.counters.touch_events or 0)
+        ),
+        true
+      )
+      mapLibs.utils.logDebug(
+        "PERF",
+        perfTableRow(
+          "sched",
+          perfTableCell("invalidates", mapStatus.perfProfile.counters.invalidate_count or 0),
+          perfTableCell("frame100ms", mapStatus.perfProfile.counters.long_frame_count_100ms or 0),
+          perfTableCell("frame200ms", mapStatus.perfProfile.counters.long_frame_count_200ms or 0)
+        ),
+        true
+      )
+      mapLibs.utils.logDebug(
+        "PERF",
+        perfTableRow(
+          "gc",
+          perfTableCell("gcCalls", mapStatus.perfProfile.counters.gc_count or 0),
+          perfTableCell("-", "-"),
+          perfTableCell("-", "-")
+        ),
+        true
+      )
+      mapLibs.utils.logDebug(
+        "PERF",
+        "+----------+------------------+------------------+------------------+",
+        true
+      )
+
+      mapStatus.perfProfile.windowCount = (mapStatus.perfProfile.windowCount or 0) + 1
+      perfResetWindow(perfNowWallMs)
+    end
+
+    -- One-time diagnostics until the first PERF WINDOW is emitted.
+    if (mapStatus.perfProfile.windowCount or 0) == 0 and mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
+      local lastDiag = mapStatus.perfProfile.lastDiagCs or 0
+      if now - lastDiag >= 1200 then
+        local startMs = perfWindowStartMs or tonumber(mapStatus.perfProfile.windowStartMs) or 0
+        local elapsedMs = startMs > 0 and (perfWindowNowMs() - startMs) or 0
+        mapLibs.utils.logDebug("PERF", string.format("diag active=1 startMs=%.0f elapsedMs=%.0f windowMs=%s", startMs, elapsedMs, tostring(mapStatus.perfProfile.windowMs)), true)
+        mapStatus.perfProfile.lastDiagCs = now
+      end
+    end
+  end
+  if perfActive then
+    perfInc("invalidate_count", 1)
+  end
   lcd.invalidate()   
 end
 
@@ -502,6 +843,12 @@ local function create()
   end
 
   initLibs()
+  -- Reset session logging flag so fresh widget initializations emit a new debug marker.
+  mapStatus.sessionLogged = false
+
+
+  mapStatus.perfProfileAddMs = perfAddMs
+  mapStatus.perfProfileInc = perfInc
 
   -- Emit a visible session marker once so each debug log session has a clear start record.
   logDebugSessionStart("widget create")
@@ -839,6 +1186,9 @@ local function toLogValue(value)
   if valueType == "boolean" then
     return value and "true" or "false"
   end
+  if valueType == "userdata" or valueType == "function" or valueType == "thread" then
+    return "<" .. valueType .. ">"
+  end
   return tostring(value)
 end
 
@@ -1001,27 +1351,15 @@ local function logDirectoryTree(rootPath, title)
     local mapTypeIndent = (i < #providerDirs) and "|   " or "    "
     mapLibs.utils.logDebug("SETTINGS", providerPrefix .. providerName .. "/", true)
 
-    local mapTypeDirs = getSortedDirectories(providerPath) or {}
-    if #mapTypeDirs == 0 then
-      mapLibs.utils.logDebug("SETTINGS", mapTypeIndent .. "(no subfolders)", true)
-    else
-      for j = 1, #mapTypeDirs do
-        local mapTypeName = mapTypeDirs[j]
-        local mapTypePath = providerPath .. "/" .. mapTypeName
-        local mapTypePrefix = (j < #mapTypeDirs) and "|-- " or "`-- "
-        local zoomIndent = mapTypeIndent .. ((j < #mapTypeDirs) and "|   " or "    ")
-        mapLibs.utils.logDebug("SETTINGS", mapTypeIndent .. mapTypePrefix .. mapTypeName .. "/", true)
-
-        if not yaapuReducedDepth then
-          local zoomDirs = getSortedDirectories(mapTypePath) or {}
-          if #zoomDirs == 0 then
-            mapLibs.utils.logDebug("SETTINGS", zoomIndent .. "(no subfolders)", true)
-          else
-            for k = 1, #zoomDirs do
-              local zoomPrefix = (k < #zoomDirs) and "|-- " or "`-- "
-              mapLibs.utils.logDebug("SETTINGS", zoomIndent .. zoomPrefix .. zoomDirs[k] .. "/", true)
-            end
-          end
+    if not yaapuReducedDepth then
+      local mapTypeDirs = getSortedDirectories(providerPath) or {}
+      if #mapTypeDirs == 0 then
+        mapLibs.utils.logDebug("SETTINGS", mapTypeIndent .. "(no subfolders)", true)
+      else
+        for j = 1, #mapTypeDirs do
+          local mapTypeName = mapTypeDirs[j]
+          local mapTypePrefix = (j < #mapTypeDirs) and "|-- " or "`-- "
+          mapLibs.utils.logDebug("SETTINGS", mapTypeIndent .. mapTypePrefix .. mapTypeName .. "/", true)
         end
       end
     end
@@ -1059,16 +1397,24 @@ logDebugSessionStart = function(reason)
     return
   end
 
+  -- Mark as logged first so a crash inside snapshot/tree doesn't put us in an infinite retry loop.
+  mapStatus.sessionLogged = true
+
   local marker = "=== DEBUG SESSION STARTED ==="
   if reason and reason ~= "" then
     marker = marker .. " (" .. reason .. ")"
   end
 
   mapLibs.utils.logDebug("SETTINGS", marker, true)
-  logSettingsSnapshot()
-  logDirectoryTree("/bitmaps/ethosmaps/maps", "FOLDER TREE SNAPSHOT: ethosmaps/maps")
-  logDirectoryTree("/bitmaps/yaapu/maps", "FOLDER TREE SNAPSHOT: yaapu/maps")
-  mapStatus.sessionLogged = true
+
+  if mapStatus.conf.enablePerfProfile then
+    mapLibs.utils.logDebug("PERF", "=== PERF PROFILE ACTIVE (5s windows) ===", true)
+  end
+
+  -- Wrap snapshot and tree in pcall so a crash in one doesn't prevent the other from running.
+  pcall(logSettingsSnapshot)
+  pcall(logDirectoryTree, "/bitmaps/ethosmaps/maps", "FOLDER TREE SNAPSHOT: ethosmaps/maps")
+  pcall(logDirectoryTree, "/bitmaps/yaapu/maps", "FOLDER TREE SNAPSHOT: yaapu/maps")
 end
 
 local function providerLabelById(providerId)
@@ -1361,7 +1707,7 @@ local function configure(widget)
 
   -- Debug logging is opt-in because writes go to the SD card during runtime.
   line = form.addLine("Enable debug log")
-  form.addBooleanField(line, nil, 
+  widget.enableDebugLogField = form.addBooleanField(line, nil, 
     function() return mapStatus.conf.enableDebugLog end, 
     function(value) 
       local previous = mapStatus.conf.enableDebugLog
@@ -1379,8 +1725,38 @@ local function configure(widget)
       else
         mapStatus.conf.enableDebugLog = value
       end
+
+      -- Toggle perf profile field visibility based on debug log state
+      if widget.enablePerfProfileField ~= nil then
+        widget.enablePerfProfileField:enable(value)
+      end
     end
   )
+
+  line = form.addLine("Enable perf profile (5s)")
+  widget.enablePerfProfileField = form.addBooleanField(line, nil,
+    function() return mapStatus.conf.enablePerfProfile end,
+    function(value)
+      local previous = configFlagEnabled(mapStatus.conf.enablePerfProfile)
+      local enabled = configFlagEnabled(value)
+      mapStatus.conf.enablePerfProfile = value
+
+      if enabled and not previous then
+        perfWindowStartMs = nil
+        mapStatus.perfProfile.windowStartMs = 0
+        mapStatus.perfProfile.windowCount = 0
+        if mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
+          mapLibs.utils.logDebug("PERF", "=== PERF PROFILE ENABLED (5s windows) ===", true)
+        end
+      elseif (not enabled) and previous then
+        if mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
+          mapLibs.utils.logDebug("PERF", "=== PERF PROFILE DISABLED ===", true)
+        end
+      end
+    end
+  )
+  -- Only show perf profile option when debug logging is enabled.
+  widget.enablePerfProfileField:enable(mapStatus.conf.enableDebugLog)
 
 end
 
@@ -1399,6 +1775,7 @@ local function read(widget)
   mapStatus.conf.mapZoomMax = storageToConfigWithFallback("mapZoomMax", 20, {"googleZoomMax", "gmapZoomMax"})
   mapStatus.conf.enableMapGrid = storageToConfig("enableMapGrid", true)
   mapStatus.conf.enableDebugLog = storageToConfig("enableDebugLog", false)
+  mapStatus.conf.enablePerfProfile = storageToConfig("enablePerfProfile", false)
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
   mapStatus.conf.userSensor2 = storageToConfig("userSensor2", nil)
@@ -1422,6 +1799,7 @@ local function write(widget)
   storage.write("mapZoomMax", mapStatus.conf.mapZoomMax)
   storage.write("enableMapGrid", mapStatus.conf.enableMapGrid)
   storage.write("enableDebugLog", mapStatus.conf.enableDebugLog)
+  storage.write("enablePerfProfile", mapStatus.conf.enablePerfProfile)
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
   storage.write("userSensor2", mapStatus.conf.userSensor2)
