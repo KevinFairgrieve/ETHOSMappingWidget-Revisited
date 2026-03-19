@@ -58,6 +58,7 @@ local lastPosUpdate = getTime()
 local lastPosSample = getTime()
 local lastHomePosUpdate = getTime()
 local lastZoomLevel = -99
+local lastMapProvider = -99
 local estimatedHomeGps = {
   lat = nil,
   lon = nil
@@ -109,7 +110,7 @@ function mapLib.tiles_on_level(level)
   -- Converts a user-facing zoom level (1..20) into the number of tiles on one map axis.
   -- Both providers now receive user-facing levels; GMapCatcher internal offset is applied only where tiles are addressed.
   if status.conf.mapProvider == 1 then
-    return 2^(level-1)  -- equivalent to 2^(17-(18-level)) after user→internal translation
+    return 2^(level-1)  -- same as legacy form 2^(17-(18-level)); simplified algebraically
   else
     return 2^level
   end
@@ -155,8 +156,8 @@ function mapLib.gmapcatcher_coord_to_tiles(lat, lon, level)
 end
 
 function mapLib.google_tiles_to_path(tile_x, tile_y, level)
-  -- Builds the extension-free SD-card path for an ethosmaps tile; getTileBitmap probes .jpg then .png.
-  return string.format("/%d/%.0f/s_%.0f", level, tile_y, tile_x)
+  -- Builds the extension-free SD-card path for native Google/OSM tiles in /z/x/y format.
+  return string.format("/%d/%.0f/%.0f", level, tile_x, tile_y)
 end
 
 function mapLib.esri_tiles_to_path(tile_x, tile_y, level)
@@ -181,7 +182,8 @@ local function fileExists(path)
 end
 
 local function getGoogleFallbackBasePath(mapType, tilePath)
-  -- Returns the extension-free Yaapu base path for a Google map type (for two-extension probing).
+  -- Returns the extension-free Yaapu base path for a Google map type.
+  -- Yaapu Google tiles use legacy /z/y/s_x naming even when native tiles use /z/x/y.
   local yaapuMapTypeMap = {
     ["Satellite"] = "GoogleSatelliteMap",
     ["Hybrid"] = "GoogleHybridMap",
@@ -189,7 +191,14 @@ local function getGoogleFallbackBasePath(mapType, tilePath)
     ["Terrain"] = "GoogleTerrainMap"
   }
   local yaapuMapType = yaapuMapTypeMap[mapType] or mapType
-  return "/bitmaps/yaapu/maps/" .. yaapuMapType .. tilePath
+
+  local fallbackTilePath = tilePath
+  local z, x, y = tilePath:match("^/(%d+)/(%d+)/(%d+)$")
+  if z ~= nil and x ~= nil and y ~= nil then
+    fallbackTilePath = string.format("/%s/%s/s_%s", z, y, x)
+  end
+
+  return "/bitmaps/yaapu/maps/" .. yaapuMapType .. fallbackTilePath
 end
 
 local function loadFirstExisting(tilePath, ...)
@@ -371,21 +380,6 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 
-  -- Fallback safety: keep map rendering active even if provider setup has not assigned helpers yet.
-  if mapLib.tiles_to_path == nil or mapLib.coord_to_tiles == nil then
-    mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
-    mapLib.tiles_to_path = mapLib.google_tiles_to_path
-  end
-
-  if #tiles == 0 or tiles[1] == nil then
-    if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
-      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
-    else
-      tile_x, tile_y, offset_x, offset_y = 0, 0, 0, 0
-    end
-    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
-  end
-
   if #tiles == 0 or tiles[1] == nil then
     if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
@@ -516,6 +510,26 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   lcd.setClipping()
 end
 
+local function configureProjectionHelpers(provider)
+  if provider == 1 then
+    mapLib.coord_to_tiles = mapLib.gmapcatcher_coord_to_tiles
+    mapLib.tiles_to_path = mapLib.gmapcatcher_tiles_to_path
+  elseif provider == 3 then
+    -- ESRI uses Web Mercator with /z/y/x tile addressing.
+    mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
+    mapLib.tiles_to_path = mapLib.esri_tiles_to_path
+  else
+    -- Google (2) and OSM (4): Web Mercator with /z/x/y tile addressing.
+    mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
+    mapLib.tiles_to_path = mapLib.google_tiles_to_path
+  end
+end
+
+local function getScaleDistanceForLevel(level)
+  local unitFactor = (status.conf.distUnitScale == 1 and 1 or 3)
+  return unitFactor * 50 * 2^(20-level)
+end
+
 function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   -- Reconfigures projection helpers, tile caches, and scale metadata whenever map geometry or zoom changes.
 
@@ -523,52 +537,13 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     return -- Safeguard: map initialization requires complete viewport and zoom information.
   end
 
-  -- Force first-run initialization (lastZoomLevel = -99)
-  if level ~= lastZoomLevel or lastZoomLevel == -99 then
-    zoomUpdateTimer = getTime()
-    zoomUpdate = true
-
-    libs.resetLib.clearTable(tiles)
-    libs.resetLib.clearTable(mapBitmapByPath)
-    libs.resetLib.clearTable(posHistory)
-
-    sample = 0
-    sampleCount = 0
-
-    world_tiles = mapLib.tiles_on_level(level)
-    tiles_per_radian = world_tiles / (2 * math.pi)
-
-    if status.conf.mapProvider == 1 then
-      mapLib.coord_to_tiles = mapLib.gmapcatcher_coord_to_tiles
-      mapLib.tiles_to_path = mapLib.gmapcatcher_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
-      scaleLabel = string.format("%.0f%s",(status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level),status.conf.distUnitLabel)
-      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
-    elseif status.conf.mapProvider == 3 then
-      -- ESRI uses Web Mercator with /z/y/x tile addressing.
-      mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
-      mapLib.tiles_to_path = mapLib.esri_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
-      scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
-      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
-    else
-      -- Google (2) and OSM (4): Web Mercator with /z/y/s_x tile addressing.
-      mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
-      mapLib.tiles_to_path = mapLib.google_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
-      scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
-      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
-    end
-    lastZoomLevel = level
-  end
-  -- ========================================================
-
   MAP_X = x
   MAP_Y = y
   TILES_X = tiles_x
   TILES_Y = tiles_y
 
-  if level ~= lastZoomLevel then
+  local provider = (status and status.conf and status.conf.mapProvider) or 2
+  if level ~= lastZoomLevel or provider ~= lastMapProvider or lastZoomLevel == -99 then
     zoomUpdateTimer = getTime()
     zoomUpdate = true
 
@@ -581,29 +556,14 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 
     world_tiles = mapLib.tiles_on_level(level)
     tiles_per_radian = world_tiles / (2 * math.pi)
+    configureProjectionHelpers(provider)
+    tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
+    local scaleDistance = getScaleDistanceForLevel(level)
+    scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
+    scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
-    if status.conf.mapProvider == 1 then
-      mapLib.coord_to_tiles = mapLib.gmapcatcher_coord_to_tiles
-      mapLib.tiles_to_path = mapLib.gmapcatcher_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
-      scaleLabel = string.format("%.0f%s",(status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level),status.conf.distUnitLabel)
-      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
-    elseif status.conf.mapProvider == 3 then
-      -- ESRI uses Web Mercator with /z/y/x tile addressing.
-      mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
-      mapLib.tiles_to_path = mapLib.esri_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
-      scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
-      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
-    else
-      -- Google (2) and OSM (4): Web Mercator with /z/y/s_x tile addressing.
-      mapLib.coord_to_tiles = mapLib.google_coord_to_tiles
-      mapLib.tiles_to_path = mapLib.google_tiles_to_path
-      tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
-      scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
-      scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
-    end
     lastZoomLevel = level
+    lastMapProvider = provider
   end
 end
 
@@ -611,6 +571,7 @@ function mapLib.init(param_status, param_libs)
   -- Stores shared state references so map helpers can read telemetry/config data and call sibling libraries.
   status = param_status
   libs = param_libs
+  configureProjectionHelpers((status and status.conf and status.conf.mapProvider) or 2)
   return mapLib
 end
 
@@ -624,13 +585,11 @@ function mapLib.calculateScale(level)
 
   local world_tiles = mapLib.tiles_on_level(level)
   local tile_dim = (40075017 / world_tiles) * status.conf.distUnitScale
+  local scaleDistance = getScaleDistanceForLevel(level)
 
-  if status.conf.mapProvider == 1 then
-    scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
-    scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
-  elseif status.conf.mapProvider == 2 then
-    scaleLabel = string.format("%.0f%s", (status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level), status.conf.distUnitLabel)
-    scaleLen = ((status.conf.distUnitScale==1 and 1 or 3)*50*2^(20-level)/tile_dim)*TILES_SIZE
+  if status.conf.mapProvider == 1 or status.conf.mapProvider == 2 then
+    scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
+    scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
   end
 
   return scaleLen, scaleLabel

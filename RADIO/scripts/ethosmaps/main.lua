@@ -29,6 +29,7 @@ if not hasLfs then
 end
 
 local logDebugSessionStart
+local configRebuildInProgress = false
 
 
 local mapStatus = {
@@ -1033,14 +1034,19 @@ local function mapTypeLabelById(mapTypeId)
   return MAP_TYPE_LABELS[mapTypeId] or tostring(mapTypeId)
 end
 
+local function normalizeLegacyMapTypeIdForProvider(provider, mapTypeId)
+  -- Migrate legacy Street id (3) used in earlier ESRI/OSM builds to dedicated Street id (5).
+  if (provider == 3 or provider == 4) and mapTypeId == 3 then
+    return 5
+  end
+  return mapTypeId
+end
+
 local function ensureAvailableMapSelections()
   local oldProvider = mapStatus.conf.mapProvider
   local oldMapTypeId = mapStatus.conf.mapTypeId
 
-  -- Migrate legacy Street id (3) used in earlier ESRI/OSM builds to dedicated Street id (5).
-  if (mapStatus.conf.mapProvider == 3 or mapStatus.conf.mapProvider == 4) and mapStatus.conf.mapTypeId == 3 then
-    mapStatus.conf.mapTypeId = 5
-  end
+  mapStatus.conf.mapTypeId = normalizeLegacyMapTypeIdForProvider(mapStatus.conf.mapProvider, mapStatus.conf.mapTypeId)
 
   local providerChoices = getAvailableProviderChoices()
   if not choiceContainsValue(providerChoices, mapStatus.conf.mapProvider) then
@@ -1111,7 +1117,7 @@ local function configure(widget)
   local providerChoices, mapTypeChoices = ensureAvailableMapSelections()
 
   local line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0 beta3")
+  form.addStaticText(line, nil, "1.0.0 beta4")
 
   line = form.addLine("Link quality source")
   form.addSourceField(line, nil, function() return mapStatus.conf.linkQualitySource end, function(value) mapStatus.conf.linkQualitySource = value end)
@@ -1146,10 +1152,7 @@ local function configure(widget)
     function(value)
       local oldProvider = mapStatus.conf.mapProvider
       mapStatus.conf.mapProvider = value
-
-      if (value == 3 or value == 4) and mapStatus.conf.mapTypeId == 3 then
-        mapStatus.conf.mapTypeId = 5
-      end
+      mapStatus.conf.mapTypeId = normalizeLegacyMapTypeIdForProvider(value, mapStatus.conf.mapTypeId)
 
       if oldProvider ~= value then
         logMapSelectionAutofix("Provider changed: " .. providerLabelById(oldProvider) .. " -> " .. providerLabelById(value))
@@ -1167,16 +1170,25 @@ local function configure(widget)
 
       -- Rebuild the settings form only when the previous map type became invalid and had to fallback.
       if mapTypeAdjusted then
-        if form ~= nil and type(form.clear) == "function" then
-          local ok = pcall(form.clear)
-          if ok then
-            configure(widget)
+        local rebuilt = false
+        if (not configRebuildInProgress) and form ~= nil and type(form.clear) == "function" then
+          configRebuildInProgress = true
+          local cleared = pcall(form.clear)
+          if cleared then
+            local configured = pcall(configure, widget)
+            rebuilt = configured
+          end
+          configRebuildInProgress = false
+          if rebuilt then
             return
           end
         end
 
         -- Fallback for Ethos variants without form.clear().
-        local refreshed = refreshConfigureForm()
+        local refreshed = false
+        if not rebuilt then
+          refreshed = refreshConfigureForm()
+        end
         if not refreshed and mapStatus.conf.enableDebugLog then
           logMapSelectionAutofix("Form refresh API unavailable after map type fallback; choices may update only after reopening settings")
         end

@@ -85,7 +85,7 @@ This widget supports a **fully transparent fallback system** that allows you to 
    - Latest provider technology
 
 2. **Fallback (Yaapu Paths)**: If EthosMaps tiles not found (only Google), automatically load from Yaapu structure, if available
-   - GMapCatcher: Works with existing Yaapu `/bitmaps/yaapu/maps/` layout but is not natively supported in `etosmaps` path
+   - GMapCatcher: Works with existing Yaapu `/bitmaps/yaapu/maps/` layout but is not natively supported in `ethosmaps` path
    - Google: Falls back to legacy Yaapu Google map folders
    - Seamless integration — **users don't notice the switch**
 
@@ -116,16 +116,22 @@ This widget supports a **fully transparent fallback system** that allows you to 
 ```
 /bitmaps/ethosmaps/maps/
 ├── GOOGLE/
-│   ├── Map/{level}/{tileY}/s_{tileX}.png
-│   ├── Satellite/{level}/{tileY}/s_{tileX}.png
-│   ├── Hybrid/{level}/{tileY}/s_{tileX}.png
-│   └── Terrain/{level}/{tileY}/s_{tileX}.png
+│   ├── Map/{z}/{x}/{y}.{jpg|png}
+│   ├── Satellite/{z}/{x}/{y}.{jpg|png}
+│   ├── Hybrid/{z}/{x}/{y}.{jpg|png}
+│   └── Terrain/{z}/{x}/{y}.{jpg|png}
 ├── ESRI/
-│   ├── Map/{level}/{tileY}/s_{tileX}.png
-│   └── Satellite/{level}/{tileY}/s_{tileX}.png
+│   ├── Satellite/{z}/{y}/{x}.{jpg|png}
+│   ├── Hybrid/{z}/{y}/{x}.{jpg|png}
+│   └── Street/{z}/{y}/{x}.{jpg|png}
 └── OSM/
-    └── Map/{level}/{tileY}/s_{tileX}.png
+    └── Street/{z}/{x}/{y}.{jpg|png}
 ```
+
+**Coordinate rules currently used by the widget:**
+- **Google / OSM:** `z/x/y`
+- **ESRI:** `z/y/x`
+- **Formats:** `.jpg` and `.png` are both supported (auto-detected per tile)
 
 **Yaapu (Legacy Format - Automatically Supported):**
 ```
@@ -141,10 +147,38 @@ This widget supports a **fully transparent fallback system** that allows you to 
 ### Naming Conventions (Strict for Predictability)
 
 - **EthosMaps provider folders**: FULL CAPS (`GOOGLE`, `ESRI`, `OSM`)
-- **Map type folders**: Exact Title-Case (`Map`, `Satellite`, `Hybrid`, `Terrain`)
+- **Map type folders**: Exact Title-Case per provider:
+    - `GOOGLE`: `Map`, `Satellite`, `Hybrid`, `Terrain`
+    - `ESRI`: `Satellite`, `Hybrid`, `Street`
+    - `OSM`: `Street`
 - **Yaapu folders**: Original Yaapu naming (automatically mapped for compatibility)
 - **UI Display**: Provider names shown in readable format (`Google`, `ESRI`), but internal paths remain strict
 - **Invalid selections**: If no tiles found, settings show `NONE` and dependent options are disabled
+
+## Breaking Change (Important)
+
+### New native folder layout for non-Yaapu tiles
+
+This branch expects native EthosMaps tiles under:
+
+`/bitmaps/ethosmaps/maps/<PROVIDER>/<MAPTYPE>/<z>/...`
+
+If your tiles are **not** in Yaapu legacy folders and still use an older custom structure, they must be moved/reorganized to the paths shown above.
+
+### What is NOT affected
+
+- Existing Yaapu tiles in `/bitmaps/yaapu/maps/` are still supported.
+- Google can still fallback to Yaapu Google folders when native EthosMaps Google tiles are missing.
+
+### Migration guide for non-Yaapu tiles
+
+1. Create provider folders: `GOOGLE`, `ESRI`, `OSM` under `/bitmaps/ethosmaps/maps/`.
+2. Move each map type into the correct provider/type folder names (exact case).
+3. Ensure coordinate layout matches provider rules:
+    - Google/OSM: `/z/x/y.{jpg|png}`
+     - ESRI: `/z/y/x.{jpg|png}`
+4. Keep zoom levels as plain numeric folders (`z`).
+5. After migration, open widget settings and verify provider/map type availability.
 
 ### Key Advantages
 
