@@ -1279,6 +1279,7 @@ local function configure(widget)
       mapStatus.conf.mapTypeId = value
       if oldMapTypeId ~= value then
         logMapSelectionAutofix("Map type changed: " .. mapTypeLabelById(oldMapTypeId) .. " -> " .. mapTypeLabelById(value))
+        applyConfig()
       end
     end
   )

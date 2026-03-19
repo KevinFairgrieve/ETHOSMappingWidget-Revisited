@@ -59,6 +59,7 @@ local lastPosSample = getTime()
 local lastHomePosUpdate = getTime()
 local lastZoomLevel = -99
 local lastMapProvider = -99
+local lastMapType = nil
 local estimatedHomeGps = {
   lat = nil,
   lon = nil
@@ -559,7 +560,8 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   TILES_Y = tiles_y
 
   local provider = (status and status.conf and status.conf.mapProvider) or 2
-  if level ~= lastZoomLevel or provider ~= lastMapProvider or lastZoomLevel == -99 then
+  local mapType = (status and status.conf and status.conf.mapType) or ""
+  if level ~= lastZoomLevel or provider ~= lastMapProvider or mapType ~= lastMapType or lastZoomLevel == -99 then
     zoomUpdateTimer = getTime()
     zoomUpdate = true
 
@@ -580,6 +582,7 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 
     lastZoomLevel = level
     lastMapProvider = provider
+    lastMapType = mapType
   end
 end
 
