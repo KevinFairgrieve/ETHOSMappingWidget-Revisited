@@ -225,9 +225,12 @@ function mapLib.getTileBitmap(tilePath)
 
   local bmp
   local loadedPath
+  local attemptedPaths = nil
   if provider == 1 then
     -- GMapCatcher/Yaapu: path already has extension baked in by gmapcatcher_tiles_to_path.
-    bmp, loadedPath = loadFirstExisting(tilePath, "/bitmaps/yaapu/maps/" .. mapType .. tilePath)
+    local onlyPath = "/bitmaps/yaapu/maps/" .. mapType .. tilePath
+    attemptedPaths = { onlyPath }
+    bmp, loadedPath = loadFirstExisting(tilePath, onlyPath)
   else
     -- ethosmaps providers: probe .jpg then .png so any download tool output is accepted.
     local PROVIDER_FOLDERS = { [2]="GOOGLE", [3]="ESRI", [4]="OSM" }
@@ -236,10 +239,15 @@ function mapLib.getTileBitmap(tilePath)
     if provider == 2 then
       -- Google: also probe Yaapu folder as fallback (both extensions).
       local yaapuBase = getGoogleFallbackBasePath(mapType, tilePath)
+      attemptedPaths = {
+        base .. ".jpg", base .. ".png",
+        yaapuBase .. ".jpg", yaapuBase .. ".png"
+      }
       bmp, loadedPath = loadFirstExisting(tilePath,
         base .. ".jpg", base .. ".png",
         yaapuBase .. ".jpg", yaapuBase .. ".png")
     else
+      attemptedPaths = { base .. ".jpg", base .. ".png" }
       bmp, loadedPath = loadFirstExisting(tilePath, base .. ".jpg", base .. ".png")
     end
   end
@@ -270,6 +278,14 @@ function mapLib.getTileBitmap(tilePath)
     local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
     if lastNoTilesLogKey ~= logKey then
       libs.utils.logDebug("TILE", "No tile files found for " .. logKey .. "; using fallback bitmap (notiles/nomap)", true)
+      if type(tilePath) == "string" then
+        libs.utils.logDebug("TILE", "First missing tile key: " .. tilePath, true)
+      end
+      if type(attemptedPaths) == "table" then
+        for i = 1, #attemptedPaths do
+          libs.utils.logDebug("TILE", "Attempted path " .. tostring(i) .. ": " .. tostring(attemptedPaths[i]), true)
+        end
+      end
       lastNoTilesLogKey = logKey
     end
   end

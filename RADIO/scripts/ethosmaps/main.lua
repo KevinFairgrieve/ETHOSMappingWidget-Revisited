@@ -632,8 +632,12 @@ local function getMapTypeFolder(provider, mapTypeId)
     if mapTypeId == 5 then return "Street" end
     return nil
   end
-  -- Google (provider 2): existing folder names preserved for backward compatibility.
-  return applyDefault(mapTypeId, 1, {"Satellite","Hybrid","Map","Terrain"})
+  -- Google (provider 2): Satellite, Hybrid, Map, Terrain.
+  if mapTypeId == 1 then return "Satellite" end
+  if mapTypeId == 2 then return "Hybrid" end
+  if mapTypeId == 3 then return "Map" end
+  if mapTypeId == 4 then return "Terrain" end
+  return nil
 end
 
 local function getGoogleMapTypeYaapuName(mapTypeId)
@@ -724,6 +728,53 @@ local function getAvailableMapTypeChoices(provider, forceRefresh)
   return choices
 end
 
+local getSortedDirectories
+
+local function getAvailableZoomBounds(provider, mapTypeId)
+  local folder = getMapTypeFolder(provider, mapTypeId)
+  if folder == nil then
+    return nil, nil
+  end
+
+  local searchRoots = {}
+  if provider == 2 then
+    table.insert(searchRoots, "/bitmaps/ethosmaps/maps/GOOGLE/" .. folder)
+    local yaapuFolder = getGoogleMapTypeYaapuName(mapTypeId)
+    if yaapuFolder ~= nil then
+      table.insert(searchRoots, "/bitmaps/yaapu/maps/" .. yaapuFolder)
+    end
+  elseif provider == 1 then
+    table.insert(searchRoots, "/bitmaps/yaapu/maps/" .. folder)
+  else
+    local roots = getProviderRootCandidates(provider)
+    for i = 1, #roots do
+      table.insert(searchRoots, roots[i] .. "/" .. folder)
+    end
+  end
+
+  local minZoom = nil
+  local maxZoom = nil
+
+  for i = 1, #searchRoots do
+    local dirs = getSortedDirectories(searchRoots[i])
+    if type(dirs) == "table" then
+      for j = 1, #dirs do
+        local zoom = tonumber(dirs[j])
+        if zoom ~= nil and zoom >= 1 and zoom <= 20 and math.floor(zoom) == zoom then
+          if minZoom == nil or zoom < minZoom then
+            minZoom = zoom
+          end
+          if maxZoom == nil or zoom > maxZoom then
+            maxZoom = zoom
+          end
+        end
+      end
+    end
+  end
+
+  return minZoom, maxZoom
+end
+
 local function replaceChoices(targetChoices, sourceChoices)
   if targetChoices == nil then
     return
@@ -791,7 +842,7 @@ local function toLogValue(value)
   return tostring(value)
 end
 
-local function getSortedDirectories(path)
+getSortedDirectories = function(path)
   if system and type(system.listFiles) == "function" then
     local ok, entries = pcall(system.listFiles, path)
     if ok and type(entries) == "table" then
@@ -1095,6 +1146,18 @@ local function applyConfig()
     local min = mapStatus.conf.mapZoomMin or 1
     local max = mapStatus.conf.mapZoomMax or 20
     local def = mapStatus.conf.mapZoomDefault or 18
+
+    local availableMin, availableMax = getAvailableZoomBounds(mapStatus.conf.mapProvider, mapStatus.conf.mapTypeId)
+    if availableMin ~= nil and availableMax ~= nil then
+      min = math.max(min, availableMin)
+      max = math.min(max, availableMax)
+      if max < min then
+        min = availableMin
+        max = availableMax
+      end
+      mapStatus.conf.mapZoomMin = min
+      mapStatus.conf.mapZoomMax = max
+    end
 
     if max < min then
       max = min
