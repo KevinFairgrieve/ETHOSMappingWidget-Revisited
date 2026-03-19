@@ -133,16 +133,28 @@ This widget supports a **fully transparent fallback system** that allows you to 
 - **ESRI:** `z/y/x`
 - **Formats:** `.jpg` and `.png` are both supported (auto-detected per tile)
 
-**Yaapu (Legacy Format - Automatically Supported):**
+**Yaapu Google (Legacy Format - Read-Only Fallback):**
+
+The widget automatically detects and loads existing Yaapu Google tiles in:
 ```
 /bitmaps/yaapu/maps/
-├── sat_tiles/{level}/{x/1024}/{x%1024}/{y/1024}/s_{y%1024}.png
-├── map_tiles/{level}/{x/1024}/{x%1024}/{y/1024}/s_{y%1024}.png
-├── GoogleMap/{level}/{x/1024}/{x%1024}/{y/1024}/s_{y%1024}.png
-├── GoogleSatelliteMap/{level}/{x/1024}/{x%1024}/{y/1024}/s_{y%1024}.png
-├── GoogleHybridMap/{level}/{x/1024}/{x%1024}/{y/1024}/s_{y%1024}.png
-└── GoogleTerrainMap/{level}/{x/1024}/{x%1024}/{y/1024}/s_{y%1024}.png
+├── GoogleMap/{z}/{y}/s_{x}.{jpg|png}
+├── GoogleSatelliteMap/{z}/{y}/s_{x}.{jpg|png}
+├── GoogleHybridMap/{z}/{y}/s_{x}.{jpg|png}
+└── GoogleTerrainMap/{z}/{y}/s_{x}.{jpg|png}
 ```
+
+**Yaapu GMapCatcher (Legacy Format - Read-Only, Auto-Detected):**
+
+If you have legacy Yaapu tiles from GMapCatcher, the widget automatically detects and reads:
+```
+/bitmaps/yaapu/maps/
+├── sat_tiles/...
+├── map_tiles/...
+└── ter_tiles/...
+```
+
+**Note:** The widget reads existing Yaapu folders (Google and GMapCatcher) for backward compatibility and parallel use with legacy Yaapu Widgets. These are read-only fallback; new tiles go to native EthosMaps format (`/bitmaps/ethosmaps/maps/`) for best performance.
 
 ### Naming Conventions (Strict for Predictability)
 
@@ -176,7 +188,7 @@ If your tiles are **not** in Yaapu legacy folders and still use an older custom 
 2. Move each map type into the correct provider/type folder names (exact case).
 3. Ensure coordinate layout matches provider rules:
     - Google/OSM: `/z/x/y.{jpg|png}`
-     - ESRI: `/z/y/x.{jpg|png}`
+    - ESRI: `/z/y/x.{jpg|png}`
 4. Keep zoom levels as plain numeric folders (`z`).
 5. After migration, open widget settings and verify provider/map type availability.
 

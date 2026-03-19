@@ -278,7 +278,7 @@ function mapLib.getTileBitmap(tilePath)
     if fileExists("/bitmaps/ethosmaps/maps/notiles.png") then
       nomap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/notiles.png")
     else
-      nomap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/nomap.png")
+      nomap = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/nomap.png")
     end
   end
   mapBitmapByPath[tilePath] = nomap
