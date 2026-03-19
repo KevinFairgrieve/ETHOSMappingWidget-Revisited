@@ -184,7 +184,7 @@ Run each step with:
 
 ### Baseline
 - Date: 2026-03-20
-- Build/commit: `performance-experiments` (local test build with PERF table logger)
+- Build/commit: `89d51b0`
 - Observed baseline issues:
   - **Cold entry spike (first swipe from home screen into widget)** causes a multi-second hitch.
   - First measured window during cold entry:
