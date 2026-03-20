@@ -28,6 +28,13 @@ Target outcome:
 4. **No mixed refactors** during experiments
 5. **Document observed effect** before moving to next step
 
+### Testing Environment Rules
+
+- **Functional correctness** (map loads, zoom, provider switch, touch, tile behavior) is verified in the **ETHOS Simulator** after every change.
+- **Performance numbers** (PERF WINDOW metrics) are **never recorded from the simulator** — simulator timing does not reflect hardware.
+- **All PERF measurements** come exclusively from **real hardware logs**, provided after each step when hardware testing is done.
+- Hardware log data is pasted into the Notes Log (section 7) before the step result is considered final.
+
 ---
 
 ## 3) Measurement Protocol (Before/After Each Step)

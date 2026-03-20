@@ -13,12 +13,13 @@ Workspace configuration (already set up):
 - File: `.vscode/settings.json`
 - Current values:
   - `ethos.server`: `https://ethos.studio1247.com`
-  - `ethos.version`: `nightly17`
+  - `ethos.version`: `nightly26`
   - `ethos.firmware`: `X20S_FCC`
-  - `ethos.root`: `f:/DEVELOPMENT/ETHOSMappingWidget-Revisited/RADIO`
+  - `ethos.root`: `RADIO`
 
 Note:
 - `ethos.root` must point to the folder containing `scripts/` and `bitmaps/`.
+- Keep `ethos.root` workspace-relative (for example `RADIO`).
 
 ---
 
@@ -39,21 +40,21 @@ Via Command Palette (`Ctrl+Shift+P`):
 File: `.vscode/keybindings.json`
 
 Active shortcuts:
-- `Alt+E S` → Start Simulator
-- `Alt+E D` → Open Display
-- `Alt+E T` → Open Telemetry
-- `Alt+E X` → Stop Simulator
-- `Alt+E R` → **Restart Simulator** (`Stop` + `Start`)
+- `Ctrl+Alt+S` → Start Simulator
+- `Ctrl+Alt+D` → Open Display
+- `Ctrl+Alt+T` → Open Telemetry
+- `Ctrl+Alt+X` → Stop Simulator
+- `Ctrl+Alt+R` → **Restart Simulator** (`Stop` + `Start`)
 
 Recommendation:
-- After larger Lua changes, always use `Alt+E R` for a clean state.
+- After larger Lua changes, always use `Ctrl+Alt+R` for a clean state.
 
 ---
 
 ## 4) Recommended Test Sequence (fast & reproducible)
 
-1. `Alt+E R` (Restart)
-2. `Alt+E D` (Open Display)
+1. `Ctrl+Alt+R` (Restart)
+2. `Ctrl+Alt+D` (Open Display)
 3. Load the widget and run a fixed test sequence:
    - Home → Widget (Initial Entry)
    - Zoom `+/-`
@@ -80,6 +81,10 @@ Expected output:
 See also:
 - `Docs/development/workstreams/PerformanceExperimentsPlan.md`
 
+Telemetry replay (for repeatable sensor input in simulator):
+- Helper doc: `Docs/development/helper/TelemetryReplay.md`
+- Quick start: `.\Docs\development\helper\replay-telemetry-log.ps1 -Speed 1 -Loop`
+
 ---
 
 ## 6) Troubleshooting
@@ -87,7 +92,7 @@ See also:
 ### Simulator does not start
 - Open Command Palette and call `Ethos: Start Ethos` directly
 - Check that `ethos.root` points correctly to `RADIO`
-- `Alt+E X`, then `Alt+E S`
+- `Ctrl+Alt+X`, then `Ctrl+Alt+S`
 
 ### Wrong or no scripts in the simulator
 - Check `ethos.root`
@@ -97,7 +102,7 @@ See also:
 - Start `Start Ethos` first, then `Open Display`
 
 ### Changes don't seem to be active
-- `Alt+E R` (Stop+Start)
+- `Ctrl+Alt+R` (Stop+Start)
 - Then re-open the display
 
 ---

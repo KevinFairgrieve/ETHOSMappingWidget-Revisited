@@ -196,6 +196,19 @@ end
 -- Dedicated perf window timer state, independent from mutable config/status tables.
 local perfWindowStartMs = nil
 
+-- Frame scheduler state for Step A: dirty-invalidate optimization.
+-- Tracks wakeup count to rate-limit lcd.invalidate() calls.
+-- Interactive (dirty): invalidate on the very next wakeup.
+-- Idle (not dirty): invalidate every FRAME_IDLE_INTERVAL wakeups (~2 FPS at baseline 6 Hz wakeup rate).
+local frameWakeupCount = 0
+local frameLastInvalidateWakeup = 0
+local frameDirty = false
+local FRAME_IDLE_INTERVAL = 3  -- every 3rd wakeup when nothing changed
+
+local function markDirty()
+  frameDirty = true
+end
+
 local function configFlagEnabled(value)
   if value == true then
     return true
@@ -442,6 +455,7 @@ local function bgtasks(widget)
   if gpsData.lat ~= nil and gpsData.lon ~= nil then
     mapStatus.telemetry.lat = gpsData.lat
     mapStatus.telemetry.lon = gpsData.lon
+    markDirty()  -- New GPS position: map needs redraw.
 
     -- Log GPS position at most once every 15 seconds to avoid flooding the debug log.
     if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then -- Safeguard: avoid logger access before config and libraries are initialized.
@@ -501,6 +515,7 @@ local function bgtasks(widget)
   if now - mapStatus.blinkTimer > 60 then
     mapStatus.blinkon = not mapStatus.blinkon
     mapStatus.blinkTimer = now
+    markDirty()  -- Blink state changed: overlay indicators need redraw.
   end
   bgclock = (bgclock%4)+1
 end
@@ -641,11 +656,13 @@ local function event(widget, category, value, x, y)
     if hitMinus then
       mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
       mapStatus.consumeZoomRelease = true
+      markDirty()  -- Zoom level changed: map needs immediate redraw.
       mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
 
     elseif hitPlus then
       mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
       mapStatus.consumeZoomRelease = true
+      markDirty()  -- Zoom level changed: map needs immediate redraw.
       mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
 
     else
@@ -830,10 +847,20 @@ local function wakeup(widget)
       end
     end
   end
-  if perfActive then
-    perfInc("invalidate_count", 1)
+
+  -- Step A: Frame scheduler — only call lcd.invalidate() when dirty or idle deadline reached.
+  -- Interactive (dirty): on the very next wakeup after state change (~wakeup rate, ~4–6 FPS).
+  -- Idle (not dirty): every FRAME_IDLE_INTERVAL wakeups (~2 FPS at baseline 6 Hz).
+  frameWakeupCount = frameWakeupCount + 1
+  local frameInterval = frameDirty and 1 or FRAME_IDLE_INTERVAL
+  if frameWakeupCount - frameLastInvalidateWakeup >= frameInterval then
+    frameLastInvalidateWakeup = frameWakeupCount
+    frameDirty = false
+    if perfActive then
+      perfInc("invalidate_count", 1)
+    end
+    lcd.invalidate()
   end
-  lcd.invalidate()   
 end
 
 local function create()
