@@ -224,3 +224,6 @@ Run each step with:
 ## 8) Next Action
 
 Start with **Step 0** (baseline profiler run), capture reference metrics, then proceed to **Step A only**.
+
+Related setup doc:
+- `Docs/development/tools/EthosSimulatorWorkflow.md`
