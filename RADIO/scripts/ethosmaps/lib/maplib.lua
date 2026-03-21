@@ -123,6 +123,7 @@ local zoomUpdate = false
 local lastHeavyUpdate = getTime()
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
+local RASTER_REBUILD_OFFSET_THRESHOLD = 40
 
 local DIRECTIONAL_LEAD_TILES = 1
 local DIRECTIONAL_LEAD_MIN_SPEED = 1.5
@@ -459,13 +460,23 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   if widget.drawOffsetX == nil then widget.drawOffsetX = 0 end
   if widget.drawOffsetY == nil then widget.drawOffsetY = 0 end
 
-  if widget.lastW ~= w or widget.lastH ~= h or widget.lastZoom ~= level then
+  local viewportChanged = (widget.lastW ~= w or widget.lastH ~= h)
+  local zoomChanged = (widget.lastZoom ~= level)
+  if viewportChanged or zoomChanged then
     widget.drawOffsetX = 0
     widget.drawOffsetY = 0
     widget.lastW = w
     widget.lastH = h
     widget.lastZoom = level
     mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level, 0, 0, 0, 0)
+
+    if viewportChanged and status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils and libs.utils.logDebug and libs.tileLoader then
+      local gridTiles = TILES_X * TILES_Y
+      local cacheTiles = libs.tileLoader.getCacheCount and libs.tileLoader.getCacheCount() or 0
+      local queueTiles = libs.tileLoader.getQueueLength and libs.tileLoader.getQueueLength() or 0
+      local totalTiles = cacheTiles + queueTiles
+      libs.utils.logDebug("TILE", string.format("VIEWPORT_CHANGE | viewport=%dx%d | raster=%dx%d | rasterTiles=%d | cache=%d | queue=%d | total=%d", w, h, TILES_X, TILES_Y, gridTiles, cacheTiles, queueTiles, totalTiles), true)
+    end
   end
 
   local vehicleR = math.floor(34 * math.min(status.scaleX, status.scaleY))
@@ -480,12 +491,18 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       local prefetchLeadX, prefetchLeadY = gatePrefetchByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
+      local centerX = x + (w / 2)
+      local centerY = y + (h / 2)
+      if myScreenX == nil or myScreenY == nil or
+         math.abs(centerX - myScreenX) > RASTER_REBUILD_OFFSET_THRESHOLD or
+         math.abs(centerY - myScreenY) > RASTER_REBUILD_OFFSET_THRESHOLD then
+        mapNeedsHeavyUpdate = true
+      end
+
       mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
-      local centerX = x + (w / 2)
-      local centerY = y + (h / 2)
       widget.drawOffsetX = centerX - myScreenX
       widget.drawOffsetY = centerY - myScreenY
     end
@@ -497,6 +514,20 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   local maxY = math.min(minY + h, minY + TILES_Y * TILES_SIZE)
   local renderOffsetX = widget.drawOffsetX
   local renderOffsetY = widget.drawOffsetY
+
+  -- Clamp render offset so the drawn tile grid always fully covers the viewport.
+  local minRenderOffsetX = w - TILES_X * TILES_SIZE
+  local minRenderOffsetY = h - TILES_Y * TILES_SIZE
+  if renderOffsetX > 0 then
+    renderOffsetX = 0
+  elseif renderOffsetX < minRenderOffsetX then
+    renderOffsetX = minRenderOffsetX
+  end
+  if renderOffsetY > 0 then
+    renderOffsetY = 0
+  elseif renderOffsetY < minRenderOffsetY then
+    renderOffsetY = minRenderOffsetY
+  end
 
   -- Save UAV tile coords before home calculation (which temporarily overwrites them).
   local uav_tile_x, uav_tile_y = tile_x, tile_y

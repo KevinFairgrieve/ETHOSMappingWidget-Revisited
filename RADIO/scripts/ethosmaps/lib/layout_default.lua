@@ -30,7 +30,9 @@ local status = nil
 local libs = nil
 local MAP_TILE_SIZE = 100
 local MAP_TILE_BUFFER_X = 1
-local MAP_TILE_BUFFER_Y = 0
+local MAP_TILE_BUFFER_Y = 1
+local MAP_MIN_TILES_X = 3
+local MAP_MIN_TILES_Y = 3
 
 local function getBarSnapshot()
   local barTickSerial = status.barTickSerial or 0
@@ -145,15 +147,8 @@ function panel.draw(widget)
   end
   local mapY    = topH
   local mapH    = h - topH - bottomH
-  local mapTilesX = math.max(8, math.ceil(w / MAP_TILE_SIZE) + MAP_TILE_BUFFER_X)
-  local mapTilesY = math.max(4, math.ceil(mapH / MAP_TILE_SIZE) + MAP_TILE_BUFFER_Y)
-
-  if mapTilesX % 2 == 0 then
-    mapTilesX = mapTilesX + 1
-  end
-  if mapTilesY % 2 == 0 then
-    mapTilesY = mapTilesY + 1
-  end
+  local mapTilesX = math.max(MAP_MIN_TILES_X, math.ceil(w / MAP_TILE_SIZE) + MAP_TILE_BUFFER_X)
+  local mapTilesY = math.max(MAP_MIN_TILES_Y, math.ceil(h / MAP_TILE_SIZE) + MAP_TILE_BUFFER_Y)
 
   local mapTickSerial = status.mapTickSerial or 0
   local zoomChanged = status.mapZoomLevel ~= (status.mapLastZoom or 0)

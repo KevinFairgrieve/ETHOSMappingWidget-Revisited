@@ -44,8 +44,9 @@ end
 
 -- Spatial ring radius for cache eviction (tiles beyond this radius around the visible
 -- window are discarded when trimCache() is called from maplib).
-local TILE_CACHE_RING_TILES = 2
-local TILE_CACHE_REAR_GUARD_TILES = 0
+local TILE_CACHE_REFERENCE_MARGIN_TILES = 0
+local TILE_CACHE_RING_TILES = 0
+local TILE_CACHE_DIRECTIONAL_GUARD_TILES = 1
 
 -- Bitmap cache: tilePath → bitmap (or nomap sentinel).
 local mapBitmapByPath = {}
@@ -341,20 +342,32 @@ function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, l
 
   local leadTileX = math.max(-1, math.min(1, tonumber(leadX) or 0))
   local leadTileY = math.max(-1, math.min(1, tonumber(leadY) or 0))
-  local keepMinX = 1 - TILE_CACHE_RING_TILES - (leadTileX > 0 and TILE_CACHE_REAR_GUARD_TILES or 0)
-  local keepMaxX = tilesX + TILE_CACHE_RING_TILES + (leadTileX < 0 and TILE_CACHE_REAR_GUARD_TILES or 0)
-  local keepMinY = 1 - TILE_CACHE_RING_TILES - (leadTileY > 0 and TILE_CACHE_REAR_GUARD_TILES or 0)
-  local keepMaxY = tilesY + TILE_CACHE_RING_TILES + (leadTileY < 0 and TILE_CACHE_REAR_GUARD_TILES or 0)
+  local keepTilesX = math.max(1, tonumber(tilesX) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
+  local keepTilesY = math.max(1, tonumber(tilesY) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
 
-  -- Fast-path: if all cache entries fit within the ring window, nothing can be outside it.
-  local maxCacheSize = (keepMaxX - keepMinX + 1) * (keepMaxY - keepMinY + 1)
-  if cacheCount <= maxCacheSize then
+  local keepMinX = 1 - TILE_CACHE_RING_TILES
+  local keepMaxX = keepTilesX + TILE_CACHE_RING_TILES
+  local keepMinY = 1 - TILE_CACHE_RING_TILES
+  local keepMaxY = keepTilesY + TILE_CACHE_RING_TILES
+
+  if leadTileX ~= 0 then
+    keepMinX = keepMinX - TILE_CACHE_DIRECTIONAL_GUARD_TILES
+    keepMaxX = keepMaxX + TILE_CACHE_DIRECTIONAL_GUARD_TILES
+  end
+
+  if leadTileY ~= 0 then
+    keepMinY = keepMinY - TILE_CACHE_DIRECTIONAL_GUARD_TILES
+    keepMaxY = keepMaxY + TILE_CACHE_DIRECTIONAL_GUARD_TILES
+  end
+
+  -- Nothing cached – nothing to evict.
+  if cacheCount == 0 then
     return 0
   end
 
   local keep  = {}
-  local halfX = math.floor(tilesX / 2 + 0.5)
-  local halfY = math.floor(tilesY / 2 + 0.5)
+  local halfX = math.floor(keepTilesX / 2 + 0.5)
+  local halfY = math.floor(keepTilesY / 2 + 0.5)
 
   for x = keepMinX, keepMaxX do
     for y = keepMinY, keepMaxY do
