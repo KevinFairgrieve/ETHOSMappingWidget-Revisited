@@ -18,6 +18,12 @@ Target outcome:
 - maintain correct tile loading and map behavior
 - prepare technical baseline for future touch panning
 
+### Scope Clarification (for all steps in this plan)
+
+- Primary focus: **Idle screen update performance** and **touch swipe performance**.
+- Out of scope for this plan series: **tile loading performance**, **initialization/cold-start performance**, and **zoom/rebuild performance**.
+- Zoom/tile-init topics are tracked as a separate workstream and are not used as pass/fail criteria for Steps E/F/G.
+
 ---
 
 ## 2) Ground Rules (Strict Process)
@@ -165,6 +171,57 @@ Interpretation guide:
 
 ---
 
+## Step E — Partial Redraw Pilot (Opaque UI Bars Only)
+
+**Hypothesis:** Voll-Redraw kostet unnötig viel, wenn nur Bar-Texte/Statuswerte ändern.
+
+**Change scope (strict):**
+- Nur Top-/Bottom-Bar als erste Partial-Redraw-Zone behandeln.
+- Karte (`map viewport`) bleibt unberührt, wenn kein Map-Update nötig ist.
+- Bars gezielt löschen/neu zeichnen (opaque black background + text), ohne Fullscreen-Clear.
+- Keine Änderung an Tile-Logik, Recenter, Zoom-Flow.
+
+**Do NOT change yet:** map overlays auf transparentem Hintergrund (UAV/Trail/GPS-Overlay), Tile cache pipeline.
+
+**Success criteria:**
+- messbar niedrigere `paintMs/layoutMs` in warm/steady-state Fenstern
+- keine Rendering-Artefakte in Bars (Ghosting/alte Werte)
+- keine Regression in Zoom/Rebuild-Fenstern
+
+---
+
+## Step F — Partial Redraw für opake Kompass-/Arrow-Zone
+
+**Hypothesis:** Home-Arrow/Kompass kann als opaker Bereich separat aktualisiert werden, ohne Map-Redraw.
+
+**Change scope:**
+- Home-Arrow auf opake, fest definierte Kompass-Zone migrieren.
+- Nur diese Zone bei Heading/Home-Winkel-Änderung neu zeichnen.
+- Saubere Trennung von „map redraw nötig“ vs „compass redraw ausreichend“.
+
+**Success criteria:**
+- weitere Reduktion von `paintMs/layoutMs` bei Bewegung ohne Zoom/Rebuild
+- kein Flackern/keine Artefakte in Kompass-Zone
+- unverändertes Verhalten der übrigen Overlays
+
+---
+
+## Step G — Selektive Map-Overlay-Redraws (UAV/Trail)
+
+**Hypothesis:** Bei kleinen Overlay-Bewegungen reicht es, nur betroffene Map-Teilflächen zu restaurieren und Overlay neu zu zeichnen.
+
+**Change scope:**
+- Dirty-Rect/BBox-Ansatz für UAV-Arrow und Trail-Punkte.
+- Alte + neue Overlay-Regionen bestimmen, betroffene Map-Kacheln lokal neu zeichnen, danach Overlay zeichnen.
+- Full-Redraw-Fallback bei Zoom/Recenter/Geometry-Änderungen beibehalten.
+
+**Success criteria:**
+- bessere Interaktionssmoothness bei Bewegung/Heading-Updates
+- keine „smearing“/Restpixel/overlay tearing
+- stabile Funktion auf Hardware über längeren Lauf
+
+---
+
 ## 5) Rollback Criteria (Immediate)
 
 Rollback current step if any of these appears:
@@ -293,6 +350,21 @@ Run each step with:
 - Keep/revert:
   - **Revert** (D1 verworfen, Code zurück auf Step-C-Stand).
 
+### Step E result
+- Change summary:
+- Result:
+- Keep/revert:
+
+### Step F result
+- Change summary:
+- Result:
+- Keep/revert:
+
+### Step G result
+- Change summary:
+- Result:
+- Keep/revert:
+
 ---
 
 ## 8) Next Action
@@ -300,7 +372,8 @@ Run each step with:
 
 Proceed from **stable Step-C baseline**:
 - Kein D2 auf Basis des verworfenen D1.
-- Optional neuer, kleiner D1-Ansatz nur als separater Experiment-Branch/Commit (eine Änderung, sofortiger A/B-Hardwarevergleich).
+- Start mit **Step E** (Partial Redraw Pilot nur Top-/Bottom-Bar), dann Hardware-A/B gegen Step C.
+- Step F/G nur fortsetzen, wenn E messbar positiv und regressionsfrei ist.
 
 Related setup doc:
 - `Docs/development/tools/EthosSimulatorWorkflow.md`

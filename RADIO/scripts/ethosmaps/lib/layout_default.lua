@@ -29,7 +29,7 @@ local panel = {}
 local status = nil
 local libs = nil
 
-local function drawBarSensor(x, y, label, value, unit, font, label_font, unit_font, color, label_color, blink, flags)
+local function drawBarSensor(x, barTop, barHeight, label, value, unit, font, label_font, unit_font, color, label_color, blink, flags)
   -- Draws one labeled sensor readout for the layout bars and returns the width consumed by the rendered block.
   lcd.font(label_font)
   local lw, lh = lcd.getTextSize(label)
@@ -39,14 +39,19 @@ local function drawBarSensor(x, y, label, value, unit, font, label_font, unit_fo
   lcd.font(font)
   local vw, vh = lcd.getTextSize(value)
 
+  local valueY = barTop + math.floor((barHeight - vh) / 2)
+  local valueBottomY = valueY + vh
+  local labelY = valueBottomY - lh
+  local unitY = valueBottomY - uh
+
   if flags == RIGHT then
-    libs.drawLib.drawText(x, y, unit, unit_font, color, RIGHT, blink)
-    libs.drawLib.drawText(x-uw, y, value, font, color, RIGHT, blink)
-    libs.drawLib.drawText(x-(uw+sw+vw), y, label, label_font, label_color, RIGHT, blink)
+    libs.drawLib.drawText(x, unitY, unit, unit_font, color, RIGHT, blink)
+    libs.drawLib.drawText(x-uw, valueY, value, font, color, RIGHT, blink)
+    libs.drawLib.drawText(x-(uw+sw+vw), labelY, label, label_font, label_color, RIGHT, blink)
   else
-    libs.drawLib.drawText(x, y, label, label_font, label_color, LEFT, blink)
-    libs.drawLib.drawText(x+lw+sw, y, value, font, color, LEFT, blink)
-    libs.drawLib.drawText(x+lw+sw+vw, y, unit, unit_font, color, LEFT, blink)
+    libs.drawLib.drawText(x, labelY, label, label_font, label_color, LEFT, blink)
+    libs.drawLib.drawText(x+lw+sw, valueY, value, font, color, LEFT, blink)
+    libs.drawLib.drawText(x+lw+sw+vw, unitY, unit, unit_font, color, LEFT, blink)
   end
   return lw + vw + uw + 3*sw
 end
@@ -88,8 +93,29 @@ function panel.draw(widget)
   local ultraTiny = verticalTiny and horizontalTiny
 
   -- Derive the map viewport after reserving space for the top and bottom bars.
-  local topH    = horizontalTiny and 0 or math.floor(26 * sy)
-  local bottomH = horizontalTiny and 0 or math.floor(46 * sy)
+  local topH, bottomH
+  if horizontalTiny then
+    topH = 0
+    bottomH = 0
+  else
+    local topValueFont = verticalMedium and FONT_S or FONT_L
+    local topLabelFont = FONT_XS
+    lcd.font(topValueFont)
+    local _, topValueH = lcd.getTextSize("TX 99.9V")
+    lcd.font(topLabelFont)
+    local _, topLabelH = lcd.getTextSize("SRC")
+    local topContentH = math.max(topValueH, topLabelH)
+    topH = math.max(math.floor(26 * sy), topContentH + math.floor(8 * sy))
+
+    local bottomValueFont = verticalMedium and FONT_S or FONT_L
+    local bottomMetaFont = FONT_XS
+    lcd.font(bottomValueFont)
+    local _, bottomValueH = lcd.getTextSize("999.9")
+    lcd.font(bottomMetaFont)
+    local _, bottomMetaH = lcd.getTextSize("km/h")
+    local bottomContentH = math.max(bottomValueH, bottomMetaH)
+    bottomH = math.max(math.floor(46 * sy), bottomContentH + math.floor(12 * sy))
+  end
   local mapY    = topH
   local mapH    = h - topH - bottomH
 
@@ -133,7 +159,7 @@ function panel.draw(widget)
     lcd.drawFilledRectangle(0, 0, w, topH)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
 
-    libs.drawLib.drawTopBar()
+    libs.drawLib.drawTopBar(widget, 0, topH)
 
     local overlayFont = verticalMedium and FONT_XS or FONT_L
     lcd.font(overlayFont)
@@ -174,7 +200,7 @@ function panel.draw(widget)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
 
     local labelColor = lcd.RGB(170,170,170)
-    local yBottom = h - bottomH + 6*sy
+    local barTop = h - bottomH
     local barFont = verticalMedium and FONT_S or FONT_L
     local barMetaFont = FONT_XS
     local spacing = verticalMedium and 8*sx or 22*sx
@@ -184,29 +210,29 @@ function panel.draw(widget)
     local homeLabel   = verticalMedium and "HD" or "HomeDist"
 
     if hideHomeDistAndHeading then
-      drawBarSensor(12*sx, yBottom, gspdLabel,
+      drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
         string.format("%.01f", status.avgSpeed.value * status.conf.horSpeedMultiplier),
-        status.conf.horSpeedLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false)
+        status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
 
-      drawBarSensor(w - 12*sx, yBottom, "TR",
+      drawBarSensor(w - 12*sx, barTop, bottomH, "TR",
         string.format("%.01f", status.avgSpeed.travelDist * status.conf.distUnitLongScale),
-        status.conf.distUnitLongLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false, RIGHT)
+        status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
     else
-      local offset = drawBarSensor(12*sx, yBottom, gspdLabel,
+      local offset = drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
         string.format("%.01f", status.avgSpeed.value * status.conf.horSpeedMultiplier),
-        status.conf.horSpeedLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false)
+        status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
 
-      offset = offset + drawBarSensor(12*sx + offset + spacing, yBottom, "HDG",
+      offset = offset + drawBarSensor(12*sx + offset + spacing, barTop, bottomH, "HDG",
         string.format("%.0f", status.telemetry.cog or 0), "°",
-        barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false)
+        barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
 
-      local travelOffset = drawBarSensor(w, yBottom, "TR",
+      local travelOffset = drawBarSensor(w, barTop, bottomH, "TR",
         string.format("%.01f", status.avgSpeed.travelDist * status.conf.distUnitLongScale),
-        status.conf.distUnitLongLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false, RIGHT)
+        status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
 
-      drawBarSensor(w - travelOffset - spacing - 15*sx, yBottom, homeLabel,
+      drawBarSensor(w - travelOffset - spacing - 15*sx, barTop, bottomH, homeLabel,
         string.format("%.01f", status.telemetry.homeDist * status.conf.distUnitScale),
-        status.conf.distUnitLabel, barFont, barMetaFont, barMetaFont, status.colors.white, labelColor, false, RIGHT)
+        status.conf.distUnitLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
     end
   end
 

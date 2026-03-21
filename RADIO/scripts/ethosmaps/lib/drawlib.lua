@@ -187,11 +187,13 @@ function drawLib.drawWindArrow(widget, ...)
   -- Placeholder for a future wind-arrow renderer.
 end
 
-function drawLib.drawTopBar(widget)
+function drawLib.drawTopBar(widget, barTop, barHeight)
   -- Draws the top status bar by combining model info, system voltage, and user-selected telemetry sources.
   local w = status.widgetWidth
   local sx = status.scaleX
   local sy = status.scaleY
+  local top = barTop or 0
+  local barH = barHeight or math.floor(26 * sy)
   local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
   local verticalTiny = w < (status.tinyWidthThreshold or 350)
   local showModelName = w >= 600
@@ -260,10 +262,11 @@ function drawLib.drawTopBar(widget)
 
   lcd.color(status.colors.barBackground)
   lcd.pen(SOLID)
-  lcd.drawFilledRectangle(0, 0, w, math.floor(26 * sy))
+  lcd.drawFilledRectangle(0, top, w, barH)
 
   if showModelName then
-    drawLib.drawText(8*sx, 2*sy, modelText, selectedFont, status.colors.barText, LEFT)
+    local modelY = top + math.floor(2 * sy)
+    drawLib.drawText(8*sx, modelY, modelText, selectedFont, status.colors.barText, LEFT)
     lcd.font(selectedFont)
     local modelW = lcd.getTextSize(modelText)
     minTelemetryX = 8 * sx + modelW + 12 * sx
@@ -272,11 +275,11 @@ function drawLib.drawTopBar(widget)
   local offset = 12*sx
   for e = 1, #sensorEntries do
     local entry = sensorEntries[e]
-    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, selectedLabelFont, compactNames)
+    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, selectedLabelFont, compactNames, top, barH)
   end
 end
 
-function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, labelFont, compactNames)
+function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, labelFont, compactNames, barTop, barHeight)
   -- Draws one top-bar sensor block by reading its current string value and writing the label/value pair to the LCD.
   if safeSensorName(sensor) == nil then
     return 80 -- Safeguard: skip invalid sensor handles and reserve a stable fallback width.
@@ -286,8 +289,10 @@ function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, label
   local valueText = safeSensorValueText(sensor)
   local blockW, valW = getTopBarSensorBlockWidth(name, valueText, barFont, labelFont)
 
-  local valueY = 0
-  local labelY = 0
+  lcd.font(barFont)
+  local _, valueH = lcd.getTextSize(valueText)
+  local valueY = (barTop or 0) + math.floor(((barHeight or 0) - valueH) / 2)
+  local labelY = valueY
 
   drawLib.drawText(x - valW - 2, labelY, name, labelFont, status.colors.barText, RIGHT)
   drawLib.drawText(x - valW, valueY, valueText, barFont, status.colors.barText, LEFT)
