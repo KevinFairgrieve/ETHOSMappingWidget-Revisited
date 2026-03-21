@@ -51,7 +51,10 @@ local TILE_CACHE_REAR_GUARD_TILES = 0
 local mapBitmapByPath = {}
 
 -- Confirmed-missing sentinel – loaded once and reused for every absent tile.
-local nomap = nil
+local noMapBitmap = nil
+
+-- Loading sentinel – used while a tile is still queued/not-yet-loaded.
+local loadingBitmap = nil
 
 -- Two-bucket priority queue.  "High" tiles (near map center) are loaded first so the
 -- aircraft position appears sharp before the buffer fringe fills in.
@@ -112,20 +115,37 @@ local function loadFirstExisting(tilePath, ...)
   return nil, nil
 end
 
-local function ensureFallbackBitmap()
-  -- Loads the shared fallback bitmap once so draw code can always paint a placeholder
-  -- without touching SD-card I/O during paint().
-  if nomap ~= nil then
-    return nomap
+local function ensureNoMapBitmap()
+  -- Loads the shared "NO MAP DATA" bitmap once so draw code can always paint a
+  -- deterministic missing-data placeholder without SD-card I/O during paint().
+  if noMapBitmap ~= nil then
+    return noMapBitmap
   end
 
-  if fileExists("/bitmaps/ethosmaps/maps/notiles.png") then
-    nomap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/notiles.png")
+  if fileExists("/bitmaps/ethosmaps/bitmaps/nomap.png") then
+    noMapBitmap = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/nomap.png")
+  elseif fileExists("/bitmaps/ethosmaps/maps/notiles.png") then
+    noMapBitmap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/notiles.png")
   else
-    nomap = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/nomap.png")
+    noMapBitmap = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/nomap.png")
   end
 
-  return nomap
+  return noMapBitmap
+end
+
+local function ensureLoadingBitmap()
+  -- Loads the shared "LOADING..." bitmap once for queued/not-yet-loaded tiles.
+  if loadingBitmap ~= nil then
+    return loadingBitmap
+  end
+
+  if fileExists("/bitmaps/ethosmaps/bitmaps/loading.png") then
+    loadingBitmap = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/loading.png")
+  else
+    loadingBitmap = ensureNoMapBitmap()
+  end
+
+  return loadingBitmap
 end
 
 local function loadTileFromDisk(tilePath)
@@ -193,7 +213,7 @@ local function loadTileFromDisk(tilePath)
     end
   end
 
-  mapBitmapByPath[tilePath] = ensureFallbackBitmap()
+  mapBitmapByPath[tilePath] = ensureNoMapBitmap()
   return mapBitmapByPath[tilePath]
 end
 
@@ -206,8 +226,18 @@ function tileLoader.getBitmap(tilePath)
 end
 
 function tileLoader.getFallbackBitmap()
-  -- Returns the shared fallback bitmap preloaded outside the paint path.
-  return nomap
+  -- Backward-compatible alias for legacy callers; maps to NO MAP DATA bitmap.
+  return noMapBitmap
+end
+
+function tileLoader.getNoMapBitmap()
+  -- Returns the shared "NO MAP DATA" bitmap preloaded outside the paint path.
+  return noMapBitmap
+end
+
+function tileLoader.getLoadingBitmap()
+  -- Returns the shared "LOADING..." bitmap preloaded outside the paint path.
+  return loadingBitmap
 end
 
 function tileLoader.enqueue(tilePath, isHighPriority)
@@ -389,7 +419,8 @@ end
 function tileLoader.init(param_status, param_libs)
   status = param_status
   libs   = param_libs
-  ensureFallbackBitmap()
+  ensureNoMapBitmap()
+  ensureLoadingBitmap()
   return tileLoader
 end
 

@@ -393,7 +393,13 @@ function mapLib.drawTiles(width, xmin, ymin)
     for y=1,TILES_Y do
       local idx = width*(y-1)+x
       if tiles[idx] ~= nil then
-        local bmp = libs.tileLoader.getBitmap(tiles[idx]) or libs.tileLoader.getFallbackBitmap()
+        local bmp = libs.tileLoader.getBitmap(tiles[idx])
+        if bmp == nil then
+          bmp = libs.tileLoader.getLoadingBitmap()
+        end
+        if bmp == nil then
+          bmp = libs.tileLoader.getNoMapBitmap() or libs.tileLoader.getFallbackBitmap()
+        end
         if bmp ~= nil then
           lcd.drawBitmap(xmin+(x-1)*TILES_SIZE, ymin+(y-1)*TILES_SIZE, bmp)
         end
