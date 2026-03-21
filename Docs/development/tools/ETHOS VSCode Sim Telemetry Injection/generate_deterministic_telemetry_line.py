@@ -24,7 +24,7 @@ START_LON = 11.576354
 
 # Velocity: moving northeast at constant speed
 # 20 m/s = 72 km/h (realistic test flight speed)
-VELOCITY_MS = 20  # m/s (10x faster for realistic flight)
+VELOCITY_MS = 20  # m/s
 HEADING_DEG = 45  # northeast
 
 # Helper: convert velocity + heading to lat/lon delta per tick
@@ -75,7 +75,9 @@ header = [
     "TxBat(V)"
 ]
 
-output_path = "DemoTelemetry_Synthetic_1min_250ms.csv"
+speed_kmh = VELOCITY_MS * 3.6
+
+output_path = "Synthetic_Logs/DemoTelemetry_Synthetic_1min_straightLine_250ms.csv"
 with open(output_path, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(header)
@@ -100,7 +102,7 @@ with open(output_path, 'w', newline='') as f:
             "-18", "100", "11", "100", "50", "100", "24",  # TRSS, TQly, TSNR, TRSP, TFPS, RRSP, TPWR(dBm)
             "-0.04", "0.00", "-0.32", "ANGL", "16.6", "0.3", "202", "97",  # Ptch, Roll, Yaw, FM, RxBt, Curr, Capa, Bat%
             gps_str,  # GPS
-            "5.0", "45", "50", "9", "0.0", "45", "1.4",  # GSpd(kmh), Hdg, Alt, Sats, VSpd, Hdg(duplicate), GSpd(m/s)
+            f"{speed_kmh:.1f}", str(HEADING_DEG), "50", "9", "0.0", str(HEADING_DEG), f"{VELOCITY_MS:.1f}",  # GSpd(kmh), Hdg, Alt, Sats, VSpd, Hdg(duplicate), GSpd(m/s)
             "0", "0", "0", "0",  # Rud, Ele, Thr, Ail
             "-148", "-13", "-1024", "-1024", "-1024",  # P1, P2, P3
             "928", "23", "0", "0", "0", "0", "0", "0", "0", "0", "1", "0",  # SL1-SH, LSW

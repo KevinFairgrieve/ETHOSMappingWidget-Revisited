@@ -2,7 +2,7 @@
 """
 Generate deterministic 5-minute telemetry CSV for performance testing.
 - 250ms tick rate → 1200 records total
-- Minute 0-1: Circular path (5km radius)
+- Minute 0-1: Circular path (500m diameter) starting at the requested origin
 - Minute 1-5: Random direction changes every 20s, same start coords
 - Constant velocity: 20 m/s (72 km/h)
 """
@@ -49,26 +49,23 @@ def meters_to_lat_lon(xm, ym, origin_lat_deg, origin_lon_deg):
     return origin_lat_deg + dlat_deg, origin_lon_deg + dlon_deg
 
 def get_circle_position(elapsed_s, radius_m, velocity_ms):
-    """Get position on circle. At t=0 start at origin (0,0), then begin circular motion."""
-    # For the first half-second, stay at origin to show start position
-    if elapsed_s < 0.5:
-        return 0, 0, 45
-    
-    # Adjust elapsed time to start circle after initial hold
-    adjusted_elapsed_s = elapsed_s - 0.5
-    circumference = 2 * math.pi * radius_m
-    total_circle_time = circumference / velocity_ms
-    
-    # Arc angle for the circle, starting north (π/2) and going clockwise through east
-    angle_rad = (adjusted_elapsed_s / total_circle_time) * 2 * math.pi + math.pi / 2
-    
-    xm = radius_m * math.cos(angle_rad)
-    ym = radius_m * math.sin(angle_rad)
-    
-    # Tangent heading (perpendicular to radius, clockwise motion)
-    heading_rad = angle_rad + math.pi / 2
-    heading_deg = math.degrees(heading_rad) % 360
-    
+    """Get a continuous circular arc that starts at the origin with a 45° tangent."""
+    angular_velocity = velocity_ms / radius_m
+
+    # Choose the circle center so the path starts exactly at the origin and the
+    # initial tangent points northeast (45°), matching the requested heading.
+    center_xm = -radius_m / math.sqrt(2)
+    center_ym = radius_m / math.sqrt(2)
+    start_angle_rad = -math.pi / 4
+    angle_rad = start_angle_rad + angular_velocity * elapsed_s
+
+    xm = center_xm + radius_m * math.cos(angle_rad)
+    ym = center_ym + radius_m * math.sin(angle_rad)
+
+    tangent_east = -velocity_ms * math.sin(angle_rad)
+    tangent_north = velocity_ms * math.cos(angle_rad)
+    heading_deg = math.degrees(math.atan2(tangent_east, tangent_north)) % 360
+
     return xm, ym, heading_deg
 
 def get_random_direction_position(elapsed_s, initial_lat, initial_lon, velocity_ms, change_interval_s):
@@ -135,7 +132,7 @@ header = [
     "TxBat(V)"
 ]
 
-output_path = "DemoTelemetry_Synthetic_5min_250ms.csv"
+output_path = "Synthetic_Logs/DemoTelemetry_Synthetic_5min_pattern_250ms.csv"
 with open(output_path, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(header)
