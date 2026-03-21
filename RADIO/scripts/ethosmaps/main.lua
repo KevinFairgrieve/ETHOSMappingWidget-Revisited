@@ -383,14 +383,59 @@ mapStatus.luaSourcesConfig.HomeDistance =  {0, 0, UNIT_METER, "homeDist", 1}
 mapStatus.luaSourcesConfig.CourseOverGround =  {0, 0, UNIT_DEGREE, "cog", 1}
 mapStatus.luaSourcesConfig.GroundSpeed =  {0, 1, UNIT_METER_PER_SECOND, "groundSpeed", 1}
 
-local function sourceWakeup(source)
-  -- Pushes cached telemetry values from mapStatus into registered Ethos sources so other widgets can consume them.
-  if source ~= nil then
-    local v = mapStatus.luaSourcesConfig[source:name()]
-    if v[2] == 0 then
-      source:value(tonumber(mapStatus.telemetry[v[4]])==nil and 0 or math.floor(0.5 + mapStatus.telemetry[v[4]] * v[5]))
-    else
-      source:value(tonumber(mapStatus.telemetry[v[4]])==nil and 0 or (mapStatus.telemetry[v[4]] * v[5]))
+local function makeSourceWakeup(sourceName)
+  -- Returns a wakeup callback bound to a single source config entry to avoid relying on source:name() at runtime.
+  return function(source)
+    if source == nil or type(source.value) ~= "function" then
+      return
+    end
+
+    local cfg = mapStatus.luaSourcesConfig[sourceName]
+    if cfg == nil then
+      pcall(function() source:value(0) end)
+      return
+    end
+
+    local telemetryField = cfg[4]
+    local scale = cfg[5] or 1
+    local decimals = cfg[2] or 0
+    local telemetryValue = tonumber(mapStatus.telemetry[telemetryField])
+    if telemetryValue == nil then
+      pcall(function() source:value(0) end)
+      return
+    end
+
+    local out = telemetryValue * scale
+    if decimals == 0 then
+      out = math.floor(0.5 + out)
+    end
+    pcall(function() source:value(out) end)
+  end
+end
+
+local function makeSourceInit(sourceName)
+  -- Returns an init callback bound to a single source config entry and applies stable defaults.
+  return function(source)
+    if source == nil then
+      return
+    end
+
+    local cfg = mapStatus.luaSourcesConfig[sourceName]
+    if cfg == nil then
+      if type(source.value) == "function" then
+        pcall(function() source:value(0) end)
+      end
+      return
+    end
+
+    if type(source.value) == "function" then
+      pcall(function() source:value(cfg[1] or 0) end)
+    end
+    if type(source.decimals) == "function" then
+      pcall(function() source:decimals(cfg[2] or 0) end)
+    end
+    if type(source.unit) == "function" then
+      pcall(function() source:unit(cfg[3]) end)
     end
   end
 end
@@ -1880,18 +1925,26 @@ local function write(widget)
   mapLibs.resetLib.resetLayout(widget)
 end
 
-local function sourceInit(source)
-  -- Seeds each exported Ethos source with formatting metadata from luaSourcesConfig before wakeup updates its value.
-  source:value(mapStatus.luaSourcesConfig[source:name()][1])
-  source:decimals(mapStatus.luaSourcesConfig[source:name()][2])
-  source:unit(mapStatus.luaSourcesConfig[source:name()][3])
-end
-
 local function registerSources()
   -- Registers exported telemetry sources so other Ethos widgets can read values computed by this widget.
-  system.registerSource({key="YM_HOME", name="HomeDistance", init=sourceInit, wakeup=sourceWakeup})
-  system.registerSource({key="YM_GSPD", name="GroundSpeed", init=sourceInit, wakeup=sourceWakeup})
-  system.registerSource({key="YM_COG", name="CourseOverGround", init=sourceInit, wakeup=sourceWakeup})
+  system.registerSource({
+    key="YM_HOME",
+    name="HomeDistance",
+    init=makeSourceInit("HomeDistance"),
+    wakeup=makeSourceWakeup("HomeDistance")
+  })
+  system.registerSource({
+    key="YM_GSPD",
+    name="GroundSpeed",
+    init=makeSourceInit("GroundSpeed"),
+    wakeup=makeSourceWakeup("GroundSpeed")
+  })
+  system.registerSource({
+    key="YM_COG",
+    name="CourseOverGround",
+    init=makeSourceInit("CourseOverGround"),
+    wakeup=makeSourceWakeup("CourseOverGround")
+  })
 end
 
 local function init()
