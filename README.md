@@ -20,6 +20,7 @@ It displays your real-time GPS position on a supported map type of your choice a
 - Trail history
 - Visual Zoom Buttons (+ / -) on the right edge
 - Works in Fullscreen, Split-Screen and all custom widget sizes
+- **One mapping widget per screen** (multiple instances on the same screen are not supported)
 - Optimized tile loading and performance
 
 ![As Full Screen Widget](images/screenshots/screenshot-2026-03-15-39603.jpg)

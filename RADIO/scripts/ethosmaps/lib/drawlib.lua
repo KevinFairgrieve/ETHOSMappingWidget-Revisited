@@ -24,6 +24,22 @@ local libs = nil
 local drawLib = {}
 local bitmaps = {}
 local topBarUnifiedFont = nil
+local topBarValueCache = {}
+
+local function flagEnabled(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local normalized = string.lower(value)
+    return normalized == "true" or normalized == "1" or normalized == "on"
+  end
+  return false
+end
 
 local function safeSensorName(sensor)
   if sensor == nil then
@@ -45,17 +61,36 @@ local function safeSensorValueText(sensor)
     return "--"
   end
 
+  local barTickSerial = (status and status.barTickSerial) or 0
+  local cacheKey = tostring(sensor)
+  local sensorName = safeSensorName(sensor)
+  if sensorName ~= nil then
+    cacheKey = sensorName .. "|" .. cacheKey
+  end
+
+  local cached = topBarValueCache[cacheKey]
+  if cached ~= nil and cached.tickSerial == barTickSerial then
+    return cached.text
+  end
+
+  local valueText = "--"
+
   local okStr, text = pcall(function() return sensor:stringValue() end)
   if okStr and text ~= nil then
-    return tostring(text)
+    valueText = tostring(text)
+  else
+    local okVal, value = pcall(function() return sensor:value() end)
+    if okVal and value ~= nil then
+      valueText = tostring(value)
+    end
   end
 
-  local okVal, value = pcall(function() return sensor:value() end)
-  if okVal and value ~= nil then
-    return tostring(value)
-  end
+  topBarValueCache[cacheKey] = {
+    tickSerial = barTickSerial,
+    text = valueText
+  }
 
-  return "--"
+  return valueText
 end
 
 local function getFontRank(font)
@@ -187,11 +222,13 @@ function drawLib.drawWindArrow(widget, ...)
   -- Placeholder for a future wind-arrow renderer.
 end
 
-function drawLib.drawTopBar(widget)
+function drawLib.drawTopBar(widget, barTop, barHeight)
   -- Draws the top status bar by combining model info, system voltage, and user-selected telemetry sources.
   local w = status.widgetWidth
   local sx = status.scaleX
   local sy = status.scaleY
+  local top = barTop or 0
+  local barH = barHeight or math.floor(26 * sy)
   local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
   local verticalTiny = w < (status.tinyWidthThreshold or 350)
   local showModelName = w >= 600
@@ -260,10 +297,11 @@ function drawLib.drawTopBar(widget)
 
   lcd.color(status.colors.barBackground)
   lcd.pen(SOLID)
-  lcd.drawFilledRectangle(0, 0, w, math.floor(26 * sy))
+  lcd.drawFilledRectangle(0, top, w, barH)
 
   if showModelName then
-    drawLib.drawText(8*sx, 2*sy, modelText, selectedFont, status.colors.barText, LEFT)
+    local modelY = top + math.floor(2 * sy)
+    drawLib.drawText(8*sx, modelY, modelText, selectedFont, status.colors.barText, LEFT)
     lcd.font(selectedFont)
     local modelW = lcd.getTextSize(modelText)
     minTelemetryX = 8 * sx + modelW + 12 * sx
@@ -272,11 +310,11 @@ function drawLib.drawTopBar(widget)
   local offset = 12*sx
   for e = 1, #sensorEntries do
     local entry = sensorEntries[e]
-    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, selectedLabelFont, compactNames)
+    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, selectedLabelFont, compactNames, top, barH)
   end
 end
 
-function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, labelFont, compactNames)
+function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, labelFont, compactNames, barTop, barHeight)
   -- Draws one top-bar sensor block by reading its current string value and writing the label/value pair to the LCD.
   if safeSensorName(sensor) == nil then
     return 80 -- Safeguard: skip invalid sensor handles and reserve a stable fallback width.
@@ -286,8 +324,10 @@ function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, label
   local valueText = safeSensorValueText(sensor)
   local blockW, valW = getTopBarSensorBlockWidth(name, valueText, barFont, labelFont)
 
-  local valueY = 0
-  local labelY = 0
+  lcd.font(barFont)
+  local _, valueH = lcd.getTextSize(valueText)
+  local valueY = (barTop or 0) + math.floor(((barHeight or 0) - valueH) / 2)
+  local labelY = valueY
 
   drawLib.drawText(x - valW - 2, labelY, name, labelFont, status.colors.barText, RIGHT)
   drawLib.drawText(x - valW, valueY, valueText, barFont, status.colors.barText, LEFT)
@@ -351,8 +391,10 @@ function drawLib.unloadBitmap(name)
   -- Removes a cached bitmap from memory and nudges Lua garbage collection to reclaim it.
   if bitmaps[name] ~= nil then
     bitmaps[name] = nil
-    collectgarbage()
-    collectgarbage()
+    if status and status.perfProfileInc and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) then
+      status.perfProfileInc("gc_count", 2)
+    end
+    -- GC wird jetzt periodisch im wakeup() ausgeführt
   end
 end
 
@@ -400,6 +442,7 @@ function drawLib.init(param_status, param_libs)
   -- Stores shared state references so drawing helpers can read status values and call sibling libraries.
   status = param_status
   libs = param_libs
+  topBarValueCache = {}
   return drawLib
 end
 

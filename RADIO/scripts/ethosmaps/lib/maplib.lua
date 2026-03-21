@@ -19,8 +19,21 @@
 
 
 local function getTime()
-  -- Converts Lua CPU time into centiseconds so map throttling uses the same timing base as the widget.
-  return os.clock()*100
+  -- Uses a monotonic wall-clock-like timer in centiseconds.
+  -- os.clock() tracks CPU time and can stall when rendering load is low.
+  if system ~= nil and type(system.getTimeCounter) == "function" then
+    local ms = system.getTimeCounter()
+    if type(ms) == "number" and ms >= 0 then
+      return ms / 10
+    end
+  end
+
+  local wallSec = os.time()
+  if type(wallSec) == "number" and wallSec > 0 then
+    return wallSec * 100
+  end
+
+  return os.clock() * 100
 end
 
 local mapLib = {}
@@ -34,28 +47,25 @@ local MAP_Y = 0
 local DIST_SAMPLES = 10
 
 -- Cached map support state for tiles, screen coordinates, trail history, and redraw throttling.
-local posUpdated = false
 local myScreenX, myScreenY
 local homeScreenX, homeScreenY
 local estimatedHomeScreenX, estimatedHomeScreenY
 local tile_x, tile_y, offset_x, offset_y
 local tiles = {}
 local tiles_path_to_idx = {} -- Maps tile file paths back to their active slot in the visible tile grid.
-local mapBitmapByPath = {}
-local nomap = nil
-local lastNoTilesLogKey = nil
-local lastTileFormatLogByKey = {}
 local world_tiles
 local tiles_per_radian
 local tile_dim
 local scaleLen
 local scaleLabel
-local posHistory = {}
+-- GPS-based trail: stores up to TRAIL_MAX_WAYPOINTS lat/lon anchors; survives zoom changes.
+local TRAIL_MAX_WAYPOINTS = 51
+local trailWaypoints = {}
+local trailWpCount = 0
+local trailAccumDist = 0
+local trailLastLat = nil
+local trailLastLon = nil
 local homeNeedsRefresh = true
-local sample = 0
-local sampleCount = 0
-local lastPosUpdate = getTime()
-local lastPosSample = getTime()
 local lastHomePosUpdate = getTime()
 local lastZoomLevel = -99
 local lastMapProvider = -99
@@ -68,6 +78,21 @@ local drawOffsetX = 0
 local drawOffsetY = 0
 
 local lastProcessCycle = getTime()
+
+local function flagEnabled(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local normalized = string.lower(value)
+    return normalized == "true" or normalized == "1" or normalized == "on"
+  end
+  return false
+end
 local processCycle = 0
 
 local avgDistSamples = {}
@@ -99,8 +124,109 @@ local lastHeavyUpdate = getTime()
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
 
-local lastTrailUpdate = getTime()
-local TRAIL_UPDATE_INTERVAL = 50
+local DIRECTIONAL_LEAD_TILES = 1
+local DIRECTIONAL_LEAD_MIN_SPEED = 1.5
+local DIRECTIONAL_LEAD_OFFSET_THRESHOLD = 90
+local PREFETCH_LEAD_OFFSET_THRESHOLD = 60
+local PREFETCH_STRIP_DEPTH = 1
+
+local function getDirectionalLeadFromHeading(heading)
+  if DIRECTIONAL_LEAD_TILES <= 0 then
+    return 0, 0
+  end
+
+  local speed = (status and status.telemetry and status.telemetry.groundSpeed) or 0
+  if heading == nil or speed < DIRECTIONAL_LEAD_MIN_SPEED then
+    return 0, 0
+  end
+
+  local normalizedHeading = heading % 360
+  local octant = math.floor((normalizedHeading + 22.5) / 45) % 8
+  local octantLead = {
+    [0] = { 0, -1 }, -- N
+    [1] = { 1, -1 }, -- NE
+    [2] = { 1,  0 }, -- E
+    [3] = { 1,  1 }, -- SE
+    [4] = { 0,  1 }, -- S
+    [5] = {-1,  1 }, -- SW
+    [6] = {-1,  0 }, -- W
+    [7] = {-1, -1 }, -- NW
+  }
+
+  local lead = octantLead[octant] or { 0, 0 }
+  return lead[1] * DIRECTIONAL_LEAD_TILES, lead[2] * DIRECTIONAL_LEAD_TILES
+end
+
+local function gateLeadByTileOffsetThreshold(leadX, leadY, offsetX, offsetY, threshold)
+  local gatedLeadX = leadX or 0
+  local gatedLeadY = leadY or 0
+  local gateThreshold = threshold or DIRECTIONAL_LEAD_OFFSET_THRESHOLD
+
+  if gatedLeadX > 0 then
+    if (offsetX or 0) < gateThreshold then
+      gatedLeadX = 0
+    end
+  elseif gatedLeadX < 0 then
+    if (offsetX or 0) > (100 - gateThreshold) then
+      gatedLeadX = 0
+    end
+  end
+
+  if gatedLeadY > 0 then
+    if (offsetY or 0) < gateThreshold then
+      gatedLeadY = 0
+    end
+  elseif gatedLeadY < 0 then
+    if (offsetY or 0) > (100 - gateThreshold) then
+      gatedLeadY = 0
+    end
+  end
+
+  return gatedLeadX, gatedLeadY
+end
+
+local function gateLeadByTileOffset(leadX, leadY, offsetX, offsetY)
+  return gateLeadByTileOffsetThreshold(leadX, leadY, offsetX, offsetY, DIRECTIONAL_LEAD_OFFSET_THRESHOLD)
+end
+
+local function gatePrefetchByTileOffset(leadX, leadY, offsetX, offsetY)
+  return gateLeadByTileOffsetThreshold(leadX, leadY, offsetX, offsetY, PREFETCH_LEAD_OFFSET_THRESHOLD)
+end
+
+local function enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY)
+  if libs == nil or libs.tileLoader == nil then
+    return
+  end
+
+  local leadX = math.max(-1, math.min(1, tonumber(prefetchLeadX) or 0))
+  local leadY = math.max(-1, math.min(1, tonumber(prefetchLeadY) or 0))
+  if leadX == 0 and leadY == 0 then
+    return
+  end
+
+  local halfX = math.floor(TILES_X / 2 + 0.5)
+  local halfY = math.floor(TILES_Y / 2 + 0.5)
+
+  if leadX ~= 0 then
+    for depth = 1, PREFETCH_STRIP_DEPTH do
+      local gridX = leadX > 0 and (TILES_X + depth) or (1 - depth)
+      for gridY = 1 - PREFETCH_STRIP_DEPTH, TILES_Y + PREFETCH_STRIP_DEPTH do
+        local tilePath = mapLib.tiles_to_path(centerTileX + gridX - halfX, centerTileY + gridY - halfY, level)
+        libs.tileLoader.enqueue(tilePath, true)
+      end
+    end
+  end
+
+  if leadY ~= 0 then
+    for depth = 1, PREFETCH_STRIP_DEPTH do
+      local gridY = leadY > 0 and (TILES_Y + depth) or (1 - depth)
+      for gridX = 1 - PREFETCH_STRIP_DEPTH, TILES_X + PREFETCH_STRIP_DEPTH do
+        local tilePath = mapLib.tiles_to_path(centerTileX + gridX - halfX, centerTileY + gridY - halfY, level)
+        libs.tileLoader.enqueue(tilePath, true)
+      end
+    end
+  end
+end
 
 function mapLib.clip(n, min, max)
   -- Constrains a numeric value to a valid range before projection and tile math use it.
@@ -173,137 +299,14 @@ function mapLib.gmapcatcher_tiles_to_path(tile_x, tile_y, level)
   return string.format("/%d/%.0f/%.0f/%.0f/s_%.0f.png", internalLevel, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
 end
 
-local function fileExists(path)
-  local f = io.open(path, "r")
-  if f ~= nil then
-    io.close(f)
-    return true
-  end
-  return false
-end
-
-local function getGoogleFallbackBasePath(mapType, tilePath)
-  -- Returns the extension-free Yaapu base path for a Google map type.
-  -- Yaapu Google tiles use legacy /z/y/s_x naming even when native tiles use /z/x/y.
-  local yaapuMapTypeMap = {
-    ["Satellite"] = "GoogleSatelliteMap",
-    ["Hybrid"] = "GoogleHybridMap",
-    ["Map"] = "GoogleMap",
-    ["Terrain"] = "GoogleTerrainMap"
-  }
-  local yaapuMapType = yaapuMapTypeMap[mapType] or mapType
-
-  local fallbackTilePath = tilePath
-  local z, x, y = tilePath:match("^/(%d+)/(%d+)/(%d+)$")
-  if z ~= nil and x ~= nil and y ~= nil then
-    fallbackTilePath = string.format("/%s/%s/s_%s", z, y, x)
-  end
-
-  return "/bitmaps/yaapu/maps/" .. yaapuMapType .. fallbackTilePath
-end
-
-local function loadFirstExisting(tilePath, ...)
-  -- Tries each full file path in order and loads the first one that exists on disk.
-  local paths = {...}
-  for i = 1, #paths do
-    if fileExists(paths[i]) then
-      mapBitmapByPath[tilePath] = lcd.loadBitmap(paths[i])
-      return mapBitmapByPath[tilePath], paths[i]
-    end
-  end
-  return nil, nil
-end
-
-function mapLib.getTileBitmap(tilePath)
-  -- Loads a tile bitmap from the SD card, caches it in memory, and falls back to the shared no-map bitmap when missing.
-  -- For ethosmaps providers the tile path has no extension; both .jpg and .png are probed in that order.
-  local provider = (status and status.conf and status.conf.mapProvider) or 2
-  local mapType = (status and status.conf and status.conf.mapType) or ""
-
-  if mapBitmapByPath[tilePath] ~= nil then
-    return mapBitmapByPath[tilePath]
-  end
-
-  local bmp
-  local loadedPath
-  local attemptedPaths = nil
-  if provider == 1 then
-    -- GMapCatcher/Yaapu: path already has extension baked in by gmapcatcher_tiles_to_path.
-    local onlyPath = "/bitmaps/yaapu/maps/" .. mapType .. tilePath
-    attemptedPaths = { onlyPath }
-    bmp, loadedPath = loadFirstExisting(tilePath, onlyPath)
-  else
-    -- ethosmaps providers: probe .jpg then .png so any download tool output is accepted.
-    local PROVIDER_FOLDERS = { [2]="GOOGLE", [3]="ESRI", [4]="OSM" }
-    local providerFolder = PROVIDER_FOLDERS[provider] or ("PROVIDER" .. tostring(provider))
-    local base = "/bitmaps/ethosmaps/maps/" .. providerFolder .. "/" .. mapType .. tilePath
-    if provider == 2 then
-      -- Google: also probe Yaapu folder as fallback (both extensions).
-      local yaapuBase = getGoogleFallbackBasePath(mapType, tilePath)
-      attemptedPaths = {
-        base .. ".jpg", base .. ".png",
-        yaapuBase .. ".jpg", yaapuBase .. ".png"
-      }
-      bmp, loadedPath = loadFirstExisting(tilePath,
-        base .. ".jpg", base .. ".png",
-        yaapuBase .. ".jpg", yaapuBase .. ".png")
-    else
-      attemptedPaths = { base .. ".jpg", base .. ".png" }
-      bmp, loadedPath = loadFirstExisting(tilePath, base .. ".jpg", base .. ".png")
-    end
-  end
-
-  if bmp ~= nil then
-    if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug then
-      local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
-      if lastTileFormatLogByKey[logKey] == nil then
-        local ext = "unknown"
-        if type(loadedPath) == "string" then
-          ext = (loadedPath:match("%.([%a%d]+)$") or "unknown"):lower()
-        end
-        local source = "ethosmaps"
-        if type(loadedPath) == "string" and loadedPath:find("/bitmaps/yaapu/maps/", 1, true) == 1 then
-          source = "yaapu-fallback"
-        elseif provider == 1 then
-          source = "yaapu"
-        end
-        libs.utils.logDebug("TILE", "Tile format detected for " .. logKey .. ": ." .. ext .. " (source: " .. source .. ")", true)
-        lastTileFormatLogByKey[logKey] = ext .. "|" .. source
-      end
-    end
-    return bmp
-  end
-
-  -- No tile found anywhere, use fallback bitmap.
-  if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug then
-    local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
-    if lastNoTilesLogKey ~= logKey then
-      libs.utils.logDebug("TILE", "No tile files found for " .. logKey .. "; using fallback bitmap (notiles/nomap)", true)
-      if type(tilePath) == "string" then
-        libs.utils.logDebug("TILE", "First missing tile key: " .. tilePath, true)
-      end
-      if type(attemptedPaths) == "table" then
-        for i = 1, #attemptedPaths do
-          libs.utils.logDebug("TILE", "Attempted path " .. tostring(i) .. ": " .. tostring(attemptedPaths[i]), true)
-        end
-      end
-      lastNoTilesLogKey = logKey
-    end
-  end
-
-  if nomap == nil then
-    if fileExists("/bitmaps/ethosmaps/maps/notiles.png") then
-      nomap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/notiles.png")
-    else
-      nomap = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/nomap.png")
-    end
-  end
-  mapBitmapByPath[tilePath] = nomap
-  return nomap
-end
-
-function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level)
+function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
+  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = os.clock() * 1000
+    status.perfProfileInc("tile_update_calls", 1)
+  end
   local now = getTime()
 
   if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
@@ -313,70 +316,112 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   lastHeavyUpdate = now
   mapNeedsHeavyUpdate = false
 
+  local windowLeadX = math.max(-1, math.min(1, tonumber(leadX) or 0))
+  local windowLeadY = math.max(-1, math.min(1, tonumber(leadY) or 0))
+  local centerTileX = tile_x + windowLeadX
+  local centerTileY = tile_y + windowLeadY
+
   local tilesChanged = false
+  local removedCacheEntries = 0
+
+  libs.resetLib.clearTable(tiles_path_to_idx)
 
   for x=1,TILES_X do
     for y=1,TILES_Y do
-      local tile_path = mapLib.tiles_to_path(tile_x + x - math.floor(TILES_X/2 + 0.5), tile_y + y - math.floor(TILES_Y/2 + 0.5), level)
+      local tile_path = mapLib.tiles_to_path(centerTileX + x - math.floor(TILES_X/2 + 0.5), centerTileY + y - math.floor(TILES_Y/2 + 0.5), level)
       local idx = width*(y-1)+x
 
-      if tiles[idx] == nil then
+      tiles_path_to_idx[tile_path] = { idx, x, y }
+
+      if tiles[idx] ~= tile_path then
         tiles[idx] = tile_path
-        tiles_path_to_idx[tile_path] = { idx, x, y }
         tilesChanged = true
-      else
-        if tiles[idx] ~= tile_path then
-          tiles[idx] = tile_path
-          tiles_path_to_idx[tile_path] = { idx, x, y }
-          tilesChanged = true
+      end
+    end
+  end
+
+  -- Only run eviction and enqueue work when the visible window actually shifted.
+  if tilesChanged then
+    removedCacheEntries = libs.tileLoader.trimCache(centerTileX, centerTileY, level, TILES_X, TILES_Y, windowLeadX, windowLeadY)
+    if removedCacheEntries > 0 then
+    end
+
+    -- Enqueue all tile slots for async loading; tiles near the center get high priority
+    -- so the aircraft position renders sharply before the outer fringe fills in.
+    local halfX = math.floor(TILES_X / 2 + 0.5)
+    local halfY = math.floor(TILES_Y / 2 + 0.5)
+    for x = 1, TILES_X do
+      for y = 1, TILES_Y do
+        local tp = tiles[width * (y - 1) + x]
+        if tp ~= nil then
+          local isHighPrio = (math.abs(x - halfX) <= 1 and math.abs(y - halfY) <= 1)
+          libs.tileLoader.enqueue(tp, isHighPrio)
         end
       end
     end
   end
-  
-  for path, bmp in pairs(mapBitmapByPath) do
-    local remove = true
-    for i=1,#tiles do
-      if tiles[i] == path then remove = false end
+
+  if tilesChanged then
+    if perfActive then
+      status.perfProfileInc("tile_rebuild_count", 1)
     end
-    if remove then
-      mapBitmapByPath[path]=nil
-      tiles_path_to_idx[path]=nil
-      tilesChanged = true
+    if perfActive and removedCacheEntries > 0 then
+      status.perfProfileInc("gc_count", 1)
+    end
+    if status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils then
+      libs.utils.logDebug("TILE", string.format("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
     end
   end
-  
-  if tilesChanged then
-    collectgarbage()
-    if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
-      libs.utils.logDebug("TILE", "loadAndCenterTiles: tiles changed (load/zoom/recenter)")
-    end
+
+  enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY)
+
+  if perfActive then
+    status.perfProfileAddMs("tile_update_ms", os.clock() * 1000 - perfStartMs)
   end
 end
 
 
-function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
-  -- Draws the active tile cache into the map viewport and overlays the optional grid when enabled.
+function mapLib.drawTiles(width, xmin, ymin)
+  -- Draws the active tile cache into the map viewport.
+  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = os.clock() * 1000
+  end
 
   for x=1,TILES_X do
     for y=1,TILES_Y do
       local idx = width*(y-1)+x
       if tiles[idx] ~= nil then
-        lcd.drawBitmap(xmin+(x-1)*TILES_SIZE, ymin+(y-1)*TILES_SIZE, mapLib.getTileBitmap(tiles[idx]))
+        local bmp = libs.tileLoader.getBitmap(tiles[idx])
+        if bmp == nil then
+          bmp = libs.tileLoader.getLoadingBitmap()
+        end
+        if bmp == nil then
+          bmp = libs.tileLoader.getNoMapBitmap() or libs.tileLoader.getFallbackBitmap()
+        end
+        if bmp ~= nil then
+          lcd.drawBitmap(xmin+(x-1)*TILES_SIZE, ymin+(y-1)*TILES_SIZE, bmp)
+        end
       end
     end
   end
 
-  if status.conf.enableMapGrid and status.widgetWidth >= 480 then
+  if status and status.conf and flagEnabled(status.conf.enableDebugLog) then
+    local gridXMax = xmin + TILES_X * TILES_SIZE
+    local gridYMax = ymin + TILES_Y * TILES_SIZE
     lcd.pen(DOTTED)
-    lcd.color(color)
+    lcd.color(status.colors.yellow)
     for x=1,TILES_X-1 do
-      lcd.drawLine(xmin+x*TILES_SIZE,ymin,xmin+x*TILES_SIZE,ymax)
+      local lineX = xmin + x*TILES_SIZE
+      lcd.drawLine(lineX, ymin, lineX, gridYMax)
     end
     for y=1,TILES_Y-1 do
-      lcd.drawLine(xmin,ymin+y*TILES_SIZE,xmax,ymin+y*TILES_SIZE)
+      local lineY = ymin + y*TILES_SIZE
+      lcd.drawLine(xmin, lineY, gridXMax, lineY)
     end
   end
+
 end
 
 
@@ -392,8 +437,13 @@ function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offse
   return status.widgetWidth / 2, -10
 end
 
-function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
+function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, allowStateUpdate)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
+  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = os.clock() * 1000
+  end
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 
@@ -403,7 +453,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     else
       tile_x, tile_y, offset_x, offset_y = 0, 0, 0, 0
     end
-    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
+    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, 0, 0, 0, 0)
   end
 
   if widget.drawOffsetX == nil then widget.drawOffsetX = 0 end
@@ -415,36 +465,29 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     widget.lastW = w
     widget.lastH = h
     widget.lastZoom = level
-    mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level)
+    mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level, 0, 0, 0, 0)
   end
 
   local vehicleR = math.floor(34 * math.min(status.scaleX, status.scaleY))
 
-  if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
-    if zoomUpdate or (getTime() - lastPosUpdate > 50) then
-      posUpdated = true
-      lastPosUpdate = getTime()
+  local doStateUpdate = allowStateUpdate ~= false
 
+  if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
+    if doStateUpdate then
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
+      local rawLeadX, rawLeadY = getDirectionalLeadFromHeading(heading)
+      local leadX, leadY = gateLeadByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
+      local prefetchLeadX, prefetchLeadY = gatePrefetchByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
+      myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+
+      mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
-      local borderX = math.floor(math.max(35, w * 0.085))
-      local borderY = math.floor(math.max(35, h * 0.085))
-
-      local myCode = libs.drawLib.computeOutCode(myScreenX, myScreenY,
-                      MAP_X + borderX, MAP_Y + borderY,
-                      MAP_X + w - borderX, MAP_Y + h - borderY)
-
-      if myCode > 0 then
-        mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
-        tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
-        myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
-
-        local centerX = x + (w / 2)
-        local centerY = y + (h / 2)
-        widget.drawOffsetX = centerX - myScreenX
-        widget.drawOffsetY = centerY - myScreenY
-      end
+      local centerX = x + (w / 2)
+      local centerY = y + (h / 2)
+      widget.drawOffsetX = centerX - myScreenX
+      widget.drawOffsetY = centerY - myScreenY
     end
   end
 
@@ -452,40 +495,61 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   local minY = math.max(0, MAP_Y)
   local maxX = math.min(minX + w, minX + TILES_X * TILES_SIZE)
   local maxY = math.min(minY + h, minY + TILES_Y * TILES_SIZE)
+  local renderOffsetX = widget.drawOffsetX
+  local renderOffsetY = widget.drawOffsetY
+
+  -- Save UAV tile coords before home calculation (which temporarily overwrites them).
+  local uav_tile_x, uav_tile_y = tile_x, tile_y
+  local uav_offset_x, uav_offset_y = offset_x, offset_y
 
   if getTime() - lastHomePosUpdate > 20 then
     lastHomePosUpdate = getTime()
     if homeNeedsRefresh then
       homeNeedsRefresh = false
       if status.telemetry.homeLat ~= nil then
-        tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
-        homeScreenX, homeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+        local h_x, h_y, h_ox, h_oy = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
+        homeScreenX, homeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, h_x, h_y, h_ox, h_oy, level)
       end
     else
       homeNeedsRefresh = true
       estimatedHomeGps.lat, estimatedHomeGps.lon = libs.utils.getLatLonFromAngleAndDistance(status.telemetry.homeAngle, status.telemetry.homeDist)
       if estimatedHomeGps.lat ~= nil then
-        local t_x, t_y, o_x, o_y = mapLib.coord_to_tiles(estimatedHomeGps.lat, estimatedHomeGps.lon, level)
-        estimatedHomeScreenX, estimatedHomeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, t_x, t_y, o_x, o_y, level)
+        local e_x, e_y, e_ox, e_oy = mapLib.coord_to_tiles(estimatedHomeGps.lat, estimatedHomeGps.lon, level)
+        estimatedHomeScreenX, estimatedHomeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, e_x, e_y, e_ox, e_oy, level)
       end
     end
   end
 
-  local now = getTime()
-  if now - lastTrailUpdate > TRAIL_UPDATE_INTERVAL and posUpdated then
-    lastTrailUpdate = now
-    posUpdated = false
-    local path = mapLib.tiles_to_path(tile_x, tile_y, level)
-    posHistory[sample] = { path, offset_x, offset_y }
-    sampleCount = sampleCount + 1
-    sample = sampleCount % status.conf.mapTrailDots
+  local trailLengthKm = tonumber((status and status.conf and status.conf.mapTrailLength) or 0) or 0
+  if trailLengthKm > 0 and doStateUpdate and status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
+    local triggerDist = trailLengthKm * 1000 / 50
+    if trailLastLat ~= nil then
+      local delta = libs.utils.haversine(trailLastLat, trailLastLon, status.telemetry.lat, status.telemetry.lon)
+      trailAccumDist = trailAccumDist + delta
+    end
+    trailLastLat = status.telemetry.lat
+    trailLastLon = status.telemetry.lon
+    if trailWpCount == 0 then
+      -- First GPS fix: place initial anchor so the dynamic segment starts immediately.
+      trailWpCount = 1
+      trailWaypoints[1] = { status.telemetry.lat, status.telemetry.lon }
+    elseif trailAccumDist >= triggerDist then
+      trailAccumDist = 0
+      if trailWpCount < TRAIL_MAX_WAYPOINTS then
+        trailWpCount = trailWpCount + 1
+        trailWaypoints[trailWpCount] = { status.telemetry.lat, status.telemetry.lon }
+      else
+        table.remove(trailWaypoints, 1)
+        trailWaypoints[TRAIL_MAX_WAYPOINTS] = { status.telemetry.lat, status.telemetry.lon }
+      end
+    end
   end
 
-  mapLib.drawTiles(TILES_X, minX + widget.drawOffsetX, maxX + widget.drawOffsetX, minY + widget.drawOffsetY, maxY + widget.drawOffsetY, status.colors.yellow, level)
+  mapLib.drawTiles(TILES_X, minX + renderOffsetX, minY + renderOffsetY)
 
   if myScreenX ~= nil and myScreenY ~= nil then
-    local drawX = myScreenX + widget.drawOffsetX
-    local drawY = myScreenY + widget.drawOffsetY
+    local drawX = myScreenX + renderOffsetX
+    local drawY = myScreenY + renderOffsetY
     if heading ~= nil then
       libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, status.colors.white)
       libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, status.colors.black)
@@ -497,24 +561,33 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     end
   end
 
-  if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and homeScreenX ~= nil then
-    local homeDrawX = homeScreenX + widget.drawOffsetX
-    local homeDrawY = homeScreenY + widget.drawOffsetY
+  if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
+    local htx, hty, hox, hoy = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
+    local homeDrawX = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
+    local homeDrawY = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
     local homeCode = libs.drawLib.computeOutCode(homeDrawX, homeDrawY, x + 11, y + 10, x + w - 11, y + h - 10)
     if homeCode == 0 then
       libs.drawLib.drawBitmap(homeDrawX - 11, homeDrawY - 10, "homeorange")
     end
   end
 
-  lcd.color(status.colors.yellow)
-  for p = 0, math.min(sampleCount - 1, status.conf.mapTrailDots - 1) do
-    if p ~= (sampleCount - 1) % status.conf.mapTrailDots then
-      local tcache = tiles_path_to_idx[posHistory[p][1]]
-      if tcache ~= nil and tiles[tcache[1]] ~= nil then
-        lcd.drawFilledRectangle(minX + widget.drawOffsetX + (tcache[2]-1)*TILES_SIZE + posHistory[p][2],
-                                minY + widget.drawOffsetY + (tcache[3]-1)*TILES_SIZE + posHistory[p][3], 3, 3)
-      end
+  if trailLengthKm > 0 and trailWpCount >= 1 and myScreenX ~= nil and uav_tile_x ~= nil then
+    lcd.color(status.colors.yellow)
+    lcd.pen(SOLID)
+    local function trailToScreen(lat, lon)
+      local tx, ty, ox, oy = mapLib.coord_to_tiles(lat, lon, level)
+      return myScreenX + (tx - uav_tile_x) * TILES_SIZE + (ox - uav_offset_x) + renderOffsetX,
+             myScreenY + (ty - uav_tile_y) * TILES_SIZE + (oy - uav_offset_y) + renderOffsetY
     end
+    -- Static segments between consecutive fixed waypoints.
+    for i = 1, trailWpCount - 1 do
+      local x1, y1 = trailToScreen(trailWaypoints[i][1], trailWaypoints[i][2])
+      local x2, y2 = trailToScreen(trailWaypoints[i + 1][1], trailWaypoints[i + 1][2])
+      lcd.drawLine(x1, y1, x2, y2)
+    end
+    -- Dynamic segment: last fixed anchor to current UAV position.
+    local x1, y1 = trailToScreen(trailWaypoints[trailWpCount][1], trailWaypoints[trailWpCount][2])
+    lcd.drawLine(x1, y1, myScreenX + renderOffsetX, myScreenY + renderOffsetY)
   end
 
   if zoomUpdate then
@@ -566,11 +639,7 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     zoomUpdate = true
 
     libs.resetLib.clearTable(tiles)
-    libs.resetLib.clearTable(mapBitmapByPath)
-    libs.resetLib.clearTable(posHistory)
-
-    sample = 0
-    sampleCount = 0
+    libs.tileLoader.clearCache()
 
     world_tiles = mapLib.tiles_on_level(level)
     tiles_per_radian = world_tiles / (2 * math.pi)
@@ -581,9 +650,21 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
     lastZoomLevel = level
+    if provider ~= lastMapProvider then
+      mapLib.clearTrail()
+    end
     lastMapProvider = provider
     lastMapType = mapType
   end
+end
+
+function mapLib.clearTrail()
+  -- Resets the GPS trail chain. Called on map provider change and on user-triggered widget reset.
+  libs.resetLib.clearTable(trailWaypoints)
+  trailWpCount = 0
+  trailAccumDist = 0
+  trailLastLat = nil
+  trailLastLon = nil
 end
 
 function mapLib.init(param_status, param_libs)
