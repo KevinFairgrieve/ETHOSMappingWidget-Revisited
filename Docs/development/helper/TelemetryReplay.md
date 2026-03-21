@@ -1,31 +1,31 @@
 # Telemetry Replay Helper
 
-## Zweck
-`replay-telemetry-log.ps1` spielt eine CSV-Telemetrie-Datei Zeile für Zeile nach `RADIO/sensors.json` aus, damit der ETHOS-Simulator laufende Live-Sensorupdates erhält.
+## Purpose
+`replay-telemetry-log.ps1` replays a CSV telemetry log line by line into `RADIO/sensors.json` so the ETHOS simulator receives live sensor updates.
 
-## Dateien
-| Datei | Zweck |
+## Files
+| File | Purpose |
 |---|---|
-| `Docs/development/helper/replay-telemetry-log.ps1` | Replay-Script |
-| `Docs/development/helper/DemoTelemetry.csv` | Demo-Log (EdgeTX-Format, jederzeit ersetzbar) |
-| `RADIO/sensors.json` | Ausgabe — liest die ETHOS-Extension live |
+| `Docs/development/helper/replay-telemetry-log.ps1` | Replay script |
+| `Docs/development/helper/DemoTelemetry.csv` | Demo log (EdgeTX format, can be replaced) |
+| `RADIO/sensors.json` | Output — read live by the ETHOS extension |
 
-## Standardverhalten
+## Default behavior
 
-Ohne Parameter startet das Script sofort mit sinnvollen Defaults:
+Without parameters the script starts immediately with sensible defaults:
 
-- **Log**: `DemoTelemetry.csv` im gleichen Ordner wie das Script
-- **Ziel**: `RADIO/sensors.json` im Repository-Root (wird automatisch gefunden, egal aus welchem Verzeichnis PowerShell gestartet wurde)
-- **Geschwindigkeit**: Echtzeit (`-Speed 1`)
-- **Timing**: wird automatisch aus den CSV-Zeitstempeln berechnet
+- **Log**: `DemoTelemetry.csv` in the same folder as the script
+- **Target**: `RADIO/sensors.json` at the repository root (auto-detected from any working directory)
+- **Speed**: real-time (`-Speed 1`)
+- **Timing**: computed from CSV timestamps
 
-## Terminalausgabe
+## Terminal output
 
-Beim Start zeigt das Script den Header und danach eine laufende Fortschrittszeile:
+At startup the script prints a header, then an in-place progress line:
 
 ```
 Replay source : ...\DemoTelemetry.csv
-Streaming to  : ...\RADIO\sensors.json
+Streaming to  : ...\RADIO/sensors.json
 Rows          : 1234
 Speed         : 1x
 Format        : EdgeTX
@@ -35,59 +35,59 @@ Log rate      : ~2 Hz (median dt 500 ms)
 Row 42/1234 (3%)  lat=51.36459 lon=11.93512 alt=43.0m hdg=316.5° sats=12
 ```
 
-Die Fortschrittszeile aktualisiert sich in-place und zeigt Prozentwert, Position, Höhe, Heading und Satellitenzahl.
+The progress line updates in-place and shows percentage, position, altitude, heading, and satellite count.
 
-## Beispiele
+## Examples
 
-Aus dem Workspace-Root oder dem Scriptordner:
+From the workspace root or the script folder:
 
 ```powershell
-# Echtzeit-Replay mit Demo-Log (empfohlen für Simulator-Tests)
+# Real-time replay with demo log (recommended for simulator tests)
 .\Docs\development\helper\replay-telemetry-log.ps1 -Speed 1 -Loop
 
-# Eigener Log, doppelte Geschwindigkeit
-.\Docs\development\helper\replay-telemetry-log.ps1 -LogPath ".\Docs\development\helper\MeinFlug.csv" -Speed 2 -Loop
+# Custom log, double speed
+.\Docs\development\helper\replay-telemetry-log.ps1 -LogPath ".\Docs\development\helper\MyFlight.csv" -Speed 2 -Loop
 
-# EdgeTX-Log aus .vscode, 5-fache Geschwindigkeit
-.\Docs\development\helper\replay-telemetry-log.ps1 -LogPath ".\vscode\MeinFlug.csv" -Speed 5
+# EdgeTX log from .vscode, 5x speed
+.\Docs\development\helper\replay-telemetry-log.ps1 -LogPath ".\vscode\MyFlight.csv" -Speed 5
 
-# Mit ESC-Sensor (sinnvoll für Multirotor-Logs)
+# With ESC sensor (useful for multirotor logs)
 .\Docs\development\helper\replay-telemetry-log.ps1 -Speed 1 -Loop -IncludeEsc
 ```
 
-## Parameter
+## Parameters
 
-| Parameter | Default | Beschreibung |
+| Parameter | Default | Description |
 |---|---|---|
-| `-LogPath` | `DemoTelemetry.csv` | Eingabe-CSV |
-| `-SensorsPath` | `RADIO/sensors.json` | Ziel-JSON; relative Pfade werden gegen den Repo-Root aufgelöst |
-| `-Speed` | `1.0` | Replay-Geschwindigkeit (`1` = Echtzeit, `2` = doppelt, usw.) |
-| `-Loop` | — | Nach dem letzten Frame wieder von vorne starten |
-| `-Format` | `auto` | `auto` / `edgetx` / `generic` — erkennt das Format automatisch aus den CSV-Headern |
-| `-IncludeEsc` | — | Optionalen ESC-Sensor mit RPM/Spannung/Strom hinzufügen |
+| `-LogPath` | `DemoTelemetry.csv` | Input CSV |
+| `-SensorsPath` | `RADIO/sensors.json` | Output JSON; relative paths are resolved against the repo root |
+| `-Speed` | `1.0` | Replay speed (`1` = real-time, `2` = double, etc.) |
+| `-Loop` | — | Restart from the beginning after the last frame |
+| `-Format` | `auto` | `auto` / `edgetx` / `generic` — detects format from CSV headers |
+| `-IncludeEsc` | — | Optional ESC sensor (RPM/voltage/current) |
 
-## Eigenen Log verwenden
+## Using your own log
 
-1. CSV in `Docs/development/helper/` ablegen (oder beliebigen Pfad mit `-LogPath` angeben)
-2. Format entweder automatisch erkennen lassen oder mit `-Format edgetx`/`-Format generic` erzwingen
+1. Put the CSV in `Docs/development/helper/` (or pass any path with `-LogPath`)
+2. Let the script auto-detect the format or force `-Format edgetx` / `-Format generic`
 
-**EdgeTX-Format** (wird automatisch erkannt):
-- Pflichtfelder: `Date`, `Time`, `GPS`, `1RSS(dB)`, `RxBt(V)`, `Ptch(rad)`, `Roll(rad)`
-- Timing: aus `Date`+`Time` berechnet
+**EdgeTX format** (auto-detected):
+- Required columns: `Date`, `Time`, `GPS`, `1RSS(dB)`, `RxBt(V)`, `Ptch(rad)`, `Roll(rad)`
+- Timing derived from `Date` + `Time`
 
-**Generic-Format**:
-- Pflichtfeld: `timestamp_ms` (Unix-Millisekunden)
+**Generic format**:
+- Required field: `timestamp_ms` (Unix milliseconds)
 - GPS: `lat`, `lon`, `alt_m`, `speed_mps`, `course_deg`, `sats`
 
-## Technische Details
+## Technical details
 
-- **Timing**: Das Script liest die echten Zeitstempel aus der CSV und wartet zwischen zwei Zeilen genau `delta / Speed` Millisekunden. Es gibt keinen festen Takt — das Timing folgt dem Log.
-- **Schreiben**: Atomarer Schreibvorgang über temporäre Datei + `File.Replace`, damit die Extension nie ein halb-geschriebenes JSON liest.
-- **Encoding**: UTF-8 ohne BOM, damit `JSON.parse()` in der ETHOS-Extension fehlerfrei parst.
-- **Projektpfad**: Das Script findet den Repository-Root unabhängig vom aktuellen Arbeitsverzeichnis anhand der Ordner `RADIO/` und `Docs/`.
+- **Timing**: uses real timestamps from the CSV and waits exactly `delta / Speed` ms between rows. No fixed tick.
+- **Write**: atomic write via temp file + `File.Replace`, so the extension never reads a partial JSON.
+- **Encoding**: UTF-8 without BOM, so `JSON.parse()` in the ETHOS extension works reliably.
+- **Project path**: detects the repo root based on `RADIO/` and `Docs/`.
 
-## Voraussetzungen
+## Requirements
 
-- ETHOS Simulator läuft (Extension `bsongis.ethos`)
-- VS Code Developer: Reload Window nach Extension-Patches
-- PowerShell 5.1 (Windows) oder pwsh
+- ETHOS simulator running (extension `bsongis.ethos`)
+- VS Code Developer: Reload Window after extension patches
+- PowerShell 5.1 (Windows) or pwsh
