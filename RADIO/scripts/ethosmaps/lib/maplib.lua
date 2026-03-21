@@ -54,7 +54,6 @@ local posHistory = {}
 local homeNeedsRefresh = true
 local sample = 0
 local sampleCount = 0
-local lastPosUpdate = getTime()
 local lastPosSample = getTime()
 local lastHomePosUpdate = getTime()
 local lastZoomLevel = -99
@@ -95,18 +94,101 @@ local TILES_IDX_PATH = 2
 local zoomUpdateTimer = getTime()
 local zoomUpdate = false
 
-local RECENTER_HYSTERESIS_PX = 24
-local RECENTER_MIN_INTERVAL = 40 -- centiseconds
-local RECENTER_LOG_INTERVAL = 200 -- centiseconds
-local lastRecenterTime = getTime()
-local lastRecenterLogTime = 0
-
 local lastHeavyUpdate = getTime()
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
 
 local lastTrailUpdate = getTime()
 local TRAIL_UPDATE_INTERVAL = 50
+local DIRECTIONAL_LEAD_TILES = 1
+local DIRECTIONAL_LEAD_MIN_SPEED = 1.5
+local DIRECTIONAL_LEAD_OFFSET_THRESHOLD = 90
+local TILE_CACHE_RING_TILES = 2
+
+local function getDirectionalLeadFromHeading(heading)
+  if DIRECTIONAL_LEAD_TILES <= 0 then
+    return 0, 0
+  end
+
+  local speed = (status and status.telemetry and status.telemetry.groundSpeed) or 0
+  if heading == nil or speed < DIRECTIONAL_LEAD_MIN_SPEED then
+    return 0, 0
+  end
+
+  local normalizedHeading = heading % 360
+  local octant = math.floor((normalizedHeading + 22.5) / 45) % 8
+  local octantLead = {
+    [0] = { 0, -1 }, -- N
+    [1] = { 1, -1 }, -- NE
+    [2] = { 1,  0 }, -- E
+    [3] = { 1,  1 }, -- SE
+    [4] = { 0,  1 }, -- S
+    [5] = {-1,  1 }, -- SW
+    [6] = {-1,  0 }, -- W
+    [7] = {-1, -1 }, -- NW
+  }
+
+  local lead = octantLead[octant] or { 0, 0 }
+  return lead[1] * DIRECTIONAL_LEAD_TILES, lead[2] * DIRECTIONAL_LEAD_TILES
+end
+
+local function gateLeadByTileOffset(leadX, leadY, offsetX, offsetY)
+  local gatedLeadX = leadX or 0
+  local gatedLeadY = leadY or 0
+
+  if gatedLeadX > 0 then
+    if (offsetX or 0) < DIRECTIONAL_LEAD_OFFSET_THRESHOLD then
+      gatedLeadX = 0
+    end
+  elseif gatedLeadX < 0 then
+    if (offsetX or 0) > (100 - DIRECTIONAL_LEAD_OFFSET_THRESHOLD) then
+      gatedLeadX = 0
+    end
+  end
+
+  if gatedLeadY > 0 then
+    if (offsetY or 0) < DIRECTIONAL_LEAD_OFFSET_THRESHOLD then
+      gatedLeadY = 0
+    end
+  elseif gatedLeadY < 0 then
+    if (offsetY or 0) > (100 - DIRECTIONAL_LEAD_OFFSET_THRESHOLD) then
+      gatedLeadY = 0
+    end
+  end
+
+  return gatedLeadX, gatedLeadY
+end
+
+local function getBitmapCacheCount()
+  local count = 0
+  for _ in pairs(mapBitmapByPath) do
+    count = count + 1
+  end
+  return count
+end
+
+local function trimBitmapCache(centerTileX, centerTileY, level)
+  local keep = {}
+  local halfX = math.floor(TILES_X/2 + 0.5)
+  local halfY = math.floor(TILES_Y/2 + 0.5)
+
+  for x = 1 - TILE_CACHE_RING_TILES, TILES_X + TILE_CACHE_RING_TILES do
+    for y = 1 - TILE_CACHE_RING_TILES, TILES_Y + TILE_CACHE_RING_TILES do
+      local keepPath = mapLib.tiles_to_path(centerTileX + x - halfX, centerTileY + y - halfY, level)
+      keep[keepPath] = true
+    end
+  end
+
+  local removed = 0
+  for path in pairs(mapBitmapByPath) do
+    if not keep[path] then
+      mapBitmapByPath[path] = nil
+      removed = removed + 1
+    end
+  end
+
+  return removed
+end
 
 function mapLib.clip(n, min, max)
   -- Constrains a numeric value to a valid range before projection and tile math use it.
@@ -308,7 +390,7 @@ function mapLib.getTileBitmap(tilePath)
   return nomap
 end
 
-function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level)
+function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
   -- Use truthy checks (not == true) because ETHOS storage may return 1/0 integers instead of booleans.
   local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
@@ -326,36 +408,34 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   lastHeavyUpdate = now
   mapNeedsHeavyUpdate = false
 
+  local windowLeadX = math.max(-1, math.min(1, tonumber(leadX) or 0))
+  local windowLeadY = math.max(-1, math.min(1, tonumber(leadY) or 0))
+  local centerTileX = tile_x + windowLeadX
+  local centerTileY = tile_y + windowLeadY
+
   local tilesChanged = false
+
+  libs.resetLib.clearTable(tiles_path_to_idx)
 
   for x=1,TILES_X do
     for y=1,TILES_Y do
-      local tile_path = mapLib.tiles_to_path(tile_x + x - math.floor(TILES_X/2 + 0.5), tile_y + y - math.floor(TILES_Y/2 + 0.5), level)
+      local tile_path = mapLib.tiles_to_path(centerTileX + x - math.floor(TILES_X/2 + 0.5), centerTileY + y - math.floor(TILES_Y/2 + 0.5), level)
       local idx = width*(y-1)+x
 
-      if tiles[idx] == nil then
+      tiles_path_to_idx[tile_path] = { idx, x, y }
+
+      if tiles[idx] ~= tile_path then
         tiles[idx] = tile_path
-        tiles_path_to_idx[tile_path] = { idx, x, y }
         tilesChanged = true
-      else
-        if tiles[idx] ~= tile_path then
-          tiles[idx] = tile_path
-          tiles_path_to_idx[tile_path] = { idx, x, y }
-          tilesChanged = true
-        end
       end
     end
   end
-  
-  for path, bmp in pairs(mapBitmapByPath) do
-    local remove = true
-    for i=1,#tiles do
-      if tiles[i] == path then remove = false end
-    end
-    if remove then
-      mapBitmapByPath[path]=nil
-      tiles_path_to_idx[path]=nil
-      tilesChanged = true
+
+  local removedCacheEntries = trimBitmapCache(centerTileX, centerTileY, level)
+  if removedCacheEntries > 0 then
+    tilesChanged = true
+    if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
+      libs.utils.logDebug("TILE", string.format("Cache trim evicted %d entries (ring=%d, current=%d)", removedCacheEntries, TILE_CACHE_RING_TILES, getBitmapCacheCount()))
     end
   end
   
@@ -363,7 +443,7 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
     if perfActive then
       status.perfProfileInc("tile_rebuild_count", 1)
     end
-    if perfActive then
+    if perfActive and removedCacheEntries > 0 then
       status.perfProfileInc("gc_count", 1)
     end
     -- GC wird jetzt periodisch im wakeup() ausgeführt
@@ -378,8 +458,8 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
 end
 
 
-function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
-  -- Draws the active tile cache into the map viewport and overlays the optional grid when enabled.
+function mapLib.drawTiles(width, xmin, ymin)
+  -- Draws the active tile cache into the map viewport.
 
   for x=1,TILES_X do
     for y=1,TILES_Y do
@@ -390,14 +470,18 @@ function mapLib.drawTiles(width, xmin, xmax, ymin, ymax, color, level)
     end
   end
 
-  if status.conf.enableMapGrid and status.widgetWidth >= 480 then
+  if status.conf.enableDebugLog then
+    local gridXMax = xmin + TILES_X * TILES_SIZE
+    local gridYMax = ymin + TILES_Y * TILES_SIZE
     lcd.pen(DOTTED)
-    lcd.color(color)
+    lcd.color(status.colors.yellow)
     for x=1,TILES_X-1 do
-      lcd.drawLine(xmin+x*TILES_SIZE,ymin,xmin+x*TILES_SIZE,ymax)
+      local lineX = xmin + x*TILES_SIZE
+      lcd.drawLine(lineX, ymin, lineX, gridYMax)
     end
     for y=1,TILES_Y-1 do
-      lcd.drawLine(xmin,ymin+y*TILES_SIZE,xmax,ymin+y*TILES_SIZE)
+      local lineY = ymin + y*TILES_SIZE
+      lcd.drawLine(xmin, lineY, gridXMax, lineY)
     end
   end
 end
@@ -415,7 +499,7 @@ function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offse
   return status.widgetWidth / 2, -10
 end
 
-function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
+function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, allowStateUpdate)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
@@ -426,7 +510,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     else
       tile_x, tile_y, offset_x, offset_y = 0, 0, 0, 0
     end
-    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
+    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, 0, 0)
   end
 
   if widget.drawOffsetX == nil then widget.drawOffsetX = 0 end
@@ -438,55 +522,30 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     widget.lastW = w
     widget.lastH = h
     widget.lastZoom = level
-    mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level)
+    mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level, 0, 0)
   end
 
   local vehicleR = math.floor(34 * math.min(status.scaleX, status.scaleY))
 
-  if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
-    if zoomUpdate or (getTime() - lastPosUpdate > 50) then
-      posUpdated = true
-      lastPosUpdate = getTime()
+  local doStateUpdate = allowStateUpdate ~= false
 
+  if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
+    if doStateUpdate then
+      posUpdated = true
+
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
+      local leadX, leadY = getDirectionalLeadFromHeading(heading)
+      leadX, leadY = gateLeadByTileOffset(leadX, leadY, offset_x, offset_y)
+      myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+
+      mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY)
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
-      local borderX = math.floor(math.max(35, w * 0.085))
-      local borderY = math.floor(math.max(35, h * 0.085))
-
-      local myCode = libs.drawLib.computeOutCode(myScreenX, myScreenY,
-                      MAP_X + borderX, MAP_Y + borderY,
-                      MAP_X + w - borderX, MAP_Y + h - borderY)
-
-      if myCode > 0 then
-        local nowCs = getTime()
-        local canRecenterByTime = (nowCs - lastRecenterTime) >= RECENTER_MIN_INTERVAL
-        local hysteresisPx = math.floor(math.max(8, math.min(RECENTER_HYSTERESIS_PX, math.min(w, h) * 0.08)))
-
-        local hysteresisCode = libs.drawLib.computeOutCode(myScreenX, myScreenY,
-                              MAP_X + borderX - hysteresisPx, MAP_Y + borderY - hysteresisPx,
-                              MAP_X + w - borderX + hysteresisPx, MAP_Y + h - borderY + hysteresisPx)
-
-        if canRecenterByTime and hysteresisCode > 0 then
-          mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
-          tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
-          myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
-
-          local centerX = x + (w / 2)
-          local centerY = y + (h / 2)
-          widget.drawOffsetX = centerX - myScreenX
-          widget.drawOffsetY = centerY - myScreenY
-          lastRecenterTime = nowCs
-          if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug and (nowCs - lastRecenterLogTime >= RECENTER_LOG_INTERVAL) then
-            libs.utils.logDebug("TILE", string.format("Recenter executed (hyst=%d, interval=%dcs)", hysteresisPx, RECENTER_MIN_INTERVAL), true)
-            lastRecenterLogTime = nowCs
-          end
-        elseif status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug and (nowCs - lastRecenterLogTime >= RECENTER_LOG_INTERVAL) then
-          local reason = canRecenterByTime and "inside_hysteresis" or "min_interval"
-          libs.utils.logDebug("TILE", string.format("Recenter deferred (%s, hyst=%d)", reason, hysteresisPx), true)
-          lastRecenterLogTime = nowCs
-        end
-      end
+      local centerX = x + (w / 2)
+      local centerY = y + (h / 2)
+      widget.drawOffsetX = centerX - myScreenX
+      widget.drawOffsetY = centerY - myScreenY
     end
   end
 
@@ -494,6 +553,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   local minY = math.max(0, MAP_Y)
   local maxX = math.min(minX + w, minX + TILES_X * TILES_SIZE)
   local maxY = math.min(minY + h, minY + TILES_Y * TILES_SIZE)
+  local renderOffsetX = widget.drawOffsetX
+  local renderOffsetY = widget.drawOffsetY
 
   if getTime() - lastHomePosUpdate > 20 then
     lastHomePosUpdate = getTime()
@@ -523,11 +584,11 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     sample = sampleCount % status.conf.mapTrailDots
   end
 
-  mapLib.drawTiles(TILES_X, minX + widget.drawOffsetX, maxX + widget.drawOffsetX, minY + widget.drawOffsetY, maxY + widget.drawOffsetY, status.colors.yellow, level)
+  mapLib.drawTiles(TILES_X, minX + renderOffsetX, minY + renderOffsetY)
 
   if myScreenX ~= nil and myScreenY ~= nil then
-    local drawX = myScreenX + widget.drawOffsetX
-    local drawY = myScreenY + widget.drawOffsetY
+    local drawX = myScreenX + renderOffsetX
+    local drawY = myScreenY + renderOffsetY
     if heading ~= nil then
       libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, status.colors.white)
       libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, status.colors.black)
@@ -540,8 +601,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
   end
 
   if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and homeScreenX ~= nil then
-    local homeDrawX = homeScreenX + widget.drawOffsetX
-    local homeDrawY = homeScreenY + widget.drawOffsetY
+    local homeDrawX = homeScreenX + renderOffsetX
+    local homeDrawY = homeScreenY + renderOffsetY
     local homeCode = libs.drawLib.computeOutCode(homeDrawX, homeDrawY, x + 11, y + 10, x + w - 11, y + h - 10)
     if homeCode == 0 then
       libs.drawLib.drawBitmap(homeDrawX - 11, homeDrawY - 10, "homeorange")
@@ -553,8 +614,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
     if p ~= (sampleCount - 1) % status.conf.mapTrailDots then
       local tcache = tiles_path_to_idx[posHistory[p][1]]
       if tcache ~= nil and tiles[tcache[1]] ~= nil then
-        lcd.drawFilledRectangle(minX + widget.drawOffsetX + (tcache[2]-1)*TILES_SIZE + posHistory[p][2],
-                                minY + widget.drawOffsetY + (tcache[3]-1)*TILES_SIZE + posHistory[p][3], 3, 3)
+        lcd.drawFilledRectangle(minX + renderOffsetX + (tcache[2]-1)*TILES_SIZE + posHistory[p][2],
+                                minY + renderOffsetY + (tcache[3]-1)*TILES_SIZE + posHistory[p][3], 3, 3)
       end
     end
   end

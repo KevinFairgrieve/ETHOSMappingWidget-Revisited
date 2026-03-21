@@ -24,6 +24,7 @@ local libs = nil
 local drawLib = {}
 local bitmaps = {}
 local topBarUnifiedFont = nil
+local topBarValueCache = {}
 
 local function safeSensorName(sensor)
   if sensor == nil then
@@ -45,17 +46,36 @@ local function safeSensorValueText(sensor)
     return "--"
   end
 
+  local barTickSerial = (status and status.barTickSerial) or 0
+  local cacheKey = tostring(sensor)
+  local sensorName = safeSensorName(sensor)
+  if sensorName ~= nil then
+    cacheKey = sensorName .. "|" .. cacheKey
+  end
+
+  local cached = topBarValueCache[cacheKey]
+  if cached ~= nil and cached.tickSerial == barTickSerial then
+    return cached.text
+  end
+
+  local valueText = "--"
+
   local okStr, text = pcall(function() return sensor:stringValue() end)
   if okStr and text ~= nil then
-    return tostring(text)
+    valueText = tostring(text)
+  else
+    local okVal, value = pcall(function() return sensor:value() end)
+    if okVal and value ~= nil then
+      valueText = tostring(value)
+    end
   end
 
-  local okVal, value = pcall(function() return sensor:value() end)
-  if okVal and value ~= nil then
-    return tostring(value)
-  end
+  topBarValueCache[cacheKey] = {
+    tickSerial = barTickSerial,
+    text = valueText
+  }
 
-  return "--"
+  return valueText
 end
 
 local function getFontRank(font)
@@ -407,6 +427,7 @@ function drawLib.init(param_status, param_libs)
   -- Stores shared state references so drawing helpers can read status values and call sibling libraries.
   status = param_status
   libs = param_libs
+  topBarValueCache = {}
   return drawLib
 end
 

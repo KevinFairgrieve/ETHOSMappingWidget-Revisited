@@ -77,12 +77,8 @@ local mapStatus = {
     mapZoomMax = 20,
     mapZoomMin = 1,
     mapTrailDots = 30,
-    enableMapGrid = true,
     enableDebugLog = false,   -- Enables the on-device debug log.
     enablePerfProfile = false, -- Emits 5s performance summaries into debug.log.
-    screenToggleChannelId = 0,
-    screenWheelChannelId = 0,
-    screenWheelChannelDelay = 20,
     gpsFormat = 0, -- 0 = decimal, 1 = DMS
     -- Layout selection persisted for future layout variants.
     layout = 1,
@@ -109,6 +105,9 @@ local mapStatus = {
   mapLastLat = nil,   -- Dedicated to map redraw throttling so COG tracking can use its own history.
   mapLastLon = nil,
   mapLastZoom = 0,
+  mapRedrawPending = false,
+  mapTickSerial = 0,
+  barTickSerial = 0,
   lastLoggedLat = 0,
   lastLoggedLon = 0,
   lastSelectionAutoFixKey = nil,
@@ -196,17 +195,23 @@ end
 -- Dedicated perf window timer state, independent from mutable config/status tables.
 local perfWindowStartMs = nil
 
--- Frame scheduler state for Step A: dirty-invalidate optimization.
--- Tracks wakeup count to rate-limit lcd.invalidate() calls.
--- Interactive (dirty): invalidate on the very next wakeup.
--- Idle (not dirty): invalidate every FRAME_IDLE_INTERVAL wakeups (~2 FPS at baseline 6 Hz wakeup rate).
+-- Shared render scheduler: one 500ms map tick, with bars updated every second tick.
 local frameWakeupCount = 0
-local frameLastInvalidateWakeup = 0
 local frameDirty = false
-local FRAME_IDLE_INTERVAL = 3  -- every 3rd wakeup when nothing changed
+local RENDER_TICK_CS = 50
+local BAR_RENDER_EVERY_TICK = 2
+local nextScheduledRenderCs = 0
+local scheduledRenderCount = 0
 
 local function markDirty()
   frameDirty = true
+end
+
+local function markMapDirty(force)
+  mapStatus.mapRedrawPending = true
+  if force == true then
+    markDirty()
+  end
 end
 
 local function configFlagEnabled(value)
@@ -416,6 +421,7 @@ end
 local function reset(widget)
   -- Delegates a user-triggered reset to resetLib so layouts and cached map data are rebuilt.
   mapLibs.resetLib.reset(widget)
+  markMapDirty(true)
 end
 
 local function loadLayout(widget)
@@ -455,7 +461,6 @@ local function bgtasks(widget)
   if gpsData.lat ~= nil and gpsData.lon ~= nil then
     mapStatus.telemetry.lat = gpsData.lat
     mapStatus.telemetry.lon = gpsData.lon
-    markDirty()  -- New GPS position: map needs redraw.
 
     -- Log GPS position at most once every 15 seconds to avoid flooding the debug log.
     if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then -- Safeguard: avoid logger access before config and libraries are initialized.
@@ -515,7 +520,6 @@ local function bgtasks(widget)
   if now - mapStatus.blinkTimer > 60 then
     mapStatus.blinkon = not mapStatus.blinkon
     mapStatus.blinkTimer = now
-    markDirty()  -- Blink state changed: overlay indicators need redraw.
   end
   bgclock = (bgclock%4)+1
 end
@@ -656,13 +660,13 @@ local function event(widget, category, value, x, y)
     if hitMinus then
       mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
       mapStatus.consumeZoomRelease = true
-      markDirty()  -- Zoom level changed: map needs immediate redraw.
+      markMapDirty(true)  -- Zoom level changed: map needs immediate redraw.
       mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
 
     elseif hitPlus then
       mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
       mapStatus.consumeZoomRelease = true
-      markDirty()  -- Zoom level changed: map needs immediate redraw.
+      markMapDirty(true)  -- Zoom level changed: map needs immediate redraw.
       mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
 
     else
@@ -689,6 +693,7 @@ local function setHome(widget)
   -- Copies the current aircraft position from telemetry into the stored home position used by map overlays.
   mapStatus.telemetry.homeLat = mapStatus.telemetry.lat
   mapStatus.telemetry.homeLon = mapStatus.telemetry.lon
+  markMapDirty(true)
 end
 
 local function menu(widget)
@@ -697,8 +702,8 @@ local function menu(widget)
     return {
       { "Maps: Reset", function() reset(widget) end },
       { "Maps: Set Home", function() setHome(widget) end },
-      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1) end},
-      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1) end},
+      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1); markMapDirty(true) end},
+      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1); markMapDirty(true) end},
     }
   end
   return { { "Maps: Reset", function() reset(widget) end } }
@@ -848,13 +853,27 @@ local function wakeup(widget)
     end
   end
 
-  -- Step A: Frame scheduler — only call lcd.invalidate() when dirty or idle deadline reached.
-  -- Interactive (dirty): on the very next wakeup after state change (~wakeup rate, ~4–6 FPS).
-  -- Idle (not dirty): every FRAME_IDLE_INTERVAL wakeups (~2 FPS at baseline 6 Hz).
   frameWakeupCount = frameWakeupCount + 1
-  local frameInterval = frameDirty and 1 or FRAME_IDLE_INTERVAL
-  if frameWakeupCount - frameLastInvalidateWakeup >= frameInterval then
-    frameLastInvalidateWakeup = frameWakeupCount
+  local scheduledRenderDue = false
+
+  if nextScheduledRenderCs == 0 then
+    nextScheduledRenderCs = now
+  end
+
+  if now >= nextScheduledRenderCs then
+    scheduledRenderDue = true
+    scheduledRenderCount = scheduledRenderCount + 1
+    mapStatus.mapTickSerial = scheduledRenderCount
+    if scheduledRenderCount % BAR_RENDER_EVERY_TICK == 0 then
+      mapStatus.barTickSerial = mapStatus.barTickSerial + 1
+    end
+
+    repeat
+      nextScheduledRenderCs = nextScheduledRenderCs + RENDER_TICK_CS
+    until nextScheduledRenderCs > now
+  end
+
+  if frameDirty or scheduledRenderDue then
     frameDirty = false
     if perfActive then
       perfInc("invalidate_count", 1)
@@ -1737,9 +1756,6 @@ local function configure(widget)
     end
   )
 
-  line = form.addLine("Enable map grid")
-  form.addBooleanField(line, nil, function() return mapStatus.conf.enableMapGrid end, function(value) mapStatus.conf.enableMapGrid = value end)
-
   -- Debug logging is opt-in because writes go to the SD card during runtime.
   line = form.addLine("Enable debug log")
   widget.enableDebugLogField = form.addBooleanField(line, nil, 
@@ -1808,7 +1824,6 @@ local function read(widget)
   mapStatus.conf.mapZoomDefault = storageToConfigWithFallback("mapZoomDefault", 18, {"googleZoomDefault", "gmapZoomDefault"})
   mapStatus.conf.mapZoomMin = storageToConfigWithFallback("mapZoomMin", 1, {"googleZoomMin", "gmapZoomMin"})
   mapStatus.conf.mapZoomMax = storageToConfigWithFallback("mapZoomMax", 20, {"googleZoomMax", "gmapZoomMax"})
-  mapStatus.conf.enableMapGrid = storageToConfig("enableMapGrid", true)
   mapStatus.conf.enableDebugLog = storageToConfig("enableDebugLog", false)
   mapStatus.conf.enablePerfProfile = storageToConfig("enablePerfProfile", false)
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
@@ -1832,7 +1847,6 @@ local function write(widget)
   storage.write("mapZoomDefault", mapStatus.conf.mapZoomDefault)
   storage.write("mapZoomMin", mapStatus.conf.mapZoomMin)
   storage.write("mapZoomMax", mapStatus.conf.mapZoomMax)
-  storage.write("enableMapGrid", mapStatus.conf.enableMapGrid)
   storage.write("enableDebugLog", mapStatus.conf.enableDebugLog)
   storage.write("enablePerfProfile", mapStatus.conf.enablePerfProfile)
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)

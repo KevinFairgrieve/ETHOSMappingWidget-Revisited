@@ -28,6 +28,33 @@ local panel = {}
 
 local status = nil
 local libs = nil
+local MAP_TILE_SIZE = 100
+local MAP_TILE_BUFFER_X = 1
+local MAP_TILE_BUFFER_Y = 0
+
+local function getBarSnapshot()
+  local barTickSerial = status.barTickSerial or 0
+
+  if status.barSnapshot == nil then
+    status.barSnapshot = {
+      lastTickSerial = -1,
+      groundSpeed = 0,
+      heading = 0,
+      travelDist = 0,
+      homeDist = 0,
+    }
+  end
+
+  if status.barSnapshot.lastTickSerial ~= barTickSerial then
+    status.barSnapshot.groundSpeed = (status.avgSpeed and status.avgSpeed.value) or 0
+    status.barSnapshot.heading = (status.telemetry and status.telemetry.cog) or 0
+    status.barSnapshot.travelDist = (status.avgSpeed and status.avgSpeed.travelDist) or 0
+    status.barSnapshot.homeDist = (status.telemetry and status.telemetry.homeDist) or 0
+    status.barSnapshot.lastTickSerial = barTickSerial
+  end
+
+  return status.barSnapshot
+end
 
 local function drawBarSensor(x, barTop, barHeight, label, value, unit, font, label_font, unit_font, color, label_color, blink, flags)
   -- Draws one labeled sensor readout for the layout bars and returns the width consumed by the rendered block.
@@ -118,19 +145,33 @@ function panel.draw(widget)
   end
   local mapY    = topH
   local mapH    = h - topH - bottomH
+  local mapTilesX = math.max(8, math.ceil(w / MAP_TILE_SIZE) + MAP_TILE_BUFFER_X)
+  local mapTilesY = math.max(4, math.ceil(mapH / MAP_TILE_SIZE) + MAP_TILE_BUFFER_Y)
 
-  -- Request a full tile refresh only when position or zoom state actually changed.
-  if status.telemetry.lat ~= (status.mapLastLat or 0) or 
-     status.telemetry.lon ~= (status.mapLastLon or 0) or 
-     status.mapZoomLevel ~= (status.mapLastZoom or 0) then
-    libs.mapLib.setNeedsHeavyUpdate()
-    status.mapLastLat = status.telemetry.lat
-    status.mapLastLon = status.telemetry.lon
-    status.mapLastZoom = status.mapZoomLevel
+  if mapTilesX % 2 == 0 then
+    mapTilesX = mapTilesX + 1
+  end
+  if mapTilesY % 2 == 0 then
+    mapTilesY = mapTilesY + 1
   end
 
+  local mapTickSerial = status.mapTickSerial or 0
+  local zoomChanged = status.mapZoomLevel ~= (status.mapLastZoom or 0)
+  local mapNeedsUpdate = status.mapRedrawPending == true or zoomChanged or mapTickSerial ~= (status.mapLastTickSerial or -1)
+
+  if zoomChanged then
+    libs.mapLib.setNeedsHeavyUpdate()
+  end
+
+  if mapNeedsUpdate then
+    status.mapRedrawPending = false
+    status.mapLastTickSerial = mapTickSerial
+  end
+
+  status.mapLastZoom = status.mapZoomLevel
+
   -- Draw the map viewport for the current layout.
-  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, 8, 5, status.telemetry.cog)
+  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, mapTilesX, mapTilesY, status.telemetry.cog, mapNeedsUpdate)
 
   -- Draw the dedicated left-side zoom buttons.
   local scaleFactor = 0.15 + 0.8 * status.scaleX
@@ -195,6 +236,8 @@ function panel.draw(widget)
 
   -- Draw the bottom flight-data bar except on the narrowest horizontal layouts.
   if not horizontalTiny then
+    local barSnapshot = getBarSnapshot()
+
     lcd.color(lcd.RGB(0,0,0))
     lcd.pen(SOLID)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
@@ -211,27 +254,27 @@ function panel.draw(widget)
 
     if hideHomeDistAndHeading then
       drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
-        string.format("%.01f", status.avgSpeed.value * status.conf.horSpeedMultiplier),
+        string.format("%.01f", barSnapshot.groundSpeed * status.conf.horSpeedMultiplier),
         status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
 
       drawBarSensor(w - 12*sx, barTop, bottomH, "TR",
-        string.format("%.01f", status.avgSpeed.travelDist * status.conf.distUnitLongScale),
+        string.format("%.01f", barSnapshot.travelDist * status.conf.distUnitLongScale),
         status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
     else
       local offset = drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
-        string.format("%.01f", status.avgSpeed.value * status.conf.horSpeedMultiplier),
+        string.format("%.01f", barSnapshot.groundSpeed * status.conf.horSpeedMultiplier),
         status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
 
       offset = offset + drawBarSensor(12*sx + offset + spacing, barTop, bottomH, "HDG",
-        string.format("%.0f", status.telemetry.cog or 0), "°",
+        string.format("%.0f", barSnapshot.heading or 0), "°",
         barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
 
       local travelOffset = drawBarSensor(w, barTop, bottomH, "TR",
-        string.format("%.01f", status.avgSpeed.travelDist * status.conf.distUnitLongScale),
+        string.format("%.01f", barSnapshot.travelDist * status.conf.distUnitLongScale),
         status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
 
       drawBarSensor(w - travelOffset - spacing - 15*sx, barTop, bottomH, homeLabel,
-        string.format("%.01f", status.telemetry.homeDist * status.conf.distUnitScale),
+        string.format("%.01f", barSnapshot.homeDist * status.conf.distUnitScale),
         status.conf.distUnitLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
     end
   end
