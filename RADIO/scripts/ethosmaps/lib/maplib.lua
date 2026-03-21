@@ -19,8 +19,21 @@
 
 
 local function getTime()
-  -- Converts Lua CPU time into centiseconds so map throttling uses the same timing base as the widget.
-  return os.clock()*100
+  -- Uses a monotonic wall-clock-like timer in centiseconds.
+  -- os.clock() tracks CPU time and can stall when rendering load is low.
+  if system ~= nil and type(system.getTimeCounter) == "function" then
+    local ms = system.getTimeCounter()
+    if type(ms) == "number" and ms >= 0 then
+      return ms / 10
+    end
+  end
+
+  local wallSec = os.time()
+  if type(wallSec) == "number" and wallSec > 0 then
+    return wallSec * 100
+  end
+
+  return os.clock() * 100
 end
 
 local mapLib = {}
@@ -41,10 +54,6 @@ local estimatedHomeScreenX, estimatedHomeScreenY
 local tile_x, tile_y, offset_x, offset_y
 local tiles = {}
 local tiles_path_to_idx = {} -- Maps tile file paths back to their active slot in the visible tile grid.
-local mapBitmapByPath = {}
-local nomap = nil
-local lastNoTilesLogKey = nil
-local lastTileFormatLogByKey = {}
 local world_tiles
 local tiles_per_radian
 local tile_dim
@@ -103,7 +112,9 @@ local TRAIL_UPDATE_INTERVAL = 50
 local DIRECTIONAL_LEAD_TILES = 1
 local DIRECTIONAL_LEAD_MIN_SPEED = 1.5
 local DIRECTIONAL_LEAD_OFFSET_THRESHOLD = 90
-local TILE_CACHE_RING_TILES = 2
+local PREFETCH_LEAD_OFFSET_THRESHOLD = 60
+local PREFETCH_STRIP_DEPTH = 1
+local TILE_CACHE_RING_TILES = 1
 
 local function getDirectionalLeadFromHeading(heading)
   if DIRECTIONAL_LEAD_TILES <= 0 then
@@ -132,26 +143,27 @@ local function getDirectionalLeadFromHeading(heading)
   return lead[1] * DIRECTIONAL_LEAD_TILES, lead[2] * DIRECTIONAL_LEAD_TILES
 end
 
-local function gateLeadByTileOffset(leadX, leadY, offsetX, offsetY)
+local function gateLeadByTileOffsetThreshold(leadX, leadY, offsetX, offsetY, threshold)
   local gatedLeadX = leadX or 0
   local gatedLeadY = leadY or 0
+  local gateThreshold = threshold or DIRECTIONAL_LEAD_OFFSET_THRESHOLD
 
   if gatedLeadX > 0 then
-    if (offsetX or 0) < DIRECTIONAL_LEAD_OFFSET_THRESHOLD then
+    if (offsetX or 0) < gateThreshold then
       gatedLeadX = 0
     end
   elseif gatedLeadX < 0 then
-    if (offsetX or 0) > (100 - DIRECTIONAL_LEAD_OFFSET_THRESHOLD) then
+    if (offsetX or 0) > (100 - gateThreshold) then
       gatedLeadX = 0
     end
   end
 
   if gatedLeadY > 0 then
-    if (offsetY or 0) < DIRECTIONAL_LEAD_OFFSET_THRESHOLD then
+    if (offsetY or 0) < gateThreshold then
       gatedLeadY = 0
     end
   elseif gatedLeadY < 0 then
-    if (offsetY or 0) > (100 - DIRECTIONAL_LEAD_OFFSET_THRESHOLD) then
+    if (offsetY or 0) > (100 - gateThreshold) then
       gatedLeadY = 0
     end
   end
@@ -159,35 +171,47 @@ local function gateLeadByTileOffset(leadX, leadY, offsetX, offsetY)
   return gatedLeadX, gatedLeadY
 end
 
-local function getBitmapCacheCount()
-  local count = 0
-  for _ in pairs(mapBitmapByPath) do
-    count = count + 1
-  end
-  return count
+local function gateLeadByTileOffset(leadX, leadY, offsetX, offsetY)
+  return gateLeadByTileOffsetThreshold(leadX, leadY, offsetX, offsetY, DIRECTIONAL_LEAD_OFFSET_THRESHOLD)
 end
 
-local function trimBitmapCache(centerTileX, centerTileY, level)
-  local keep = {}
-  local halfX = math.floor(TILES_X/2 + 0.5)
-  local halfY = math.floor(TILES_Y/2 + 0.5)
+local function gatePrefetchByTileOffset(leadX, leadY, offsetX, offsetY)
+  return gateLeadByTileOffsetThreshold(leadX, leadY, offsetX, offsetY, PREFETCH_LEAD_OFFSET_THRESHOLD)
+end
 
-  for x = 1 - TILE_CACHE_RING_TILES, TILES_X + TILE_CACHE_RING_TILES do
-    for y = 1 - TILE_CACHE_RING_TILES, TILES_Y + TILE_CACHE_RING_TILES do
-      local keepPath = mapLib.tiles_to_path(centerTileX + x - halfX, centerTileY + y - halfY, level)
-      keep[keepPath] = true
+local function enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY)
+  if libs == nil or libs.tileLoader == nil then
+    return
+  end
+
+  local leadX = math.max(-1, math.min(1, tonumber(prefetchLeadX) or 0))
+  local leadY = math.max(-1, math.min(1, tonumber(prefetchLeadY) or 0))
+  if leadX == 0 and leadY == 0 then
+    return
+  end
+
+  local halfX = math.floor(TILES_X / 2 + 0.5)
+  local halfY = math.floor(TILES_Y / 2 + 0.5)
+
+  if leadX ~= 0 then
+    for depth = 1, PREFETCH_STRIP_DEPTH do
+      local gridX = leadX > 0 and (TILES_X + depth) or (1 - depth)
+      for gridY = 1 - PREFETCH_STRIP_DEPTH, TILES_Y + PREFETCH_STRIP_DEPTH do
+        local tilePath = mapLib.tiles_to_path(centerTileX + gridX - halfX, centerTileY + gridY - halfY, level)
+        libs.tileLoader.enqueue(tilePath, true)
+      end
     end
   end
 
-  local removed = 0
-  for path in pairs(mapBitmapByPath) do
-    if not keep[path] then
-      mapBitmapByPath[path] = nil
-      removed = removed + 1
+  if leadY ~= 0 then
+    for depth = 1, PREFETCH_STRIP_DEPTH do
+      local gridY = leadY > 0 and (TILES_Y + depth) or (1 - depth)
+      for gridX = 1 - PREFETCH_STRIP_DEPTH, TILES_X + PREFETCH_STRIP_DEPTH do
+        local tilePath = mapLib.tiles_to_path(centerTileX + gridX - halfX, centerTileY + gridY - halfY, level)
+        libs.tileLoader.enqueue(tilePath, true)
+      end
     end
   end
-
-  return removed
 end
 
 function mapLib.clip(n, min, max)
@@ -261,136 +285,7 @@ function mapLib.gmapcatcher_tiles_to_path(tile_x, tile_y, level)
   return string.format("/%d/%.0f/%.0f/%.0f/s_%.0f.png", internalLevel, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
 end
 
-local function fileExists(path)
-  local f = io.open(path, "r")
-  if f ~= nil then
-    io.close(f)
-    return true
-  end
-  return false
-end
-
-local function getGoogleFallbackBasePath(mapType, tilePath)
-  -- Returns the extension-free Yaapu base path for a Google map type.
-  -- Yaapu Google tiles use legacy /z/y/s_x naming even when native tiles use /z/x/y.
-  local yaapuMapTypeMap = {
-    ["Satellite"] = "GoogleSatelliteMap",
-    ["Hybrid"] = "GoogleHybridMap",
-    ["Map"] = "GoogleMap",
-    ["Terrain"] = "GoogleTerrainMap"
-  }
-  local yaapuMapType = yaapuMapTypeMap[mapType] or mapType
-
-  local fallbackTilePath = tilePath
-  local z, x, y = tilePath:match("^/(%d+)/(%d+)/(%d+)$")
-  if z ~= nil and x ~= nil and y ~= nil then
-    fallbackTilePath = string.format("/%s/%s/s_%s", z, y, x)
-  end
-
-  return "/bitmaps/yaapu/maps/" .. yaapuMapType .. fallbackTilePath
-end
-
-local function loadFirstExisting(tilePath, ...)
-  -- Tries each full file path in order and loads the first one that exists on disk.
-  local paths = {...}
-  for i = 1, #paths do
-    if fileExists(paths[i]) then
-      mapBitmapByPath[tilePath] = lcd.loadBitmap(paths[i])
-      return mapBitmapByPath[tilePath], paths[i]
-    end
-  end
-  return nil, nil
-end
-
-function mapLib.getTileBitmap(tilePath)
-  -- Loads a tile bitmap from the SD card, caches it in memory, and falls back to the shared no-map bitmap when missing.
-  -- For ethosmaps providers the tile path has no extension; both .jpg and .png are probed in that order.
-  local provider = (status and status.conf and status.conf.mapProvider) or 2
-  local mapType = (status and status.conf and status.conf.mapType) or ""
-
-  if mapBitmapByPath[tilePath] ~= nil then
-    return mapBitmapByPath[tilePath]
-  end
-
-  local bmp
-  local loadedPath
-  local attemptedPaths = nil
-  if provider == 1 then
-    -- GMapCatcher/Yaapu: path already has extension baked in by gmapcatcher_tiles_to_path.
-    local onlyPath = "/bitmaps/yaapu/maps/" .. mapType .. tilePath
-    attemptedPaths = { onlyPath }
-    bmp, loadedPath = loadFirstExisting(tilePath, onlyPath)
-  else
-    -- ethosmaps providers: probe .jpg then .png so any download tool output is accepted.
-    local PROVIDER_FOLDERS = { [2]="GOOGLE", [3]="ESRI", [4]="OSM" }
-    local providerFolder = PROVIDER_FOLDERS[provider] or ("PROVIDER" .. tostring(provider))
-    local base = "/bitmaps/ethosmaps/maps/" .. providerFolder .. "/" .. mapType .. tilePath
-    if provider == 2 then
-      -- Google: also probe Yaapu folder as fallback (both extensions).
-      local yaapuBase = getGoogleFallbackBasePath(mapType, tilePath)
-      attemptedPaths = {
-        base .. ".jpg", base .. ".png",
-        yaapuBase .. ".jpg", yaapuBase .. ".png"
-      }
-      bmp, loadedPath = loadFirstExisting(tilePath,
-        base .. ".jpg", base .. ".png",
-        yaapuBase .. ".jpg", yaapuBase .. ".png")
-    else
-      attemptedPaths = { base .. ".jpg", base .. ".png" }
-      bmp, loadedPath = loadFirstExisting(tilePath, base .. ".jpg", base .. ".png")
-    end
-  end
-
-  if bmp ~= nil then
-    if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug then
-      local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
-      if lastTileFormatLogByKey[logKey] == nil then
-        local ext = "unknown"
-        if type(loadedPath) == "string" then
-          ext = (loadedPath:match("%.([%a%d]+)$") or "unknown"):lower()
-        end
-        local source = "ethosmaps"
-        if type(loadedPath) == "string" and loadedPath:find("/bitmaps/yaapu/maps/", 1, true) == 1 then
-          source = "yaapu-fallback"
-        elseif provider == 1 then
-          source = "yaapu"
-        end
-        libs.utils.logDebug("TILE", "Tile format detected for " .. logKey .. ": ." .. ext .. " (source: " .. source .. ")", true)
-        lastTileFormatLogByKey[logKey] = ext .. "|" .. source
-      end
-    end
-    return bmp
-  end
-
-  -- No tile found anywhere, use fallback bitmap.
-  if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug then
-    local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
-    if lastNoTilesLogKey ~= logKey then
-      libs.utils.logDebug("TILE", "No tile files found for " .. logKey .. "; using fallback bitmap (notiles/nomap)", true)
-      if type(tilePath) == "string" then
-        libs.utils.logDebug("TILE", "First missing tile key: " .. tilePath, true)
-      end
-      if type(attemptedPaths) == "table" then
-        for i = 1, #attemptedPaths do
-          libs.utils.logDebug("TILE", "Attempted path " .. tostring(i) .. ": " .. tostring(attemptedPaths[i]), true)
-        end
-      end
-      lastNoTilesLogKey = logKey
-    end
-  end
-
-  if nomap == nil then
-    if fileExists("/bitmaps/ethosmaps/maps/notiles.png") then
-      nomap = lcd.loadBitmap("/bitmaps/ethosmaps/maps/notiles.png")
-    else
-      nomap = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/nomap.png")
-    end
-  end
-  mapBitmapByPath[tilePath] = nomap
-  return nomap
-end
-
-function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY)
+function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
   -- Use truthy checks (not == true) because ETHOS storage may return 1/0 integers instead of booleans.
   local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
@@ -414,6 +309,7 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   local centerTileY = tile_y + windowLeadY
 
   local tilesChanged = false
+  local removedCacheEntries = 0
 
   libs.resetLib.clearTable(tiles_path_to_idx)
 
@@ -431,14 +327,30 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
     end
   end
 
-  local removedCacheEntries = trimBitmapCache(centerTileX, centerTileY, level)
-  if removedCacheEntries > 0 then
-    tilesChanged = true
-    if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
-      libs.utils.logDebug("TILE", string.format("Cache trim evicted %d entries (ring=%d, current=%d)", removedCacheEntries, TILE_CACHE_RING_TILES, getBitmapCacheCount()))
+  -- Only run eviction and enqueue work when the visible window actually shifted.
+  if tilesChanged then
+    removedCacheEntries = libs.tileLoader.trimCache(centerTileX, centerTileY, level, TILES_X, TILES_Y, windowLeadX, windowLeadY)
+    if removedCacheEntries > 0 then
+      if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
+        libs.utils.logDebug("TILE", string.format("Cache trim evicted %d entries (ring=%d, cached=%d)", removedCacheEntries, TILE_CACHE_RING_TILES, libs.tileLoader.getCacheCount()))
+      end
+    end
+
+    -- Enqueue all tile slots for async loading; tiles near the center get high priority
+    -- so the aircraft position renders sharply before the outer fringe fills in.
+    local halfX = math.floor(TILES_X / 2 + 0.5)
+    local halfY = math.floor(TILES_Y / 2 + 0.5)
+    for x = 1, TILES_X do
+      for y = 1, TILES_Y do
+        local tp = tiles[width * (y - 1) + x]
+        if tp ~= nil then
+          local isHighPrio = (math.abs(x - halfX) <= 1 and math.abs(y - halfY) <= 1)
+          libs.tileLoader.enqueue(tp, isHighPrio)
+        end
+      end
     end
   end
-  
+
   if tilesChanged then
     if perfActive then
       status.perfProfileInc("tile_rebuild_count", 1)
@@ -446,11 +358,12 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
     if perfActive and removedCacheEntries > 0 then
       status.perfProfileInc("gc_count", 1)
     end
-    -- GC wird jetzt periodisch im wakeup() ausgeführt
     if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
-      libs.utils.logDebug("TILE", "loadAndCenterTiles: tiles changed (load/zoom/recenter)")
+      libs.utils.logDebug("TILE", string.format("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
     end
   end
+
+  enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY)
 
   if perfActive then
     status.perfProfileAddMs("tile_update_ms", os.clock() * 1000 - perfStartMs)
@@ -465,7 +378,10 @@ function mapLib.drawTiles(width, xmin, ymin)
     for y=1,TILES_Y do
       local idx = width*(y-1)+x
       if tiles[idx] ~= nil then
-        lcd.drawBitmap(xmin+(x-1)*TILES_SIZE, ymin+(y-1)*TILES_SIZE, mapLib.getTileBitmap(tiles[idx]))
+        local bmp = libs.tileLoader.getBitmap(tiles[idx]) or libs.tileLoader.getFallbackBitmap()
+        if bmp ~= nil then
+          lcd.drawBitmap(xmin+(x-1)*TILES_SIZE, ymin+(y-1)*TILES_SIZE, bmp)
+        end
       end
     end
   end
@@ -510,7 +426,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     else
       tile_x, tile_y, offset_x, offset_y = 0, 0, 0, 0
     end
-    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, 0, 0)
+    mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, 0, 0, 0, 0)
   end
 
   if widget.drawOffsetX == nil then widget.drawOffsetX = 0 end
@@ -522,7 +438,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     widget.lastW = w
     widget.lastH = h
     widget.lastZoom = level
-    mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level, 0, 0)
+    mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level, 0, 0, 0, 0)
   end
 
   local vehicleR = math.floor(34 * math.min(status.scaleX, status.scaleY))
@@ -534,11 +450,12 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       posUpdated = true
 
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
-      local leadX, leadY = getDirectionalLeadFromHeading(heading)
-      leadX, leadY = gateLeadByTileOffset(leadX, leadY, offset_x, offset_y)
+      local rawLeadX, rawLeadY = getDirectionalLeadFromHeading(heading)
+      local leadX, leadY = gateLeadByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
+      local prefetchLeadX, prefetchLeadY = gatePrefetchByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
-      mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY)
+      mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
@@ -669,7 +586,7 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     zoomUpdate = true
 
     libs.resetLib.clearTable(tiles)
-    libs.resetLib.clearTable(mapBitmapByPath)
+    libs.tileLoader.clearCache()
     libs.resetLib.clearTable(posHistory)
 
     sample = 0

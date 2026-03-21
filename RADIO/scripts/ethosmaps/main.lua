@@ -19,8 +19,22 @@
 
 
 local function getTime()
-  -- Converts Lua CPU time into centiseconds so widget callbacks can share one timing base for throttling and animations.
-  return os.clock()*100
+  -- Uses a monotonic wall-clock-like timer in centiseconds.
+  -- os.clock() tracks CPU time and can stall when the widget is not in fullscreen,
+  -- which pauses scheduler-driven redraws.
+  if system ~= nil and type(system.getTimeCounter) == "function" then
+    local ms = system.getTimeCounter()
+    if type(ms) == "number" and ms >= 0 then
+      return ms / 10
+    end
+  end
+
+  local wallSec = os.time()
+  if type(wallSec) == "number" and wallSec > 0 then
+    return wallSec * 100
+  end
+
+  return os.clock() * 100
 end
 
 local hasLfs, lfs = pcall(require, "lfs")
@@ -163,6 +177,7 @@ local mapStatus = {
   widgetHeight = 480,
   scaleX = 1.0,
   scaleY = 1.0,
+  widget = nil,
   compactWidthThreshold = 450,
   tinyWidthThreshold = 350,
   tinyHeightThreshold = 190,
@@ -195,23 +210,26 @@ end
 -- Dedicated perf window timer state, independent from mutable config/status tables.
 local perfWindowStartMs = nil
 
--- Shared render scheduler: one 500ms map tick, with bars updated every second tick.
+-- Map redraws at full wakeup speed for responsive tile fill and reliable touch event delivery.
+-- Bars update at ~1s intervals since telemetry values change slowly.
 local frameWakeupCount = 0
-local frameDirty = false
-local RENDER_TICK_CS = 50
-local BAR_RENDER_EVERY_TICK = 2
-local nextScheduledRenderCs = 0
 local scheduledRenderCount = 0
+local lastBarTickCs = 0
+local BAR_TICK_INTERVAL_CS = 100  -- centiseconds (1 second)
 
-local function markDirty()
-  frameDirty = true
+local function markMapDirty()
+  mapStatus.mapRedrawPending = true
 end
 
-local function markMapDirty(force)
-  mapStatus.mapRedrawPending = true
-  if force == true then
-    markDirty()
+local function resolveWidget(widget)
+  -- ETHOS can invoke callbacks with a nil widget in some contexts (non-fullscreen,
+  -- background scheduling). Keep the last valid instance as fallback so wakeup/paint
+  -- continue to run.
+  if widget ~= nil then
+    mapStatus.widget = widget
+    return widget
   end
+  return mapStatus.widget
 end
 
 local function configFlagEnabled(value)
@@ -378,10 +396,11 @@ local function sourceWakeup(source)
 end
 
 local mapLibs = {
-  drawLib = nil,
-  resetLib = nil,
-  mapLib = nil,
-  utils = nil,
+  drawLib    = nil,
+  resetLib   = nil,
+  tileLoader = nil,
+  mapLib     = nil,
+  utils      = nil,
 }
 
 function loadLib(name)
@@ -395,9 +414,11 @@ end
 
 local function initLibs()
   -- Lazily loads shared libraries once and stores them in mapLibs for later callbacks.
+  -- tileLoader must be loaded before mapLib so mapLib can reference libs.tileLoader.
   if mapLibs.utils == nil then mapLibs.utils = loadLib("utils") end
   if mapLibs.drawLib == nil then mapLibs.drawLib = loadLib("drawlib") end
   if mapLibs.resetLib == nil then mapLibs.resetLib = loadLib("resetLib") end
+  if mapLibs.tileLoader == nil then mapLibs.tileLoader = loadLib("tileloader") end
   if mapLibs.mapLib == nil then mapLibs.mapLib = loadLib("maplib") end
 end
 
@@ -421,7 +442,7 @@ end
 local function reset(widget)
   -- Delegates a user-triggered reset to resetLib so layouts and cached map data are rebuilt.
   mapLibs.resetLib.reset(widget)
-  markMapDirty(true)
+  markMapDirty()
 end
 
 local function loadLayout(widget)
@@ -537,6 +558,7 @@ local function paint(widget)
     perfStartMs = perfNowMs()
     perfInc("paint_calls", 1)
   end
+  widget = resolveWidget(widget)
   if not widget then return end -- Safeguard: Ethos can call paint before a widget instance is fully available.
   lcd.color(mapStatus.colors.background)
   lcd.pen(SOLID)
@@ -587,6 +609,7 @@ local function event(widget, category, value, x, y)
   if perfActive then
     perfStartMs = perfNowMs()
   end
+  widget = resolveWidget(widget)
   local kill = false
 
   if category == EVT_TOUCH and x ~= nil and y ~= nil then
@@ -660,13 +683,13 @@ local function event(widget, category, value, x, y)
     if hitMinus then
       mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
       mapStatus.consumeZoomRelease = true
-      markMapDirty(true)  -- Zoom level changed: map needs immediate redraw.
+      markMapDirty()
       mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
 
     elseif hitPlus then
       mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
       mapStatus.consumeZoomRelease = true
-      markMapDirty(true)  -- Zoom level changed: map needs immediate redraw.
+      markMapDirty()
       mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
 
     else
@@ -693,7 +716,7 @@ local function setHome(widget)
   -- Copies the current aircraft position from telemetry into the stored home position used by map overlays.
   mapStatus.telemetry.homeLat = mapStatus.telemetry.lat
   mapStatus.telemetry.homeLon = mapStatus.telemetry.lon
-  markMapDirty(true)
+  markMapDirty()
 end
 
 local function menu(widget)
@@ -702,8 +725,8 @@ local function menu(widget)
     return {
       { "Maps: Reset", function() reset(widget) end },
       { "Maps: Set Home", function() setHome(widget) end },
-      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1); markMapDirty(true) end},
-      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1); markMapDirty(true) end},
+      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1); markMapDirty() end},
+      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1); markMapDirty() end},
     }
   end
   return { { "Maps: Reset", function() reset(widget) end } }
@@ -717,6 +740,7 @@ local function wakeup(widget)
     perfStartMs = perfNowMs()
     perfInc("wakeup_calls", 1)
   end
+  widget = resolveWidget(widget)
   if not widget then return end -- Safeguard: Ethos can schedule wakeup before the widget handle is ready.
   local now = getTime()
 
@@ -736,7 +760,21 @@ local function wakeup(widget)
     end
   end
 
-  if mapLibs and mapLibs.utils and mapLibs.utils.flushLogs then
+  if mapLibs and mapLibs.tileLoader then
+    local tileLoadStartMs = nil
+    if perfActive then
+      tileLoadStartMs = perfNowMs()
+    end
+    if mapLibs.tileLoader.getQueueLength() > 0 then
+      mapLibs.tileLoader.processQueue(2)
+    end
+    if perfActive then
+      perfAddMs("tile_load_ms", perfNowMs() - tileLoadStartMs)
+    end
+  end
+
+  if configFlagEnabled(mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog)
+      and mapLibs and mapLibs.utils and mapLibs.utils.flushLogs then
     local flushStartMs = nil
     if perfActive then
       flushStartMs = perfNowMs()
@@ -796,8 +834,8 @@ local function wakeup(widget)
         perfTableRow(
           "misc",
           perfTableCell("bgMs", perfValueText(perfMetricAvg("bgtasks_ms"), 2)),
-          perfTableCell("flushMs", perfValueText(perfMetricAvg("log_flush_ms"), 2)),
-          perfTableCell("eventMs", perfValueText(perfMetricAvg("event_total_ms"), 2))
+          perfTableCell("tileLoadMs", perfValueText(perfMetricAvg("tile_load_ms"), 2)),
+          perfTableCell("flushMs", perfValueText(perfMetricAvg("log_flush_ms"), 2))
         ),
         true
       )
@@ -854,32 +892,16 @@ local function wakeup(widget)
   end
 
   frameWakeupCount = frameWakeupCount + 1
-  local scheduledRenderDue = false
-
-  if nextScheduledRenderCs == 0 then
-    nextScheduledRenderCs = now
+  scheduledRenderCount = scheduledRenderCount + 1
+  mapStatus.mapTickSerial = scheduledRenderCount
+  if now - lastBarTickCs >= BAR_TICK_INTERVAL_CS then
+    mapStatus.barTickSerial = mapStatus.barTickSerial + 1
+    lastBarTickCs = now
   end
-
-  if now >= nextScheduledRenderCs then
-    scheduledRenderDue = true
-    scheduledRenderCount = scheduledRenderCount + 1
-    mapStatus.mapTickSerial = scheduledRenderCount
-    if scheduledRenderCount % BAR_RENDER_EVERY_TICK == 0 then
-      mapStatus.barTickSerial = mapStatus.barTickSerial + 1
-    end
-
-    repeat
-      nextScheduledRenderCs = nextScheduledRenderCs + RENDER_TICK_CS
-    until nextScheduledRenderCs > now
+  if perfActive then
+    perfInc("invalidate_count", 1)
   end
-
-  if frameDirty or scheduledRenderDue then
-    frameDirty = false
-    if perfActive then
-      perfInc("invalidate_count", 1)
-    end
-    lcd.invalidate()
-  end
+  lcd.invalidate()
 
   -- Step B: Periodische Garbage Collection (alle 10 Wakeups)
   if frameWakeupCount % 10 == 0 then
