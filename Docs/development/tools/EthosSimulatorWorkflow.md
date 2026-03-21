@@ -86,6 +86,72 @@ Telemetry replay (for repeatable sensor input in simulator):
 - Quick start: `.\Docs\development\tools\ETHOS VSCode Sim Telemetry Injection\replay-telemetry-log.ps1 -Speed 1 -Loop`
 - Deterministic demo logs: `Docs/development/tools/ETHOS VSCode Sim Telemetry Injection/Synthetic_Logs/`
 
+### Local extension patch: live `sensors.json` reload (reproducible)
+
+For simulator telemetry injection, the locally installed `bsongis.ethos` extension has a small custom patch so the running simulator notices external updates to `RADIO/sensors.json` without reopening the telemetry panel.
+
+Important clarification:
+- The watched file is `sensors.json` under `ethos.root`.
+- It is **not** `settings.json`.
+
+Patched file (local machine, not repo):
+- `C:\Users\{USERNAME}\.vscode\extensions\bsongis.ethos-0.1.11\out\extension.js`
+
+Official baseline for comparison:
+- Extension package: `bsongis.ethos-0.1.11` from VS Code Marketplace
+- Unmodified file: the shipped `out/extension.js` in that package
+
+#### Re-apply procedure (from official extension)
+
+1. Install/update `bsongis.ethos` from Marketplace.
+2. Close VS Code windows using the extension.
+3. Backup file:
+   - `C:\Users\marcb\.vscode\extensions\bsongis.ethos-0.1.11\out\extension.js`
+4. Re-apply the code changes listed below.
+5. Restart VS Code.
+6. In workspace settings, use:
+   - `ethos.version = nightly26`
+   - `ethos.root = RADIO`     <-- your project folder
+7. Run `Ethos: Stop Ethos` then `Ethos: Start Ethos`.
+
+#### Exact modifications vs official `out/extension.js`
+
+- Added module-level state:
+  - `let sensorsFileMtimeMs = 0;`
+  - `let sensorsInterval;`
+  - `let injectSPortFrameAvailable = false;`
+- In `stopEthos(context)`:
+  - reset `sensorsFileMtimeMs = 0;`
+  - reset `injectSPortFrameAvailable = false;`
+  - `clearInterval(sensorsInterval)` and set `sensorsInterval = undefined`
+- In `startEthos(context, output)` after `Module._start()`:
+  - detect support with `typeof Module['_injectSPortFrame'] === 'function'`
+  - call `loadSensors()` once on startup if no sensors are loaded yet
+  - start a `setInterval(..., 10)` loop that:
+    - resolves `${ethos.root}/sensors.json`
+    - checks the file modification time
+    - reloads the file only when `mtimeMs` increased
+    - injects current sensor frames only when `injectSPortFrame` is exported by the simulator build
+  - if the export is missing, log a clear message that live `sensors.json` replay is disabled for that simulator version
+- In `loadSensors()`:
+  - update `sensorsFileMtimeMs = fs.statSync(sensorsFilePath).mtimeMs || 0;`
+
+Verification checklist:
+- On simulator start with `nightly26`, no assert about `injectSPortFrame` appears.
+- While replay script runs, updated `RADIO/sensors.json` values are reflected live.
+- On `Ethos: Stop Ethos`, no background polling remains active.
+
+Why this patch exists:
+- The replay helper writes `RADIO/sensors.json` continuously.
+- Without the local extension patch, the simulator extension does not reliably pick up those external file changes during runtime.
+- With the patch, telemetry replay works as a live file-driven input path for simulator tests.
+
+Compatibility note:
+- Live telemetry injection requires simulator builds that export `injectSPortFrame`.
+- Confirmed working: `nightly26`.
+- Public `1.6.5` does **not** export `injectSPortFrame`.
+- Policy for this project: use `nightly26` now; in future, telemetry injection is expected to work with ETHOS `1.7+` (once those builds export `injectSPortFrame`).
+
 ---
 
 ## 6) Troubleshooting
