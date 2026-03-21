@@ -354,8 +354,7 @@ function drawLib.unloadBitmap(name)
     if status and status.perfProfileInc and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile then
       status.perfProfileInc("gc_count", 2)
     end
-    collectgarbage()
-    collectgarbage()
+    -- GC wird jetzt periodisch im wakeup() ausgeführt
   end
 end
 

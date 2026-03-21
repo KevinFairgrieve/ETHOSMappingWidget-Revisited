@@ -861,6 +861,14 @@ local function wakeup(widget)
     end
     lcd.invalidate()
   end
+
+  -- Step B: Periodische Garbage Collection (alle 10 Wakeups)
+  if frameWakeupCount % 10 == 0 then
+    collectgarbage()
+    if perfActive then
+      perfInc("gc_count", 1)
+    end
+  end
 end
 
 local function create()

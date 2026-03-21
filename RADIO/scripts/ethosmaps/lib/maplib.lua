@@ -95,6 +95,12 @@ local TILES_IDX_PATH = 2
 local zoomUpdateTimer = getTime()
 local zoomUpdate = false
 
+local RECENTER_HYSTERESIS_PX = 24
+local RECENTER_MIN_INTERVAL = 40 -- centiseconds
+local RECENTER_LOG_INTERVAL = 200 -- centiseconds
+local lastRecenterTime = getTime()
+local lastRecenterLogTime = 0
+
 local lastHeavyUpdate = getTime()
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
@@ -360,7 +366,7 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
     if perfActive then
       status.perfProfileInc("gc_count", 1)
     end
-    collectgarbage()
+    -- GC wird jetzt periodisch im wakeup() ausgeführt
     if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
       libs.utils.logDebug("TILE", "loadAndCenterTiles: tiles changed (load/zoom/recenter)")
     end
@@ -453,14 +459,33 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading)
                       MAP_X + w - borderX, MAP_Y + h - borderY)
 
       if myCode > 0 then
-        mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
-        tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
-        myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+        local nowCs = getTime()
+        local canRecenterByTime = (nowCs - lastRecenterTime) >= RECENTER_MIN_INTERVAL
+        local hysteresisPx = math.floor(math.max(8, math.min(RECENTER_HYSTERESIS_PX, math.min(w, h) * 0.08)))
 
-        local centerX = x + (w / 2)
-        local centerY = y + (h / 2)
-        widget.drawOffsetX = centerX - myScreenX
-        widget.drawOffsetY = centerY - myScreenY
+        local hysteresisCode = libs.drawLib.computeOutCode(myScreenX, myScreenY,
+                              MAP_X + borderX - hysteresisPx, MAP_Y + borderY - hysteresisPx,
+                              MAP_X + w - borderX + hysteresisPx, MAP_Y + h - borderY + hysteresisPx)
+
+        if canRecenterByTime and hysteresisCode > 0 then
+          mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level)
+          tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
+          myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+
+          local centerX = x + (w / 2)
+          local centerY = y + (h / 2)
+          widget.drawOffsetX = centerX - myScreenX
+          widget.drawOffsetY = centerY - myScreenY
+          lastRecenterTime = nowCs
+          if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug and (nowCs - lastRecenterLogTime >= RECENTER_LOG_INTERVAL) then
+            libs.utils.logDebug("TILE", string.format("Recenter executed (hyst=%d, interval=%dcs)", hysteresisPx, RECENTER_MIN_INTERVAL), true)
+            lastRecenterLogTime = nowCs
+          end
+        elseif status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug and (nowCs - lastRecenterLogTime >= RECENTER_LOG_INTERVAL) then
+          local reason = canRecenterByTime and "inside_hysteresis" or "min_interval"
+          libs.utils.logDebug("TILE", string.format("Recenter deferred (%s, hyst=%d)", reason, hysteresisPx), true)
+          lastRecenterLogTime = nowCs
+        end
       end
     end
   end

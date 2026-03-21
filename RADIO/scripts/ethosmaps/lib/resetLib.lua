@@ -25,8 +25,7 @@ function resetLib.resetLayout(widget)
   if status and status.perfProfileInc and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile then
     status.perfProfileInc("gc_count", 2)
   end
-  collectgarbage()
-  collectgarbage()
+  -- GC wird jetzt periodisch im wakeup() ausgeführt
 end
 
 function resetLib.reset(widget)
@@ -35,8 +34,7 @@ function resetLib.reset(widget)
   if status and status.perfProfileInc and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile then
     status.perfProfileInc("gc_count", 2)
   end
-  collectgarbage()
-  collectgarbage()
+  -- GC wird jetzt periodisch im wakeup() ausgeführt
 end
 
 function resetLib.init(param_status, param_libs)

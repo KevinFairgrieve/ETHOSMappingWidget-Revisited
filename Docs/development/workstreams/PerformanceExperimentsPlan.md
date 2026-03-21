@@ -208,29 +208,99 @@ Run each step with:
 
 ### Step A result
 - Change summary:
+  - Dirty-invalidate Frame Scheduler aktiv (statt unbedingtem `lcd.invalidate()` in jedem Wakeup).
+  - `markDirty()` bei GPS-Update, Blink-Toggle und Zoom-Events.
+  - Idle-Cadence über `FRAME_IDLE_INTERVAL`.
 - Result:
+  - **Warm/steady-state (ohne Tile-Rebuild):**
+    - `fps≈5.0–5.6` (meist 5.2–5.6)
+    - `paintMs≈119–134`, `layoutMs≈113–127`, `tileMs=0`
+    - `rebuilds=0`, `tileCalls=0`, `gcCalls=0`
+    - `invalidates≈26–28` pro 5s Fenster
+  - **Zoom/Rebuild-Fenster (mit Tile-Last):**
+    - `fps≈1.0–2.83`
+    - `paintMs≈304–915`, `layoutMs≈298–908`, `tileMs≈119–131`
+    - `rebuilds=1–2`, `tileCalls=2–4`, `gcCalls=1–2`
+  - **Init/Cold-Ladefenster:** weiterhin sehr langsam (real ~3–4s, im Log nur teilweise abgebildet).
+  - Funktional insgesamt gut; vereinzelt visuelle Artefakte beobachtet.
 - Keep/revert:
+  - **Keep** (Step A bleibt aktiv). Hauptproblem verschiebt sich auf Tile/GC-Spikes bei Rebuild/Zoom, nicht auf den Invalidate-Scheduler.
 
 ### Step B result
 - Change summary:
+  - Alle direkten collectgarbage()-Aufrufe aus Hot-Paths entfernt (drawlib, maplib, resetLib).
+  - Periodische GC im zentralen wakeup-Loop (alle 10 Wakeups) implementiert.
+  - Keine weiteren Änderungen an Tile- oder Scheduler-Logik.
 - Result:
+  - **Simulator:** Läuft stabil, keine neuen Bugs.
+  - **Hardware:**
+    - Coldstart: Initiales Fenster weiterhin langsam (paintMs > 2s, layoutMs > 3s, wie Step A/Baseline).
+    - Warm/steady-state (idle, swipe, touch):
+      - `fps=5.0–5.4`, `paintMs=120–137`, `layoutMs=114–130`, `tileMs=0`, `gcCalls=2–3` pro 5s Fenster
+      - Keine sichtbaren Stutter-Spikes mehr durch GC, keine neuen Artefakte.
+    - Zoom/Rebuild: Einzelne Fenster mit niedrigerem FPS (1.0–1.8), paint/layoutMs 400–900ms, tileMs 46–56ms, gcCalls=1–3
+    - Touch/Swipe: Responsivität wie Step A, keine neuen Lags.
+    - Memory: Kein ungebremstes Wachstum, keine Abstürze.
+  - **Fazit:**
+    - Unterschied zu Step A gering, aber keine Verschlechterung. GC-Spikes sind weniger ausgeprägt, aber initiale Ladehänger bleiben.
+    - Funktionalität und Stabilität voll gegeben.
 - Keep/revert:
+  - **Keep** (Step B bleibt aktiv). Nächster Engpass: Initiale Ladezeit und Tile-Rebuilds.
 
 ### Step C result
 - Change summary:
+  - Recenter-Hysterese in `mapLib.drawMap(...)` ergänzt:
+    - Recenter bei Border-Verletzung nur noch, wenn zusätzlich eine Hysterese-Marge überschritten ist.
+    - Zusätzliche Mindestzeit zwischen Recenter-Events (`RECENTER_MIN_INTERVAL`) zur Entkopplung von Mikro-Jitter.
+    - Gedrosselte Debug-Logs ergänzt (`Recenter executed` / `Recenter deferred`), um Hysterese-Trigger im `debug.log` nachvollziehbar zu machen.
+  - Marker-Update bleibt unverändert responsiv (Position wird weiterhin normal berechnet/gerendert), nur Tile-Recenter wird gefiltert.
 - Result:
+  - **Simulator:** Hysterese-Trigger im Log sichtbar (`Recenter deferred`), keine neuen Funktionsfehler.
+  - **Hardware (dieser Lauf):**
+    - Cold/Init-Fenster weiterhin langsam:
+      - `fps=0.6`, `paintMs=1403.67`, `layoutMs=2042.5`, `tileMs=54.0`, `rebuilds=1`
+    - Warm/steady-state (ohne Rebuild):
+      - `fps≈4.8–5.6`, `paintMs≈120–136`, `layoutMs≈114–129`, `tileMs=0`, `rebuilds=0`, `tileCalls=0`
+      - `gcCalls≈2–4` pro 5s Fenster
+    - Zoom/Rebuild-Fenster:
+      - `fps≈1.13–2.6`, `paintMs≈356–859`, `layoutMs≈349–852`, `tileMs≈44–52`
+      - `rebuilds=1–2`, `tileCalls=2–4`, `gcCalls=2–3`
+  - **Vergleich zu Step B:**
+    - Keine klare messbare Verbesserung der warmen Framerate/Latenzen.
+    - Rebuild-Spitzen bleiben vorhanden, teilweise leicht niedriger im `tileMs`-Bereich, aber weiterhin deutlich sichtbar.
+    - Kein Hinweis auf neue Regressionen.
+  - **Hinweis zu notiles:**
+    - Auftretende `notiles` in diesem Lauf korrelieren mit fehlender Tile-Abdeckung im Datensatz (kein Step-C-Regressionseffekt).
 - Keep/revert:
+  - **Keep** (Step C bleibt aktiv): stabil, kein negativer Einfluss, Jitter-Recenter wird sauber gedämpft.
 
 ### Step D result
 - Change summary:
+  - **Step D1 (getestet):** Cache-Housekeeping im Tile-Pfad zeitlich/batch-limitiert entkoppelt.
+  - Nach Hardware-Validierung wegen Regression zurückgerollt.
+  - **Step D2 (noch offen):** ggf. weitere Aufteilung von Rebuild-Teilaufgaben über mehrere Wakeups.
 - Result:
+  - **Simulator:** funktional unauffällig.
+  - **Hardware:** klare Verschlechterung gegenüber Step C.
+    - Warm/steady-state deutlich schlechter:
+      - Step C: `fps≈4.8–5.6`, `paintMs≈120–136`, `layoutMs≈114–129`
+      - D1: `fps≈4.2–4.6`, `paintMs≈160–175`, `layoutMs≈153–167`
+    - Zoom/Rebuild-Fenster ebenfalls schlechter:
+      - Step C: `tileMs≈44–52`
+      - D1: `tileMs≈60–63`
+    - Zusätzlich auffällige Ausreißer im Init/Heavy-Bereich (z. B. sehr hohes `bgMs` im ersten Fenster).
+  - **Fazit:** D1 liefert keinen Performance-Gewinn und verschlechtert die Kernmetriken.
 - Keep/revert:
+  - **Revert** (D1 verworfen, Code zurück auf Step-C-Stand).
 
 ---
 
 ## 8) Next Action
 
-Start with **Step 0** (baseline profiler run), capture reference metrics, then proceed to **Step A only**.
+
+Proceed from **stable Step-C baseline**:
+- Kein D2 auf Basis des verworfenen D1.
+- Optional neuer, kleiner D1-Ansatz nur als separater Experiment-Branch/Commit (eine Änderung, sofortiger A/B-Hardwarevergleich).
 
 Related setup doc:
 - `Docs/development/tools/EthosSimulatorWorkflow.md`
