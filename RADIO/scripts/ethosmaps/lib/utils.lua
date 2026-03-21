@@ -23,9 +23,6 @@ local utils = {}
 local status = nil
 local libs = nil
 
-local alwaysOn = system.getSource({category=CATEGORY_ALWAYS_ON, member=1, options=0})
-local alwaysOff = system.getSource({category=0, member=1, options=0})
-local sources = {}
 -- Debug logger state shared by rollover and write helpers.
 local debugLogPath = "/scripts/ethosmaps/debug.log"
 local maxLogLines = 1000
@@ -36,7 +33,6 @@ local maxBufferedLines = 40
 local lastLogFlush = 0
 local logBuffer = {}
 utils.debugLineCount = nil   -- Keeps lazy initialization active across restarts and debug toggles.
-local bitmaskCache = {}
 
 local function getTime()
   -- Converts Lua CPU time into centiseconds so logger timestamps share the widget timing base.
@@ -260,53 +256,6 @@ function utils.flushLogs(force)
   lastLogFlush = now
 end
 
-function utils.getSourceValue(name)
-  -- Resolves a named Ethos source, caches the handle locally, and returns its current numeric value.
-  local src = sources[name]
-  if src == nil then
-    src = system.getSource(name)
-    sources[name] = src
-  end
-  return src == nil and 0 or src:value()
-end
-
-function utils.getRSSI()
-  -- Reads the current RSSI value through the shared source cache and returns it to telemetry callers.
-  return utils.getSourceValue("RSSI")
-end
-
-function utils.getBitmask(low, high)
-  -- Builds or reuses a cached bitmask for bit extraction helpers and returns it to callers.
-  local key = tostring(low)..tostring(high)
-  local res = bitmaskCache[key]
-  if res == nil then
-    res = 2^(1 + high-low)-1 << low
-    bitmaskCache[key] = res
-  end
-  return res
-end
-
-function utils.bitExtract(value, start, len)
-  -- Extracts a bit range from a numeric value and returns the normalized result to telemetry decoders.
-  return (value & utils.getBitmask(start,start+len-1)) >> start
-end
-
-function utils.processTelemetry(primID, data, now)
-  -- Placeholder for raw telemetry decoding; reserved for future packet parsing paths.
-end
-
-function utils.playTime(seconds)
-  -- Converts an elapsed time value into Ethos voice announcements and routes the segments to system.playNumber().
-  if seconds > 3600 then
-    system.playNumber(seconds / 3600, UNIT_HOUR)
-    system.playNumber((seconds % 3600) / 60, UNIT_MINUTE)
-    system.playNumber((seconds % 3600) % 60, UNIT_SECOND)
-  else
-    system.playNumber(seconds / 60, UNIT_MINUTE)
-    system.playNumber(seconds % 60, UNIT_SECOND)
-  end
-end
-
 function utils.haversine(lat1, lon1, lat2, lon2)
   -- Converts two GPS coordinates into a great-circle distance in meters for speed, trail, and home calculations.
   local lat1 = lat1 * math.pi / 180
@@ -337,12 +286,6 @@ function utils.getAngleFromLatLon(lat1, lon1, lat2, lon2)
   return (a*180/math.pi + 360) % 360 -- Returned in degrees.
 end
 
-function utils.getMaxValue(value,idx)
-  -- Updates the tracked maximum for a metric and returns either the live or max value based on display mode.
-  status.minmaxValues[idx] = math.max(value,status.minmaxValues[idx])
-  return status.showMinMaxValues == true and status.minmaxValues[idx] or value
-end
-
 function utils.updateCog()
   -- Derives course over ground from successive GPS samples and writes the result back into status.telemetry.cog.
   if status.lastLat == nil then
@@ -360,17 +303,6 @@ function utils.updateCog()
     status.lastLat = status.telemetry.lat
     status.lastLon = status.telemetry.lon
   end
-end
-
-function utils.calcMinValue(value,min)
-  -- Returns the smaller of the current and stored values for minimum tracking widgets.
-  return min == 0 and value or math.min(value,min)
-end
-
--- Returns the actual minimum only when both values are non-zero.
-function utils.getNonZeroMin(v1,v2)
-  -- Chooses the smaller non-zero value and passes through the other value when one side is zero.
-  return v1 == 0 and v2 or ( v2 == 0 and v1 or math.min(v1,v2))
 end
 
 function utils.getLatLonFromAngleAndDistance(angle, distance)
@@ -410,49 +342,6 @@ function utils.decToDMSFull(dec,lat)
   local M = math.floor((math.abs(dec) - D)*60)
   local S = (math.abs((math.abs(dec) - D)*60) - M)*60
 	return D .. string.format("°%d'%04.1f", M, S) .. (lat and (dec >= 0 and "E" or "W") or (dec >= 0 and "N" or "S"))
-end
-
-function utils.resetTimer()
-  -- Resets the shared Yaapu model timer by driving its active and reset conditions through Ethos timer APIs.
-  local timer = model.getTimer("Yaapu")
-  timer:activeCondition( alwaysOff )
-  timer:resetCondition( alwaysOn )
-end
-
-function utils.startTimer()
-  -- Starts the shared Yaapu model timer and stores the local start timestamp for elapsed-time features.
-  status.lastTimerStart = getTime()/100
-  local timer = model.getTimer("Yaapu")
-  timer:activeCondition( alwaysOn )
-  timer:resetCondition( alwaysOff )
-end
-
-function utils.stopTimer()
-  -- Stops the shared Yaapu model timer and clears the cached local start timestamp.
-  status.lastTimerStart = 0
-  local timer = model.getTimer("Yaapu")
-  timer:activeCondition( alwaysOff )
-  timer:resetCondition( alwaysOff )
-end
-
-function utils.telemetryEnabled(widget)
-  -- Uses RSSI as the live telemetry heartbeat and returns whether the widget should consider telemetry available.
-  if utils.getRSSI() == 0 then
-    status.noTelemetryData = 1
-  end
-  return status.noTelemetryData == 0
-end
-
-function utils.playSound(soundFile, skipHaptic)
-  -- Triggers optional haptic feedback, resets backlight timeout, and plays a localized sound file from the SD card.
-  if status.conf.enableHaptic and skipHaptic == nil then
-    system.playHaptic(15,0)
-  end
-  if status.conf.disableAllSounds then
-    return
-  end
-  libs.drawLib.resetBacklightTimeout()
-  system.playFile("/audio/ethosmaps/"..status.conf.language.."/".. soundFile..".wav")
 end
 
 function utils.init(param_status, param_libs)

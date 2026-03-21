@@ -26,21 +26,6 @@ local bitmaps = {}
 local topBarUnifiedFont = nil
 local topBarValueCache = {}
 
-local function flagEnabled(value)
-  if value == true then
-    return true
-  end
-  local valueType = type(value)
-  if valueType == "number" then
-    return value ~= 0
-  end
-  if valueType == "string" then
-    local normalized = string.lower(value)
-    return normalized == "true" or normalized == "1" or normalized == "on"
-  end
-  return false
-end
-
 local function safeSensorName(sensor)
   if sensor == nil then
     return nil
@@ -148,44 +133,6 @@ function drawLib.drawNumber(x, y, num, precision, font, color, flags, blink)
   end
 end
 
-function drawLib.resetBacklightTimeout()
-  -- Requests a backlight timeout reset through Ethos so user-facing alerts keep the screen awake.
-  if system and system.resetBacklightTimeout then
-    system.resetBacklightTimeout()
-  end
-end
-
-function drawLib.drawNoTelemetryData(widget)
-  -- Draws the telemetry-loss warning overlay after querying the utility layer for current link availability.
-  if not libs.utils.telemetryEnabled() then
-    local w = status.widgetWidth
-    local h = status.widgetHeight
-    local sx = status.scaleX
-    local sy = status.scaleY
-    local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
-
-    local fontBig = verticalMedium and FONT_L or FONT_XXL
-    local fontSmall = verticalMedium and FONT_S or FONT_STD
-
-    lcd.font(fontBig)
-    local textW, textH = lcd.getTextSize("NO TELEMETRY")
-
-    local boxW = math.min(math.floor(textW + 80*sx), math.floor(w * 0.88))
-    local boxH = math.floor(textH + 55*sy)
-    local boxX = math.floor((w - boxW) / 2)
-    local boxY = math.floor((h / 2) - boxH / 2) - 15*sy
-
-    lcd.color(RED)
-    lcd.drawFilledRectangle(boxX, boxY, boxW, boxH)
-
-    lcd.color(WHITE)
-    lcd.drawRectangle(boxX, boxY, boxW, boxH, 3)
-
-    lcd.font(fontBig)
-    lcd.drawText(w / 2, boxY + 25*sy, "NO TELEMETRY", CENTERED)
-  end
-end
-
 function drawLib.drawNoGPSData(widget)
   -- Draws the no-GPS overlay when the layout detects that no valid position is available.
   local w = status.widgetWidth
@@ -212,14 +159,6 @@ function drawLib.drawNoGPSData(widget)
 
   lcd.font(fontBig)
   lcd.drawText(w / 2, boxY + 25*sy, "...waiting for GPS", CENTERED)
-end
-
-function drawLib.drawCompassRibbon(widget, ...)
-  -- Placeholder for a future compass ribbon renderer.
-end
-
-function drawLib.drawWindArrow(widget, ...)
-  -- Placeholder for a future wind-arrow renderer.
 end
 
 function drawLib.drawTopBar(widget, barTop, barHeight)
@@ -369,53 +308,12 @@ function drawLib.drawBitmap(x, y, bitmap, w, h)
   end
 end
 
-function drawLib.drawBlinkBitmap(x, y, bitmap, w, h)
-  -- Draws a bitmap only on active blink phases so warning icons can flash without state duplication.
-  if status.blinkon == true then
-    local bmp = drawLib.getBitmap(bitmap)
-    if bmp ~= nil then
-      lcd.drawBitmap(x, y, bmp, w, h)
-    end
-  end
-end
-
 function drawLib.getBitmap(name)
   -- Lazily loads a bitmap from the SD card and keeps it cached for repeated draw calls.
   if bitmaps[name] == nil then
     bitmaps[name] = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/"..name..".png")
   end
   return bitmaps[name]
-end
-
-function drawLib.unloadBitmap(name)
-  -- Removes a cached bitmap from memory and nudges Lua garbage collection to reclaim it.
-  if bitmaps[name] ~= nil then
-    bitmaps[name] = nil
-    if status and status.perfProfileInc and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) then
-      status.perfProfileInc("gc_count", 2)
-    end
-    -- GC wird jetzt periodisch im wakeup() ausgeführt
-  end
-end
-
-function drawLib.drawLineWithClippingXY(x0, y0, x1, y1, xmin, ymin, xmax, ymax)
-  -- Draws a line segment inside a temporary clipping rectangle and restores unclipped drawing afterwards.
-  lcd.setClipping(xmin, ymin, xmax-xmin, ymax-ymin)
-  lcd.drawLine(x0,y0,x1,y1)
-  lcd.setClipping()
-end
-
-function drawLib.drawLineWithClipping(ox, oy, angle, len, xmin,ymin, xmax, ymax)
-  -- Converts an origin, angle, and length into endpoints and forwards the result to the clipped line renderer.
-  local xx = math.cos(math.rad(angle)) * len * 0.5
-  local yy = math.sin(math.rad(angle)) * len * 0.5
-
-  local x0 = ox - xx
-  local x1 = ox + xx
-  local y0 = oy - yy
-  local y1 = oy + yy
-
-  drawLib.drawLineWithClippingXY(x0,y0,x1,y1,xmin,ymin,xmax,ymax)
 end
 
 function drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax)
@@ -431,11 +329,6 @@ end
 function drawLib.isInside(x,y,xmin,ymin,xmax,ymax)
   -- Returns whether a point falls inside the requested rectangle by reusing computeOutCode().
   return drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax) == 0
-end
-
-function drawLib.drawHomeIcon(x,y)
-  -- Draws the compact home icon bitmap used by map overlays.
-  drawLib.drawBitmap(x,y,"minihomeorange")
 end
 
 function drawLib.init(param_status, param_libs)

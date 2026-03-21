@@ -107,10 +107,6 @@ local mapStatus = {
   loadCycle = 0,
   layout = { nil },
 
-  -- Telemetry visibility flags shared with warning overlays.
-  noTelemetryData = 1,
-  hideNoTelemetry = false,
-
   -- Map state used for redraw throttling, trail updates, and debug logging.
   screenTogglePage = 1,
   mapZoomLevel = 19,
