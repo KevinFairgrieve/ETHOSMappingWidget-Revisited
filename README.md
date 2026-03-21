@@ -40,6 +40,8 @@ It displays your real-time GPS position on a supported map type of your choice a
 
 **That's it!** If you already have Yaapu map tiles, the widget automatically finds and uses them.
 
+If you want to generate new native EthosMaps tiles, use the downloader linked below.
+
 ### Folder Structure Expected
 
 ```
@@ -62,6 +64,27 @@ RADIO/ or SD/
 - Existing Yaapu tiles in `/bitmaps/yaapu/maps/` are automatically discovered and used
 - No need to reorganize or duplicate tiles if you already use Yaapu
 - New EthosMaps tiles can be added anytime — seamless mixing with Yaapu tiles 
+
+## Recommended Tile Downloader
+
+For new map tiles, use only:
+
+- Repository: https://github.com/MartinovEm/High-Resolution-Map-Generator
+- Online tool: https://martinovem.github.io/High-Resolution-Map-Generator/
+
+This is the recommended and supported way to generate tiles for this widget.
+
+### Quick Native Tile Workflow
+
+1. Open the online tool or the downloader from the repository.
+2. Set **Output Target** to `b14ckyy ETHOS Mapping Widget`.
+3. Choose the provider, map type, and zoom range.
+4. Search your flying field or pan manually to the target area.
+5. Draw a rectangle around the area you want to export.
+6. In Chrome/Edge, link the **root directory** of your SD card or radio storage. If direct access is not available, use ZIP download as fallback.
+7. Export the tiles. The downloader creates and syncs the correct target path automatically.
+
+The downloader handles the correct folder naming and path layout automatically. Full details remain in the downloader project itself.
 
 ## Usage
 
