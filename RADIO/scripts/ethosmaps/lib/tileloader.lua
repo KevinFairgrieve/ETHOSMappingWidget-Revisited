@@ -29,8 +29,8 @@ local libs   = nil
 
 -- Spatial ring radius for cache eviction (tiles beyond this radius around the visible
 -- window are discarded when trimCache() is called from maplib).
-local TILE_CACHE_RING_TILES = 1
-local TILE_CACHE_REAR_GUARD_TILES = 1
+local TILE_CACHE_RING_TILES = 2
+local TILE_CACHE_REAR_GUARD_TILES = 0
 
 -- Bitmap cache: tilePath → bitmap (or nomap sentinel).
 local mapBitmapByPath = {}
@@ -264,6 +264,16 @@ end
 function tileLoader.clearCache()
   -- Discards all cached bitmaps and pending queue entries.
   -- Called by maplib.setupMaps() on zoom level, provider, or map-type change.
+  --
+  -- Nil each entry individually before reassigning the table.  Lua's GC is
+  -- incremental: simply replacing the table reference (mapBitmapByPath = {})
+  -- keeps all old bitmap userdata alive until the next GC sweep, which can
+  -- happen AFTER new bitmaps are already loading – transiently doubling RAM
+  -- and triggering an ETHOS kill.  Explicit per-key nils let the GC account
+  -- for the dropped references before new loads begin.
+  for k, _ in pairs(mapBitmapByPath) do
+    mapBitmapByPath[k] = nil
+  end
   mapBitmapByPath = {}
   highQueue       = {}
   highQueueSet    = {}

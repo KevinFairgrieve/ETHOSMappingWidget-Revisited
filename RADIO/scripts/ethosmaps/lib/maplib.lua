@@ -114,7 +114,6 @@ local DIRECTIONAL_LEAD_MIN_SPEED = 1.5
 local DIRECTIONAL_LEAD_OFFSET_THRESHOLD = 90
 local PREFETCH_LEAD_OFFSET_THRESHOLD = 60
 local PREFETCH_STRIP_DEPTH = 1
-local TILE_CACHE_RING_TILES = 1
 
 local function getDirectionalLeadFromHeading(heading)
   if DIRECTIONAL_LEAD_TILES <= 0 then
@@ -331,9 +330,6 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   if tilesChanged then
     removedCacheEntries = libs.tileLoader.trimCache(centerTileX, centerTileY, level, TILES_X, TILES_Y, windowLeadX, windowLeadY)
     if removedCacheEntries > 0 then
-      if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
-        libs.utils.logDebug("TILE", string.format("Cache trim evicted %d entries (ring=%d, cached=%d)", removedCacheEntries, TILE_CACHE_RING_TILES, libs.tileLoader.getCacheCount()))
-      end
     end
 
     -- Enqueue all tile slots for async loading; tiles near the center get high priority
