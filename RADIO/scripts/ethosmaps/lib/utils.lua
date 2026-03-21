@@ -34,11 +34,10 @@ local lastLogFlush = 0
 local logBuffer = {}
 utils.debugLineCount = nil   -- Keeps lazy initialization active across restarts and debug toggles.
 
-local function getTime()
-  -- Converts Lua CPU time into centiseconds so logger timestamps share the widget timing base.
-  return os.clock()*100
-end
-
+-- Canonical flag evaluator for all config booleans across the widget.
+-- Normalises Ethos config values (bool / number / string) into a plain boolean.
+-- Exported as status.flagEnabled in init() — every other module must use that
+-- reference instead of defining its own copy.
 local function flagEnabled(value)
   if value == true then
     return true
@@ -121,7 +120,7 @@ end
 
 local function initDebugLineCount()
   -- Counts existing log lines on demand so logDebug can append efficiently without scanning the file every call.
-  if not status or not status.conf or not flagEnabled(status.conf.enableDebugLog) then 
+  if not status or not status.conf or not status.flagEnabled(status.conf.enableDebugLog) then 
     utils.debugLineCount = nil
     return 
   end
@@ -151,7 +150,7 @@ end
 
 function utils.logDebug(category, message, force)
   -- Buffers debug records in RAM and writes them to disk in batches to reduce SD-card I/O.
-  if not status or not status.conf or not flagEnabled(status.conf.enableDebugLog) then 
+  if not status or not status.conf or not status.flagEnabled(status.conf.enableDebugLog) then 
     logBuffer = {}
     utils.debugLineCount = nil   -- Safeguard: reset lazy state when logging is unavailable or disabled.
     return 
@@ -162,7 +161,7 @@ function utils.logDebug(category, message, force)
     initDebugLineCount()
   end
 
-  local now = getTime()
+  local now = status.getTime()
   if not force and now - lastLogWrite < 10 then return end
   lastLogWrite = now
 
@@ -222,7 +221,7 @@ end
 
 function utils.flushLogs(force)
   -- Flushes buffered log lines when the interval elapsed (or immediately when forced).
-  if not status or not status.conf or not flagEnabled(status.conf.enableDebugLog) then
+  if not status or not status.conf or not status.flagEnabled(status.conf.enableDebugLog) then
     logBuffer = {}
     return
   end
@@ -235,7 +234,7 @@ function utils.flushLogs(force)
     initDebugLineCount()
   end
 
-  local now = getTime()
+  local now = status.getTime()
   if not force and (now - lastLogFlush) < logFlushInterval then
     return
   end
@@ -348,6 +347,12 @@ function utils.init(param_status, param_libs)
   -- Stores shared status/library references for utility helpers and primes the debug logger state when enabled.
   status = param_status
   libs = param_libs
+
+  -- Publish shared helpers so every module can access them through the status
+  -- table without duplicating the implementation.  See also status.getTime,
+  -- which is published by main.lua before any library is loaded.
+  status.flagEnabled = flagEnabled
+
   -- Initialize line counting only when debug logging is currently enabled.
   initDebugLineCount()
   return utils

@@ -18,11 +18,7 @@
 -- along with this program; if not, see <http://www.gnu.org/licenses>.
 
 
-local function getTime()
-  -- Converts Lua CPU time into centiseconds so layout timing stays aligned with the other libraries.
-  return os.clock()*100
-end
-
+-- getTime() removed — use status.getTime() (published by main.lua)
 
 local panel = {}
 

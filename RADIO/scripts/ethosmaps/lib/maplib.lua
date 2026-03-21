@@ -18,28 +18,13 @@
 -- along with this program; if not, see <http://www.gnu.org/licenses>.
 
 
-local function getTime()
-  -- Uses a monotonic wall-clock-like timer in centiseconds.
-  -- os.clock() tracks CPU time and can stall when rendering load is low.
-  if system ~= nil and type(system.getTimeCounter) == "function" then
-    local ms = system.getTimeCounter()
-    if type(ms) == "number" and ms >= 0 then
-      return ms / 10
-    end
-  end
-
-  local wallSec = os.time()
-  if type(wallSec) == "number" and wallSec > 0 then
-    return wallSec * 100
-  end
-
-  return os.clock() * 100
-end
-
 local mapLib = {}
 
 local status = nil
 local libs = nil
+
+-- getTime() removed — use status.getTime() (published by main.lua)
+-- flagEnabled() removed — use status.flagEnabled() (published by utils.init)
 
 -- Global map geometry constants and runtime state shared across draw calls.
 local MAP_X = 0
@@ -66,7 +51,7 @@ local trailAccumDist = 0
 local trailLastLat = nil
 local trailLastLon = nil
 local homeNeedsRefresh = true
-local lastHomePosUpdate = getTime()
+local lastHomePosUpdate = 0   -- Initialised to 0; first check after init always triggers.
 local lastZoomLevel = -99
 local lastMapProvider = -99
 local lastMapType = nil
@@ -77,22 +62,9 @@ local estimatedHomeGps = {
 local drawOffsetX = 0
 local drawOffsetY = 0
 
-local lastProcessCycle = getTime()
+local lastProcessCycle = 0   -- Initialised to 0; updated from status.getTime() on first cycle.
 
-local function flagEnabled(value)
-  if value == true then
-    return true
-  end
-  local valueType = type(value)
-  if valueType == "number" then
-    return value ~= 0
-  end
-  if valueType == "string" then
-    local normalized = string.lower(value)
-    return normalized == "true" or normalized == "1" or normalized == "on"
-  end
-  return false
-end
+-- Global map geometry constants and runtime state shared across draw calls.
 local processCycle = 0
 
 local avgDistSamples = {}
@@ -100,7 +72,7 @@ local avgDist = 0
 local avgDistSum = 0
 local avgDistSample = 0
 local avgDistSampleCount = 0
-local avgDistLastSampleTime = getTime()
+local avgDistLastSampleTime = 0
 avgDistSamples[0] = 0
 
 local coord_to_tiles = nil
@@ -117,10 +89,10 @@ local TILES_DIM = 76.5
 local TILES_IDX_BMP = 1
 local TILES_IDX_PATH = 2
 
-local zoomUpdateTimer = getTime()
+local zoomUpdateTimer = 0    -- Initialised to 0; first zoom label always shows briefly.
 local zoomUpdate = false
 
-local lastHeavyUpdate = getTime()
+local lastHeavyUpdate = 0    -- Initialised to 0; first loadAndCenterTiles always runs.
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
 local RASTER_REBUILD_OFFSET_THRESHOLD = 40
@@ -302,13 +274,13 @@ end
 
 function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
-  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
+  local perfActive = status and status.conf and status.flagEnabled(status.conf.enableDebugLog) and status.flagEnabled(status.conf.enablePerfProfile) and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
     status.perfProfileInc("tile_update_calls", 1)
   end
-  local now = getTime()
+  local now = status.getTime()
 
   if now - lastHeavyUpdate < HEAVY_UPDATE_INTERVAL and not mapNeedsHeavyUpdate then
     return
@@ -369,7 +341,7 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
     if perfActive and removedCacheEntries > 0 then
       status.perfProfileInc("gc_count", 1)
     end
-    if status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils then
+    if status and status.conf and status.flagEnabled(status.conf.enableDebugLog) and libs and libs.utils then
       libs.utils.logDebug("TILE", string.format("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
     end
   end
@@ -384,7 +356,7 @@ end
 
 function mapLib.drawTiles(width, xmin, ymin)
   -- Draws the active tile cache into the map viewport.
-  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
+  local perfActive = status and status.conf and status.flagEnabled(status.conf.enableDebugLog) and status.flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
@@ -408,7 +380,7 @@ function mapLib.drawTiles(width, xmin, ymin)
     end
   end
 
-  if status and status.conf and flagEnabled(status.conf.enableDebugLog) then
+  if status and status.conf and status.flagEnabled(status.conf.enableDebugLog) then
     local gridXMax = xmin + TILES_X * TILES_SIZE
     local gridYMax = ymin + TILES_Y * TILES_SIZE
     lcd.pen(DOTTED)
@@ -440,7 +412,7 @@ end
 
 function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, allowStateUpdate)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
-  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
+  local perfActive = status and status.conf and status.flagEnabled(status.conf.enableDebugLog) and status.flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
@@ -470,7 +442,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     widget.lastZoom = level
     mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level, 0, 0, 0, 0)
 
-    if viewportChanged and status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils and libs.utils.logDebug and libs.tileLoader then
+    if viewportChanged and status and status.conf and status.flagEnabled(status.conf.enableDebugLog) and libs and libs.utils and libs.utils.logDebug and libs.tileLoader then
       local gridTiles = TILES_X * TILES_Y
       local cacheTiles = libs.tileLoader.getCacheCount and libs.tileLoader.getCacheCount() or 0
       local queueTiles = libs.tileLoader.getQueueLength and libs.tileLoader.getQueueLength() or 0
@@ -533,8 +505,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   local uav_tile_x, uav_tile_y = tile_x, tile_y
   local uav_offset_x, uav_offset_y = offset_x, offset_y
 
-  if getTime() - lastHomePosUpdate > 20 then
-    lastHomePosUpdate = getTime()
+  if status.getTime() - lastHomePosUpdate > 20 then
+    lastHomePosUpdate = status.getTime()
     if homeNeedsRefresh then
       homeNeedsRefresh = false
       if status.telemetry.homeLat ~= nil then
@@ -625,7 +597,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     lcd.color(WHITE)
     lcd.font(FONT_XL)
     lcd.drawText(x + w/2, y + h/2 - 25*status.scaleY, string.format("ZOOM %d", level), CENTERED)
-    if getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
+    if status.getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
   end
   
   lcd.setClipping()
@@ -666,7 +638,7 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   local provider = (status and status.conf and status.conf.mapProvider) or 2
   local mapType = (status and status.conf and status.conf.mapType) or ""
   if level ~= lastZoomLevel or provider ~= lastMapProvider or mapType ~= lastMapType or lastZoomLevel == -99 then
-    zoomUpdateTimer = getTime()
+    zoomUpdateTimer = status.getTime()
     zoomUpdate = true
 
     libs.resetLib.clearTable(tiles)
