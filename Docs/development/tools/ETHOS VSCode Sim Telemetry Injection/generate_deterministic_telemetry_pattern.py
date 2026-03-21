@@ -1,9 +1,26 @@
 #!/usr/bin/env python3
+#
+# Deterministic demo telemetry generator for ETHOS Mapping Widget.
+# Copyright (C) 2026 Marc Hoffmann (b14ckyy)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 """
 Generate deterministic 5-minute telemetry CSV for performance testing.
 - 250ms tick rate → 1200 records total
 - Minute 0-1: Circular path (500m diameter) starting at the requested origin
-- Minute 1-5: Random direction changes every 20s, same start coords
+- Minute 1-5: Random direction changes every 20s, continuing from the circle end point
 - Constant velocity: 20 m/s (72 km/h)
 """
 
@@ -68,10 +85,8 @@ def get_circle_position(elapsed_s, radius_m, velocity_ms):
 
     return xm, ym, heading_deg
 
-def get_random_direction_position(elapsed_s, initial_lat, initial_lon, velocity_ms, change_interval_s):
-    """Get position following random direction changes (starting from 0,0 offset)."""
-    # We work entirely in meters, starting from origin (0,0)
-    
+def get_random_direction_position(elapsed_s, base_xm, base_ym, velocity_ms, change_interval_s):
+    """Get position following random direction changes from a provided base offset."""
     # Determine which direction segment and how far into it
     segment_num = int(elapsed_s / change_interval_s)
     elapsed_in_segment = elapsed_s - (segment_num * change_interval_s)
@@ -105,8 +120,8 @@ def get_random_direction_position(elapsed_s, initial_lat, initial_lon, velocity_
     current_xm = distance * math.cos(heading_rad)
     current_ym = distance * math.sin(heading_rad)
     
-    final_xm = total_xm + current_xm
-    final_ym = total_ym + current_ym
+    final_xm = base_xm + total_xm + current_xm
+    final_ym = base_ym + total_ym + current_ym
     
     return final_xm, final_ym
 
@@ -133,6 +148,8 @@ header = [
 ]
 
 output_path = "Synthetic_Logs/DemoTelemetry_Synthetic_5min_pattern_250ms.csv"
+circle_end_xm, circle_end_ym, circle_end_heading = get_circle_position(CIRCLE_DURATION_S, CIRCLE_RADIUS_M, VELOCITY_MS)
+
 with open(output_path, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(header)
@@ -150,7 +167,7 @@ with open(output_path, 'w', newline='') as f:
             # Phase 2: Random directions
             elapsed_in_phase2 = elapsed_s - CIRCLE_DURATION_S
             xm_offset, ym_offset = get_random_direction_position(
-                elapsed_in_phase2, START_LAT, START_LON, VELOCITY_MS, DIRECTION_CHANGE_INTERVAL_S
+                elapsed_in_phase2, circle_end_xm, circle_end_ym, VELOCITY_MS, DIRECTION_CHANGE_INTERVAL_S
             )
             
             # Calculate heading from velocity direction
@@ -189,16 +206,16 @@ with open(output_path, 'w', newline='') as f:
         writer.writerow(row)
         current_time += timedelta(seconds=TICK_INTERVAL)
 
-print(f"✓ Written {NUM_RECORDS} records to: {output_path}")
+print(f"Written {NUM_RECORDS} records to: {output_path}")
 
 # Calculate some statistics
-circle_end_lat, circle_end_lon = meters_to_lat_lon(0, 0, START_LAT, START_LON)  # Back at origin
+circle_end_lat, circle_end_lon = meters_to_lat_lon(circle_end_xm, circle_end_ym, START_LAT, START_LON)
 
 # Get final position
-final_xm_offset, final_ym_offset = get_random_direction_position(RANDOM_DURATION_S, START_LAT, START_LON, VELOCITY_MS, DIRECTION_CHANGE_INTERVAL_S)
+final_xm_offset, final_ym_offset = get_random_direction_position(RANDOM_DURATION_S, circle_end_xm, circle_end_ym, VELOCITY_MS, DIRECTION_CHANGE_INTERVAL_S)
 final_lat, final_lon = meters_to_lat_lon(final_xm_offset, final_ym_offset, START_LAT, START_LON)
 
-print(f"  Phase 1 end (60s): Back at start → {circle_end_lat:.6f}, {circle_end_lon:.6f}")
-print(f"  Phase 2 start (60s): {START_LAT:.6f}, {START_LON:.6f}")
+print(f"  Phase 1 end (60s): {circle_end_lat:.6f}, {circle_end_lon:.6f}")
+print(f"  Phase 2 start (60s): {circle_end_lat:.6f}, {circle_end_lon:.6f}")
 print(f"  Phase 2 end (300s): ~{final_lat:.6f}, ~{final_lon:.6f}")
 print(f"  Total duration: {DURATION_SECONDS}s (5 min)")

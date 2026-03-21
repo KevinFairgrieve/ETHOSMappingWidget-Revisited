@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+#
+# Deterministic demo telemetry generator for ETHOS Mapping Widget.
+# Copyright (C) 2026 Marc Hoffmann (b14ckyy)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 """
 Generate deterministic telemetry CSV for performance testing.
 - 250ms tick rate
@@ -56,8 +73,8 @@ dlat, dlon = get_lat_lon_delta_per_tick(VELOCITY_MS, HEADING_DEG, TICK_INTERVAL)
 
 print(f"Generating {NUM_RECORDS} records ({NUM_RECORDS * TICK_INTERVAL}s total)")
 print(f"  Start: {START_LAT:.6f}, {START_LON:.6f}")
-print(f"  Δ per tick: {dlat:.9f}°, {dlon:.9f}°")
-print(f"  Velocity: {VELOCITY_MS} m/s, Heading: {HEADING_DEG}°")
+print(f"  Delta per tick: {dlat:.9f} deg, {dlon:.9f} deg")
+print(f"  Velocity: {VELOCITY_MS} m/s, Heading: {HEADING_DEG} deg")
 print()
 
 # Header from DemoTelemetry.csv
@@ -121,10 +138,10 @@ with open(output_path, 'w', newline='') as f:
         lat += dlat
         lon += dlon
 
-print(f"✓ Written {NUM_RECORDS} records to: {output_path}")
-print(f"  First row: {START_TIME.strftime('%H:%M:%S.%f')[:-3]} → {START_LAT:.6f}, {START_LON:.6f}")
+print(f"Written {NUM_RECORDS} records to: {output_path}")
+print(f"  First row: {START_TIME.strftime('%H:%M:%S.%f')[:-3]} -> {START_LAT:.6f}, {START_LON:.6f}")
 last_time = START_TIME + timedelta(seconds=TICK_INTERVAL * (NUM_RECORDS - 1))
 last_lat = START_LAT + dlat * (NUM_RECORDS - 1)
 last_lon = START_LON + dlon * (NUM_RECORDS - 1)
-print(f"  Last row:  {last_time.strftime('%H:%M:%S.%f')[:-3]} → {last_lat:.6f}, {last_lon:.6f}")
-print(f"  Total distance: ~{VELOCITY_MS * DURATION_SECONDS}m at {HEADING_DEG}° heading")
+print(f"  Last row:  {last_time.strftime('%H:%M:%S.%f')[:-3]} -> {last_lat:.6f}, {last_lon:.6f}")
+print(f"  Total distance: ~{VELOCITY_MS * DURATION_SECONDS}m at {HEADING_DEG} deg heading")

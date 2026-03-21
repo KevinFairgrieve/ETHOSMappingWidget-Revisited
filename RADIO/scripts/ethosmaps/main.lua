@@ -476,7 +476,7 @@ local function bgtasks(widget)
     mapStatus.telemetry.lon = gpsData.lon
 
     -- Log GPS position at most once every 15 seconds to avoid flooding the debug log.
-    if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then -- Safeguard: avoid logger access before config and libraries are initialized.
+    if mapStatus and mapStatus.conf and configFlagEnabled(mapStatus.conf.enableDebugLog) and mapLibs and mapLibs.utils then -- Safeguard: avoid logger access before config and libraries are initialized.
       local lat = mapStatus.telemetry.lat or 0
       local lon = mapStatus.telemetry.lon or 0
       local gpsLogInterval = 1500 -- centiseconds (15 seconds)
@@ -616,7 +616,7 @@ local function event(widget, category, value, x, y)
       mapStatus.scaleY = h / 480
     end
 
-    if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils then
+    if mapStatus and mapStatus.conf and configFlagEnabled(mapStatus.conf.enableDebugLog) and mapLibs and mapLibs.utils then
       mapLibs.utils.logDebug("TOUCH", string.format("value=%s x=%s y=%s", tostring(value), tostring(x), tostring(y)))
     end
 
@@ -676,13 +676,17 @@ local function event(widget, category, value, x, y)
       mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
       mapStatus.consumeZoomRelease = true
       markMapDirty()
-      mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
+      if configFlagEnabled(mapStatus.conf.enableDebugLog) and mapLibs and mapLibs.utils then
+        mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
+      end
 
     elseif hitPlus then
       mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
       mapStatus.consumeZoomRelease = true
       markMapDirty()
-      mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
+      if configFlagEnabled(mapStatus.conf.enableDebugLog) and mapLibs and mapLibs.utils then
+        mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
+      end
 
     else
       mapStatus.consumeZoomRelease = false
@@ -1228,7 +1232,7 @@ local function syncMapTypeChoicesForProvider(widget, provider, forceRefresh)
 end
 
 local function logMapSelectionAutofix(message)
-  if mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
+  if mapStatus and mapStatus.conf and configFlagEnabled(mapStatus.conf.enableDebugLog) and mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
     mapLibs.utils.logDebug("SETTINGS", message, true)
   end
 end
@@ -1445,7 +1449,7 @@ local function logSettingsSnapshot()
 end
 
 logDebugSessionStart = function(reason)
-  if not (mapStatus and mapStatus.conf and mapStatus.conf.enableDebugLog and mapLibs and mapLibs.utils and mapLibs.utils.logDebug) then
+  if not (mapStatus and mapStatus.conf and configFlagEnabled(mapStatus.conf.enableDebugLog) and mapLibs and mapLibs.utils and mapLibs.utils.logDebug) then
     return
   end
   if mapStatus.sessionLogged then
@@ -1462,7 +1466,7 @@ logDebugSessionStart = function(reason)
 
   mapLibs.utils.logDebug("SETTINGS", marker, true)
 
-  if mapStatus.conf.enablePerfProfile then
+  if configFlagEnabled(mapStatus.conf.enablePerfProfile) then
     mapLibs.utils.logDebug("PERF", "=== PERF PROFILE ACTIVE (5s windows) ===", true)
   end
 
@@ -1653,7 +1657,7 @@ local function configure(widget)
         if not rebuilt then
           refreshed = refreshConfigureForm()
         end
-        if not refreshed and mapStatus.conf.enableDebugLog then
+        if not refreshed and configFlagEnabled(mapStatus.conf.enableDebugLog) then
           logMapSelectionAutofix("Form refresh API unavailable after map type fallback; choices may update only after reopening settings")
         end
       end
@@ -1767,9 +1771,9 @@ local function configure(widget)
   -- Debug logging is opt-in because writes go to the SD card during runtime.
   line = form.addLine("Enable debug log")
   widget.enableDebugLogField = form.addBooleanField(line, nil, 
-    function() return mapStatus.conf.enableDebugLog end, 
+    function() return configFlagEnabled(mapStatus.conf.enableDebugLog) end, 
     function(value) 
-      local previous = mapStatus.conf.enableDebugLog
+      local previous = configFlagEnabled(mapStatus.conf.enableDebugLog)
 
       if value and not previous then
         mapStatus.conf.enableDebugLog = true
@@ -1787,14 +1791,14 @@ local function configure(widget)
 
       -- Toggle perf profile field visibility based on debug log state
       if widget.enablePerfProfileField ~= nil then
-        widget.enablePerfProfileField:enable(value)
+        widget.enablePerfProfileField:enable(configFlagEnabled(value))
       end
     end
   )
 
   line = form.addLine("Enable perf profile (5s)")
   widget.enablePerfProfileField = form.addBooleanField(line, nil,
-    function() return mapStatus.conf.enablePerfProfile end,
+    function() return configFlagEnabled(mapStatus.conf.enablePerfProfile) end,
     function(value)
       local previous = configFlagEnabled(mapStatus.conf.enablePerfProfile)
       local enabled = configFlagEnabled(value)
@@ -1814,7 +1818,7 @@ local function configure(widget)
     end
   )
   -- Only show perf profile option when debug logging is enabled.
-  widget.enablePerfProfileField:enable(mapStatus.conf.enableDebugLog)
+  widget.enablePerfProfileField:enable(configFlagEnabled(mapStatus.conf.enableDebugLog))
 
 end
 

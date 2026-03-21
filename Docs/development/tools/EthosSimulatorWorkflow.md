@@ -83,7 +83,8 @@ See also:
 
 Telemetry replay (for repeatable sensor input in simulator):
 - Helper doc: `Docs/development/helper/TelemetryReplay.md`
-- Quick start: `.\Docs\development\helper\replay-telemetry-log.ps1 -Speed 1 -Loop`
+- Quick start: `.\Docs\development\tools\ETHOS VSCode Sim Telemetry Injection\replay-telemetry-log.ps1 -Speed 1 -Loop`
+- Deterministic demo logs: `Docs/development/tools/ETHOS VSCode Sim Telemetry Injection/Synthetic_Logs/`
 
 ---
 

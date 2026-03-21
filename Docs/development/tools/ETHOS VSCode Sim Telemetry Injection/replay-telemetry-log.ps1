@@ -50,10 +50,10 @@
     Include ESC sensor (RPM/voltage/current derived). Only makes sense for multirotors.
 
 .EXAMPLE
-    .\Docs\development\helper\replay-telemetry-log.ps1 -Speed 1 -Loop
+  .\Docs\development\tools\ETHOS VSCode Sim Telemetry Injection\replay-telemetry-log.ps1 -Speed 1 -Loop
 
 .EXAMPLE
-    .\Docs\development\helper\replay-telemetry-log.ps1 -LogPath ".\.vscode\MeinFlug.csv" -Speed 5
+  .\Docs\development\tools\ETHOS VSCode Sim Telemetry Injection\replay-telemetry-log.ps1 -LogPath ".\.vscode\MeinFlug.csv" -Speed 5
 #>
 
 param(

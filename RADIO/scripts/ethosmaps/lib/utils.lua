@@ -43,6 +43,21 @@ local function getTime()
   return os.clock()*100
 end
 
+local function flagEnabled(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local normalized = string.lower(value)
+    return normalized == "true" or normalized == "1" or normalized == "on"
+  end
+  return false
+end
+
 -- Compacts the debug log file when it reaches its size limit by copying only the newest lines into a fresh file.
 -- Ethos file handles use read("*l") reliably here, so rollover avoids iterator helpers and writes the retained log back to disk.
 function utils.performRollover()
@@ -110,7 +125,7 @@ end
 
 local function initDebugLineCount()
   -- Counts existing log lines on demand so logDebug can append efficiently without scanning the file every call.
-  if not status.conf.enableDebugLog then 
+  if not status or not status.conf or not flagEnabled(status.conf.enableDebugLog) then 
     utils.debugLineCount = nil
     return 
   end
@@ -140,7 +155,7 @@ end
 
 function utils.logDebug(category, message, force)
   -- Buffers debug records in RAM and writes them to disk in batches to reduce SD-card I/O.
-  if not status or not status.conf or not status.conf.enableDebugLog then 
+  if not status or not status.conf or not flagEnabled(status.conf.enableDebugLog) then 
     logBuffer = {}
     utils.debugLineCount = nil   -- Safeguard: reset lazy state when logging is unavailable or disabled.
     return 
@@ -211,7 +226,7 @@ end
 
 function utils.flushLogs(force)
   -- Flushes buffered log lines when the interval elapsed (or immediately when forced).
-  if not status or not status.conf or not status.conf.enableDebugLog then
+  if not status or not status.conf or not flagEnabled(status.conf.enableDebugLog) then
     logBuffer = {}
     return
   end

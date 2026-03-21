@@ -78,6 +78,21 @@ local drawOffsetX = 0
 local drawOffsetY = 0
 
 local lastProcessCycle = getTime()
+
+local function flagEnabled(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local normalized = string.lower(value)
+    return normalized == "true" or normalized == "1" or normalized == "on"
+  end
+  return false
+end
 local processCycle = 0
 
 local avgDistSamples = {}
@@ -286,8 +301,7 @@ end
 
 function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
-  -- Use truthy checks (not == true) because ETHOS storage may return 1/0 integers instead of booleans.
-  local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
+  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileInc and status.perfProfileAddMs -- Performance profiler trigger.
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
@@ -354,7 +368,7 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
     if perfActive and removedCacheEntries > 0 then
       status.perfProfileInc("gc_count", 1)
     end
-    if status and status.conf and status.conf.enableDebugLog and libs and libs.utils then
+    if status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils then
       libs.utils.logDebug("TILE", string.format("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
     end
   end
@@ -369,7 +383,7 @@ end
 
 function mapLib.drawTiles(width, xmin, ymin)
   -- Draws the active tile cache into the map viewport.
-  local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileAddMs
+  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
@@ -387,7 +401,7 @@ function mapLib.drawTiles(width, xmin, ymin)
     end
   end
 
-  if status.conf.enableDebugLog then
+  if status and status.conf and flagEnabled(status.conf.enableDebugLog) then
     local gridXMax = xmin + TILES_X * TILES_SIZE
     local gridYMax = ymin + TILES_Y * TILES_SIZE
     lcd.pen(DOTTED)
@@ -419,7 +433,7 @@ end
 
 function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, allowStateUpdate)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
-  local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileAddMs
+  local perfActive = status and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) and status.perfProfileAddMs
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000

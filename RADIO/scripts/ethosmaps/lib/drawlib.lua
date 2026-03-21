@@ -26,6 +26,21 @@ local bitmaps = {}
 local topBarUnifiedFont = nil
 local topBarValueCache = {}
 
+local function flagEnabled(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local normalized = string.lower(value)
+    return normalized == "true" or normalized == "1" or normalized == "on"
+  end
+  return false
+end
+
 local function safeSensorName(sensor)
   if sensor == nil then
     return nil
@@ -376,7 +391,7 @@ function drawLib.unloadBitmap(name)
   -- Removes a cached bitmap from memory and nudges Lua garbage collection to reclaim it.
   if bitmaps[name] ~= nil then
     bitmaps[name] = nil
-    if status and status.perfProfileInc and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile then
+    if status and status.perfProfileInc and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) then
       status.perfProfileInc("gc_count", 2)
     end
     -- GC wird jetzt periodisch im wakeup() ausgeführt

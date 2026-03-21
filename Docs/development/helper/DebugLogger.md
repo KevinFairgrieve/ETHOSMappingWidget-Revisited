@@ -1,7 +1,7 @@
 # ETHOS Mapping Widget – Debug Logger Guide
 
 **Version:** 1.2 (March 2026)  
-**Status:** Production-ready & merged
+**Status:** Current branch behavior
 
 ---
 
@@ -46,7 +46,8 @@ libs.utils.logDebug("GPS", string.format("lat=%.6f lon=%.6f", lat, lon))
 |------------|-------------------------------------------|---------|
 | `SETTINGS` | Widget start + toggle + rollover          | `=== DEBUG SESSION STARTED ===` |
 | `GPS`      | Only on real position change              | `lat=51.488651 lon=11.977728` |
-| `TOUCH`    | Every touch event                         | `value=16641 x=751 y=134` |
+| `TOUCH`    | Touch events and zoom button presses      | `value=16641 x=751 y=134` |
+| `PERF`     | 5-second profiler windows and state changes | `=== PERF PROFILE ACTIVE (5s windows) ===` |
 | `TILE`     | Tile load/cache/zoom/recenter + path diagnostics | `Tile format detected for provider:2|mapType:Hybrid: .png (source: yaapu-fallback)` |
 | `ERROR`    | Recommended for pcall failures            | `Crash in myFunction(): nil value` |
 
@@ -113,13 +114,15 @@ The file stays small forever.
 
 - Use your own category names (e.g. `ZOOM`, `HOME`, `MYTEST`) – they are right-aligned automatically.
 - To stop logging completely: Turn "Enable debug log" **OFF** in settings.
+- The perf profiler only runs when **both** `Enable debug log` and `Enable perf profile (5s)` are enabled.
+- The perf profile option is only available while debug logging is enabled.
 - To start completely fresh: Delete `debug.log` from the SD card.
 - For quick debugging: Add `libs.utils.logDebug("DEBUG", "Value of X = " .. tostring(X))` anywhere you need to inspect something.
-- The logger has **zero overhead** when disabled.
+- When disabled, the logger exits before file writes, rollover work, and buffered flushes.
 
 ---
 
-## 8. TILE Debug Diagnostics (New)
+## 8. TILE Debug Diagnostics
 
 The widget now logs detailed tile lookup information that makes path issues easy to pinpoint.
 
@@ -163,5 +166,4 @@ The widget now logs detailed tile lookup information that makes path issues easy
 ---
 
 **Ready to use.**  
-This guide is now 100 % up-to-date with the merged code.
-```
+This guide matches the current branch behavior as of March 2026.

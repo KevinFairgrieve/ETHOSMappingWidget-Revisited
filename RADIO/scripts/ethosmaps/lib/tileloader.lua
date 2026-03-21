@@ -27,6 +27,21 @@ local tileLoader = {}
 local status = nil
 local libs   = nil
 
+local function flagEnabled(value)
+  if value == true then
+    return true
+  end
+  local valueType = type(value)
+  if valueType == "number" then
+    return value ~= 0
+  end
+  if valueType == "string" then
+    local normalized = string.lower(value)
+    return normalized == "true" or normalized == "1" or normalized == "on"
+  end
+  return false
+end
+
 -- Spatial ring radius for cache eviction (tiles beyond this radius around the visible
 -- window are discarded when trimCache() is called from maplib).
 local TILE_CACHE_RING_TILES = 2
@@ -144,7 +159,7 @@ local function loadTileFromDisk(tilePath)
 
   if bmp ~= nil then
     -- Log the tile format the first time it is seen for this provider+mapType combination.
-    if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug then
+    if status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils and libs.utils.logDebug then
       local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
       if lastTileFormatLogByKey[logKey] == nil then
         local ext    = (type(loadedPath) == "string" and (loadedPath:match("%.([%a%d]+)$") or "unknown"):lower()) or "unknown"
@@ -162,7 +177,7 @@ local function loadTileFromDisk(tilePath)
   end
 
   -- No file found – log once per provider+mapType, then return the shared nomap sentinel.
-  if status and status.conf and status.conf.enableDebugLog and libs and libs.utils and libs.utils.logDebug then
+  if status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils and libs.utils.logDebug then
     local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
     if lastNoTilesLogKey ~= logKey then
       libs.utils.logDebug("TILE", "No tile files found for " .. logKey .. "; using fallback bitmap", true)
