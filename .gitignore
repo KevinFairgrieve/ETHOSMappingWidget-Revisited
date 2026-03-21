@@ -12,6 +12,9 @@ RADIO/sensors.json.tmp
 RADIO/sensors.json.*.tmp
 RADIO/sensors.json.*.bak
 
+# Legacy Yaapu tile cache (not tracked; users maintain their own)
+RADIO/bitmaps/yaapu/
+
 # Local debug/runtime artifacts
 RADIO/scripts/ethosmaps/debug.log
 
