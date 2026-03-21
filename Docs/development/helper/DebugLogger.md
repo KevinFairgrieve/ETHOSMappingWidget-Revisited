@@ -126,6 +126,12 @@ The file stays small forever.
 
 The widget now logs detailed tile lookup information that makes path issues easy to pinpoint.
 
+### Compatibility note (review transparency)
+
+- The Google tile fallback in `tileloader.lua` intentionally includes a Yaapu-compatible path strategy.
+- Practically, this means Yaapu-style Google cache layouts (including `s_x` naming) are treated as fallback inputs when native `ethosmaps` tiles are missing.
+- The behavior is compatibility-oriented adaptation, not a separate runtime mode.
+
 ### Key TILE messages
 
 - `loadAndCenterTiles: tiles changed (load/zoom/recenter)`
