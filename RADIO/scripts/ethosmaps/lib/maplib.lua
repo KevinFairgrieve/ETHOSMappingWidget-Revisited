@@ -47,7 +47,6 @@ local MAP_Y = 0
 local DIST_SAMPLES = 10
 
 -- Cached map support state for tiles, screen coordinates, trail history, and redraw throttling.
-local posUpdated = false
 local myScreenX, myScreenY
 local homeScreenX, homeScreenY
 local estimatedHomeScreenX, estimatedHomeScreenY
@@ -59,11 +58,14 @@ local tiles_per_radian
 local tile_dim
 local scaleLen
 local scaleLabel
-local posHistory = {}
+-- GPS-based trail: stores up to TRAIL_MAX_WAYPOINTS lat/lon anchors; survives zoom changes.
+local TRAIL_MAX_WAYPOINTS = 51
+local trailWaypoints = {}
+local trailWpCount = 0
+local trailAccumDist = 0
+local trailLastLat = nil
+local trailLastLon = nil
 local homeNeedsRefresh = true
-local sample = 0
-local sampleCount = 0
-local lastPosSample = getTime()
 local lastHomePosUpdate = getTime()
 local lastZoomLevel = -99
 local lastMapProvider = -99
@@ -107,8 +109,6 @@ local lastHeavyUpdate = getTime()
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
 
-local lastTrailUpdate = getTime()
-local TRAIL_UPDATE_INTERVAL = 50
 local DIRECTIONAL_LEAD_TILES = 1
 local DIRECTIONAL_LEAD_MIN_SPEED = 1.5
 local DIRECTIONAL_LEAD_OFFSET_THRESHOLD = 90
@@ -369,6 +369,11 @@ end
 
 function mapLib.drawTiles(width, xmin, ymin)
   -- Draws the active tile cache into the map viewport.
+  local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileAddMs
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = os.clock() * 1000
+  end
 
   for x=1,TILES_X do
     for y=1,TILES_Y do
@@ -396,6 +401,7 @@ function mapLib.drawTiles(width, xmin, ymin)
       lcd.drawLine(xmin, lineY, gridXMax, lineY)
     end
   end
+
 end
 
 
@@ -413,6 +419,11 @@ end
 
 function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, allowStateUpdate)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
+  local perfActive = status and status.conf and status.conf.enableDebugLog and status.conf.enablePerfProfile and status.perfProfileAddMs
+  local perfStartMs = nil
+  if perfActive then
+    perfStartMs = os.clock() * 1000
+  end
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 
@@ -443,8 +454,6 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
 
   if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
     if doStateUpdate then
-      posUpdated = true
-
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
       local rawLeadX, rawLeadY = getDirectionalLeadFromHeading(heading)
       local leadX, leadY = gateLeadByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
@@ -469,32 +478,51 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   local renderOffsetX = widget.drawOffsetX
   local renderOffsetY = widget.drawOffsetY
 
+  -- Save UAV tile coords before home calculation (which temporarily overwrites them).
+  local uav_tile_x, uav_tile_y = tile_x, tile_y
+  local uav_offset_x, uav_offset_y = offset_x, offset_y
+
   if getTime() - lastHomePosUpdate > 20 then
     lastHomePosUpdate = getTime()
     if homeNeedsRefresh then
       homeNeedsRefresh = false
       if status.telemetry.homeLat ~= nil then
-        tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
-        homeScreenX, homeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+        local h_x, h_y, h_ox, h_oy = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
+        homeScreenX, homeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, h_x, h_y, h_ox, h_oy, level)
       end
     else
       homeNeedsRefresh = true
       estimatedHomeGps.lat, estimatedHomeGps.lon = libs.utils.getLatLonFromAngleAndDistance(status.telemetry.homeAngle, status.telemetry.homeDist)
       if estimatedHomeGps.lat ~= nil then
-        local t_x, t_y, o_x, o_y = mapLib.coord_to_tiles(estimatedHomeGps.lat, estimatedHomeGps.lon, level)
-        estimatedHomeScreenX, estimatedHomeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, t_x, t_y, o_x, o_y, level)
+        local e_x, e_y, e_ox, e_oy = mapLib.coord_to_tiles(estimatedHomeGps.lat, estimatedHomeGps.lon, level)
+        estimatedHomeScreenX, estimatedHomeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, e_x, e_y, e_ox, e_oy, level)
       end
     end
   end
 
-  local now = getTime()
-  if now - lastTrailUpdate > TRAIL_UPDATE_INTERVAL and posUpdated then
-    lastTrailUpdate = now
-    posUpdated = false
-    local path = mapLib.tiles_to_path(tile_x, tile_y, level)
-    posHistory[sample] = { path, offset_x, offset_y }
-    sampleCount = sampleCount + 1
-    sample = sampleCount % status.conf.mapTrailDots
+  local trailLengthKm = tonumber((status and status.conf and status.conf.mapTrailLength) or 0) or 0
+  if trailLengthKm > 0 and doStateUpdate and status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
+    local triggerDist = trailLengthKm * 1000 / 50
+    if trailLastLat ~= nil then
+      local delta = libs.utils.haversine(trailLastLat, trailLastLon, status.telemetry.lat, status.telemetry.lon)
+      trailAccumDist = trailAccumDist + delta
+    end
+    trailLastLat = status.telemetry.lat
+    trailLastLon = status.telemetry.lon
+    if trailWpCount == 0 then
+      -- First GPS fix: place initial anchor so the dynamic segment starts immediately.
+      trailWpCount = 1
+      trailWaypoints[1] = { status.telemetry.lat, status.telemetry.lon }
+    elseif trailAccumDist >= triggerDist then
+      trailAccumDist = 0
+      if trailWpCount < TRAIL_MAX_WAYPOINTS then
+        trailWpCount = trailWpCount + 1
+        trailWaypoints[trailWpCount] = { status.telemetry.lat, status.telemetry.lon }
+      else
+        table.remove(trailWaypoints, 1)
+        trailWaypoints[TRAIL_MAX_WAYPOINTS] = { status.telemetry.lat, status.telemetry.lon }
+      end
+    end
   end
 
   mapLib.drawTiles(TILES_X, minX + renderOffsetX, minY + renderOffsetY)
@@ -513,24 +541,33 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and homeScreenX ~= nil then
-    local homeDrawX = homeScreenX + renderOffsetX
-    local homeDrawY = homeScreenY + renderOffsetY
+  if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
+    local htx, hty, hox, hoy = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
+    local homeDrawX = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
+    local homeDrawY = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
     local homeCode = libs.drawLib.computeOutCode(homeDrawX, homeDrawY, x + 11, y + 10, x + w - 11, y + h - 10)
     if homeCode == 0 then
       libs.drawLib.drawBitmap(homeDrawX - 11, homeDrawY - 10, "homeorange")
     end
   end
 
-  lcd.color(status.colors.yellow)
-  for p = 0, math.min(sampleCount - 1, status.conf.mapTrailDots - 1) do
-    if p ~= (sampleCount - 1) % status.conf.mapTrailDots then
-      local tcache = tiles_path_to_idx[posHistory[p][1]]
-      if tcache ~= nil and tiles[tcache[1]] ~= nil then
-        lcd.drawFilledRectangle(minX + renderOffsetX + (tcache[2]-1)*TILES_SIZE + posHistory[p][2],
-                                minY + renderOffsetY + (tcache[3]-1)*TILES_SIZE + posHistory[p][3], 3, 3)
-      end
+  if trailLengthKm > 0 and trailWpCount >= 1 and myScreenX ~= nil and uav_tile_x ~= nil then
+    lcd.color(status.colors.yellow)
+    lcd.pen(SOLID)
+    local function trailToScreen(lat, lon)
+      local tx, ty, ox, oy = mapLib.coord_to_tiles(lat, lon, level)
+      return myScreenX + (tx - uav_tile_x) * TILES_SIZE + (ox - uav_offset_x) + renderOffsetX,
+             myScreenY + (ty - uav_tile_y) * TILES_SIZE + (oy - uav_offset_y) + renderOffsetY
     end
+    -- Static segments between consecutive fixed waypoints.
+    for i = 1, trailWpCount - 1 do
+      local x1, y1 = trailToScreen(trailWaypoints[i][1], trailWaypoints[i][2])
+      local x2, y2 = trailToScreen(trailWaypoints[i + 1][1], trailWaypoints[i + 1][2])
+      lcd.drawLine(x1, y1, x2, y2)
+    end
+    -- Dynamic segment: last fixed anchor to current UAV position.
+    local x1, y1 = trailToScreen(trailWaypoints[trailWpCount][1], trailWaypoints[trailWpCount][2])
+    lcd.drawLine(x1, y1, myScreenX + renderOffsetX, myScreenY + renderOffsetY)
   end
 
   if zoomUpdate then
@@ -583,10 +620,6 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 
     libs.resetLib.clearTable(tiles)
     libs.tileLoader.clearCache()
-    libs.resetLib.clearTable(posHistory)
-
-    sample = 0
-    sampleCount = 0
 
     world_tiles = mapLib.tiles_on_level(level)
     tiles_per_radian = world_tiles / (2 * math.pi)
@@ -597,9 +630,21 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
     lastZoomLevel = level
+    if provider ~= lastMapProvider then
+      mapLib.clearTrail()
+    end
     lastMapProvider = provider
     lastMapType = mapType
   end
+end
+
+function mapLib.clearTrail()
+  -- Resets the GPS trail chain. Called on map provider change and on user-triggered widget reset.
+  libs.resetLib.clearTable(trailWaypoints)
+  trailWpCount = 0
+  trailAccumDist = 0
+  trailLastLat = nil
+  trailLastLon = nil
 end
 
 function mapLib.init(param_status, param_libs)

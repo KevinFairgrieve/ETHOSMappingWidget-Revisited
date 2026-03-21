@@ -90,7 +90,7 @@ local mapStatus = {
     mapZoomLevel = 19,
     mapZoomMax = 20,
     mapZoomMin = 1,
-    mapTrailDots = 30,
+    mapTrailLength = 5,  -- Trail length in km (0=off, 1, 5, 10, 25, 50).
     enableDebugLog = false,   -- Enables the on-device debug log.
     enablePerfProfile = false, -- Emits 5s performance summaries into debug.log.
     gpsFormat = 0, -- 0 = decimal, 1 = DMS
@@ -317,62 +317,6 @@ local function perfTableRow(rowLabel, firstCell, secondCell, thirdCell)
   return string.format("| %-8s | %-16s | %-16s | %-16s |", rowLabel, firstCell, secondCell, thirdCell)
 end
 
-local function perfLogWindow(nowMs)
-  if not perfProfileEnabled() then
-    return
-  end
-  local startMs = perfWindowStartMs or tonumber(mapStatus.perfProfile.windowStartMs) or 0
-  if startMs == 0 then
-    perfWindowStartMs = nowMs
-    mapStatus.perfProfile.windowStartMs = nowMs
-    return
-  end
-
-  local windowMs = tonumber(mapStatus.perfProfile.windowMs) or 5000
-  local elapsedMs = nowMs - startMs
-  if elapsedMs < windowMs then
-    return
-  end
-
-  if not (mapLibs and mapLibs.utils and mapLibs.utils.logDebug) then
-    perfResetWindow(nowMs)
-    return
-  end
-
-  local elapsedSec = elapsedMs / 1000
-  local paintCalls = mapStatus.perfProfile.counters.paint_calls or 0
-  local wakeupCalls = mapStatus.perfProfile.counters.wakeup_calls or 0
-  local fps = 0
-  if elapsedSec > 0 then
-    fps = paintCalls / elapsedSec
-  end
-
-  local ok, err = pcall(function()
-    local summary = "WIN secs=" .. tostring(math.floor(elapsedSec * 10 + 0.5) / 10)
-      .. " fps=" .. tostring(math.floor(fps * 100 + 0.5) / 100)
-      .. " wake=" .. tostring(wakeupCalls)
-      .. " paint=" .. tostring(math.floor(perfMetricAvg("paint_total_ms") * 100 + 0.5) / 100)
-      .. " layout=" .. tostring(math.floor(perfMetricAvg("layout_draw_ms") * 100 + 0.5) / 100)
-      .. " tile=" .. tostring(math.floor(perfMetricAvg("tile_update_ms") * 100 + 0.5) / 100)
-      .. " bg=" .. tostring(math.floor(perfMetricAvg("bgtasks_ms") * 100 + 0.5) / 100)
-      .. " flush=" .. tostring(math.floor(perfMetricAvg("log_flush_ms") * 100 + 0.5) / 100)
-      .. " event=" .. tostring(math.floor(perfMetricAvg("event_total_ms") * 100 + 0.5) / 100)
-      .. " rebuilds=" .. tostring(mapStatus.perfProfile.counters.tile_rebuild_count or 0)
-      .. " tileCalls=" .. tostring(mapStatus.perfProfile.counters.tile_update_calls or 0)
-      .. " touches=" .. tostring(mapStatus.perfProfile.counters.touch_events or 0)
-
-    mapLibs.utils.logDebug("PERF", "WINDOW HIT elapsedMs=" .. tostring(elapsedMs), true)
-    mapLibs.utils.logDebug("PERF", summary, true)
-  end)
-
-  if not ok then
-    mapLibs.utils.logDebug("PERF", "window emit error: " .. tostring(err), true)
-  end
-
-  mapStatus.perfProfile.windowCount = (mapStatus.perfProfile.windowCount or 0) + 1
-  perfResetWindow(nowMs)
-end
-
 -- Export performance profiler callbacks to mapStatus so libraries can access them.
 mapStatus.perfProfileInc = perfInc
 mapStatus.perfProfileAddMs = perfAddMs
@@ -486,6 +430,9 @@ end
 
 local function reset(widget)
   -- Delegates a user-triggered reset to resetLib so layouts and cached map data are rebuilt.
+  if mapLibs and mapLibs.mapLib and mapLibs.mapLib.clearTrail then
+    mapLibs.mapLib.clearTrail()
+  end
   mapLibs.resetLib.reset(widget)
   markMapDirty()
 end
@@ -919,20 +866,7 @@ local function wakeup(widget)
         "+----------+------------------+------------------+------------------+",
         true
       )
-
-      mapStatus.perfProfile.windowCount = (mapStatus.perfProfile.windowCount or 0) + 1
       perfResetWindow(perfNowWallMs)
-    end
-
-    -- One-time diagnostics until the first PERF WINDOW is emitted.
-    if (mapStatus.perfProfile.windowCount or 0) == 0 and mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
-      local lastDiag = mapStatus.perfProfile.lastDiagCs or 0
-      if now - lastDiag >= 1200 then
-        local startMs = perfWindowStartMs or tonumber(mapStatus.perfProfile.windowStartMs) or 0
-        local elapsedMs = startMs > 0 and (perfWindowNowMs() - startMs) or 0
-        mapLibs.utils.logDebug("PERF", string.format("diag active=1 startMs=%.0f elapsedMs=%.0f windowMs=%s", startMs, elapsedMs, tostring(mapStatus.perfProfile.windowMs)), true)
-        mapStatus.perfProfile.lastDiagCs = now
-      end
     end
   end
 
@@ -1753,6 +1687,13 @@ local function configure(widget)
   widget.mapTypeField:enable(mapStatus.conf.mapProvider ~= 0)
   syncMapTypeChoicesForProvider(widget, mapStatus.conf.mapProvider, false)
 
+  line = form.addLine("Trail length")
+  form.addChoiceField(line, form.getFieldSlots(line)[0],
+    {{"Off", 0}, {"1 km", 1}, {"5 km", 5}, {"10 km", 10}, {"25 km", 25}, {"50 km", 50}},
+    function() return mapStatus.conf.mapTrailLength end,
+    function(value) mapStatus.conf.mapTrailLength = value end
+  )
+
   line = form.addLine("Map zoom")
   widget.mapZoomField = form.addNumberField(line, nil, 1, 20,
     function()
@@ -1862,7 +1803,6 @@ local function configure(widget)
       if enabled and not previous then
         perfWindowStartMs = nil
         mapStatus.perfProfile.windowStartMs = 0
-        mapStatus.perfProfile.windowCount = 0
         if mapLibs and mapLibs.utils and mapLibs.utils.logDebug then
           mapLibs.utils.logDebug("PERF", "=== PERF PROFILE ENABLED (5s windows) ===", true)
         end
@@ -1893,6 +1833,7 @@ local function read(widget)
   mapStatus.conf.mapZoomMax = storageToConfigWithFallback("mapZoomMax", 20, {"googleZoomMax", "gmapZoomMax"})
   mapStatus.conf.enableDebugLog = storageToConfig("enableDebugLog", false)
   mapStatus.conf.enablePerfProfile = storageToConfig("enablePerfProfile", false)
+  mapStatus.conf.mapTrailLength = storageToConfig("mapTrailLength", 5)
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
   mapStatus.conf.userSensor2 = storageToConfig("userSensor2", nil)
@@ -1916,6 +1857,7 @@ local function write(widget)
   storage.write("mapZoomMax", mapStatus.conf.mapZoomMax)
   storage.write("enableDebugLog", mapStatus.conf.enableDebugLog)
   storage.write("enablePerfProfile", mapStatus.conf.enablePerfProfile)
+  storage.write("mapTrailLength", mapStatus.conf.mapTrailLength)
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
   storage.write("userSensor2", mapStatus.conf.userSensor2)
