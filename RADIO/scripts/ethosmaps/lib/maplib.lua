@@ -362,17 +362,17 @@ function mapLib.drawTiles(width, xmin, ymin)
     perfStartMs = os.clock() * 1000
   end
 
+  -- Cache sentinel bitmaps and getBitmap reference outside the loop so each
+  -- tile iteration pays only one table lookup instead of up to four function calls.
+  local tileGet    = libs.tileLoader.getBitmap
+  local loadingBmp = libs.tileLoader.getLoadingBitmap()
+  local noMapBmp   = libs.tileLoader.getNoMapBitmap()
+
   for x=1,TILES_X do
     for y=1,TILES_Y do
       local idx = width*(y-1)+x
       if tiles[idx] ~= nil then
-        local bmp = libs.tileLoader.getBitmap(tiles[idx])
-        if bmp == nil then
-          bmp = libs.tileLoader.getLoadingBitmap()
-        end
-        if bmp == nil then
-          bmp = libs.tileLoader.getNoMapBitmap() or libs.tileLoader.getFallbackBitmap()
-        end
+        local bmp = tileGet(tiles[idx]) or loadingBmp or noMapBmp
         if bmp ~= nil then
           lcd.drawBitmap(xmin+(x-1)*TILES_SIZE, ymin+(y-1)*TILES_SIZE, bmp)
         end

@@ -1581,38 +1581,8 @@ local function configure(widget)
   if not widget then return end -- Safeguard: configuration callbacks may arrive before the widget fields exist.
   local providerChoices, mapTypeChoices = ensureAvailableMapSelections()
 
-  local line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0 beta4")
-
-  line = form.addLine("Link quality source")
-  form.addSourceField(line, nil, function() return mapStatus.conf.linkQualitySource end, function(value) mapStatus.conf.linkQualitySource = value end)
-
-  line = form.addLine("User sensor 1")
-  form.addSourceField(line, nil, function() return mapStatus.conf.userSensor1 end, function(value) mapStatus.conf.userSensor1 = value end)
-
-  line = form.addLine("User sensor 2")
-  form.addSourceField(line, nil, function() return mapStatus.conf.userSensor2 end, function(value) mapStatus.conf.userSensor2 = value end)
-
-  line = form.addLine("User sensor 3")
-  form.addSourceField(line, nil, function() return mapStatus.conf.userSensor3 end, function(value) mapStatus.conf.userSensor3 = value end)
-
-  line = form.addLine("Airspeed/Groundspeed unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"km/h",2},{"mph",3},{"kn",4}}, function() return mapStatus.conf.horSpeedUnit end, function(value) mapStatus.conf.horSpeedUnit = value end)
-
-  line = form.addLine("Vertical speed unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"ft/s",2},{"ft/min",3}}, function() return mapStatus.conf.vertSpeedUnit end, function(value) mapStatus.conf.vertSpeedUnit = value end)
-
-  line = form.addLine("Altitude/Distance unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m",1},{"ft",2}}, function() return mapStatus.conf.distUnit end, function(value) mapStatus.conf.distUnit = value end)
-
-  line = form.addLine("Long distance unit")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"km",1},{"mi",2}}, function() return mapStatus.conf.distUnitLong end, function(value) mapStatus.conf.distUnitLong = value end)
-
-  line = form.addLine("GPS coordinates format")
-  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"DMS",1},{"Decimal",2}}, function() return mapStatus.conf.gpsFormat end, function(value) mapStatus.conf.gpsFormat = value end)
-
-  -- Provider selection drives which zoom controls are enabled below.
-  line = form.addLine("Map provider")
+  -- Provider and map type at the top for quick access during field setup.
+  local line = form.addLine("Map provider")
   widget.mapProviderField = form.addChoiceField(line, form.getFieldSlots(line)[0], providerChoices, function() return mapStatus.conf.mapProvider end,
     function(value)
       local oldProvider = mapStatus.conf.mapProvider
@@ -1633,8 +1603,12 @@ local function configure(widget)
       end
       applyConfig()
 
-      -- Rebuild the settings form only when the previous map type became invalid and had to fallback.
-      if mapTypeAdjusted then
+      -- Rebuild the settings form when the provider changed so the map type
+      -- dropdown reflects the new provider's available types immediately.
+      -- Without this, switching e.g. Google (Hybrid only) → ESRI (Street,
+      -- Satellite, Hybrid) would keep showing only Hybrid until settings
+      -- are closed and reopened.
+      if oldProvider ~= value then
         local rebuilt = false
         if (not configRebuildInProgress) and form ~= nil and type(form.clear) == "function" then
           configRebuildInProgress = true
@@ -1655,7 +1629,7 @@ local function configure(widget)
           refreshed = refreshConfigureForm()
         end
         if not refreshed and mapStatus.debugEnabled then
-          logMapSelectionAutofix("Form refresh API unavailable after map type fallback; choices may update only after reopening settings")
+          logMapSelectionAutofix("Form refresh API unavailable after provider change; choices may update only after reopening settings")
         end
       end
 
@@ -1687,13 +1661,6 @@ local function configure(widget)
   )
   widget.mapTypeField:enable(mapStatus.conf.mapProvider ~= 0)
   syncMapTypeChoicesForProvider(widget, mapStatus.conf.mapProvider, false)
-
-  line = form.addLine("Trail length")
-  form.addChoiceField(line, form.getFieldSlots(line)[0],
-    {{"Off", 0}, {"1 km", 1}, {"5 km", 5}, {"10 km", 10}, {"25 km", 25}, {"50 km", 50}},
-    function() return mapStatus.conf.mapTrailLength end,
-    function(value) mapStatus.conf.mapTrailLength = value end
-  )
 
   line = form.addLine("Map zoom")
   widget.mapZoomField = form.addNumberField(line, nil, 1, 20,
@@ -1765,6 +1732,40 @@ local function configure(widget)
     end
   )
 
+  line = form.addLine("Link quality source")
+  form.addSourceField(line, nil, function() return mapStatus.conf.linkQualitySource end, function(value) mapStatus.conf.linkQualitySource = value end)
+
+  line = form.addLine("User sensor 1")
+  form.addSourceField(line, nil, function() return mapStatus.conf.userSensor1 end, function(value) mapStatus.conf.userSensor1 = value end)
+
+  line = form.addLine("User sensor 2")
+  form.addSourceField(line, nil, function() return mapStatus.conf.userSensor2 end, function(value) mapStatus.conf.userSensor2 = value end)
+
+  line = form.addLine("User sensor 3")
+  form.addSourceField(line, nil, function() return mapStatus.conf.userSensor3 end, function(value) mapStatus.conf.userSensor3 = value end)
+
+  line = form.addLine("Airspeed/Groundspeed unit")
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"km/h",2},{"mph",3},{"kn",4}}, function() return mapStatus.conf.horSpeedUnit end, function(value) mapStatus.conf.horSpeedUnit = value end)
+
+  line = form.addLine("Vertical speed unit")
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m/s",1},{"ft/s",2},{"ft/min",3}}, function() return mapStatus.conf.vertSpeedUnit end, function(value) mapStatus.conf.vertSpeedUnit = value end)
+
+  line = form.addLine("Altitude/Distance unit")
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"m",1},{"ft",2}}, function() return mapStatus.conf.distUnit end, function(value) mapStatus.conf.distUnit = value end)
+
+  line = form.addLine("Long distance unit")
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"km",1},{"mi",2}}, function() return mapStatus.conf.distUnitLong end, function(value) mapStatus.conf.distUnitLong = value end)
+
+  line = form.addLine("GPS coordinates format")
+  form.addChoiceField(line, form.getFieldSlots(line)[0], {{"DMS",1},{"Decimal",2}}, function() return mapStatus.conf.gpsFormat end, function(value) mapStatus.conf.gpsFormat = value end)
+
+  line = form.addLine("Trail length")
+  form.addChoiceField(line, form.getFieldSlots(line)[0],
+    {{"Off", 0}, {"1 km", 1}, {"5 km", 5}, {"10 km", 10}, {"25 km", 25}, {"50 km", 50}},
+    function() return mapStatus.conf.mapTrailLength end,
+    function(value) mapStatus.conf.mapTrailLength = value end
+  )
+
   -- Debug logging is opt-in because writes go to the SD card during runtime.
   line = form.addLine("Enable debug log")
   widget.enableDebugLogField = form.addBooleanField(line, nil, 
@@ -1825,6 +1826,9 @@ local function configure(widget)
   )
   -- Only show perf profile option when debug logging is enabled.
   widget.enablePerfProfileField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog))
+
+  line = form.addLine("Widget version")
+  form.addStaticText(line, nil, "1.0.0 beta4")
 
 end
 

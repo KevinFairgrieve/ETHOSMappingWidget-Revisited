@@ -213,10 +213,7 @@ function tileLoader.getBitmap(tilePath)
   return mapBitmapByPath[tilePath]
 end
 
-function tileLoader.getFallbackBitmap()
-  -- Backward-compatible alias for legacy callers; maps to NO MAP DATA bitmap.
-  return noMapBitmap
-end
+-- getFallbackBitmap() removed — was an identical alias for getNoMapBitmap().
 
 function tileLoader.getNoMapBitmap()
   -- Returns the shared "NO MAP DATA" bitmap preloaded outside the paint path.
