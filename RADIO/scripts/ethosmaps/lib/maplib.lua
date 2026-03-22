@@ -774,10 +774,8 @@ function mapLib.calculateScale(level)
   local tile_dim = (40075017 / world_tiles) * status.conf.distUnitScale
   local scaleDistance = getScaleDistanceForLevel(level)
 
-  if status.conf.mapProvider == 1 or status.conf.mapProvider == 2 then
-    scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
-    scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
-  end
+  scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
+  scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
   return scaleLen, scaleLabel
 end
