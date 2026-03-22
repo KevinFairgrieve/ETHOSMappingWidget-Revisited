@@ -274,7 +274,7 @@ end
 
 function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
-  local perfActive = status.perfActive and status.perfProfileInc and status.perfProfileAddMs
+  local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
@@ -299,9 +299,12 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
 
   libs.resetLib.clearTable(tiles_path_to_idx)
 
+  local halfX = math.floor(TILES_X / 2 + 0.5)
+  local halfY = math.floor(TILES_Y / 2 + 0.5)
+
   for x=1,TILES_X do
     for y=1,TILES_Y do
-      local tile_path = mapLib.tiles_to_path(centerTileX + x - math.floor(TILES_X/2 + 0.5), centerTileY + y - math.floor(TILES_Y/2 + 0.5), level)
+      local tile_path = mapLib.tiles_to_path(centerTileX + x - halfX, centerTileY + y - halfY, level)
       local idx = width*(y-1)+x
 
       tiles_path_to_idx[tile_path] = { idx, x, y }
@@ -356,7 +359,7 @@ end
 
 function mapLib.drawTiles(width, xmin, ymin)
   -- Draws the active tile cache into the map viewport.
-  local perfActive = status.perfActive and status.perfProfileAddMs
+  local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
@@ -412,7 +415,7 @@ end
 
 function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, allowStateUpdate)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
-  local perfActive = status.perfActive and status.perfProfileAddMs
+  local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
     perfStartMs = os.clock() * 1000
@@ -420,9 +423,15 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
 
+  local telemetry = status.telemetry
+  local scaleX = status.scaleX
+  local scaleY = status.scaleY
+  local debugEnabled = status.debugEnabled
+  local colors = status.colors
+
   if #tiles == 0 or tiles[1] == nil then
-    if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
-      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
+    if telemetry.lat ~= nil and telemetry.lon ~= nil then
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, level)
     else
       tile_x, tile_y, offset_x, offset_y = 0, 0, 0, 0
     end
@@ -442,7 +451,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     widget.lastZoom = level
     mapLib.loadAndCenterTiles(tile_x or 0, tile_y or 0, offset_x or 0, offset_y or 0, TILES_X, level, 0, 0, 0, 0)
 
-    if viewportChanged and status.debugEnabled and libs and libs.utils and libs.utils.logDebug and libs.tileLoader then
+    if viewportChanged and debugEnabled and libs and libs.utils and libs.utils.logDebug and libs.tileLoader then
       local gridTiles = TILES_X * TILES_Y
       local cacheTiles = libs.tileLoader.getCacheCount and libs.tileLoader.getCacheCount() or 0
       local queueTiles = libs.tileLoader.getQueueLength and libs.tileLoader.getQueueLength() or 0
@@ -451,13 +460,13 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  local vehicleR = math.floor(34 * math.min(status.scaleX, status.scaleY))
+  local vehicleR = math.floor(34 * math.min(scaleX, scaleY))
 
   local doStateUpdate = allowStateUpdate ~= false
 
-  if status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
+  if telemetry.lat ~= nil and telemetry.lon ~= nil then
     if doStateUpdate then
-      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, level)
       local rawLeadX, rawLeadY = getDirectionalLeadFromHeading(heading)
       local leadX, leadY = gateLeadByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
       local prefetchLeadX, prefetchLeadY = gatePrefetchByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
@@ -472,7 +481,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       end
 
       mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
-      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(status.telemetry.lat, status.telemetry.lon, level)
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, level)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
       widget.drawOffsetX = centerX - myScreenX
@@ -509,13 +518,13 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     lastHomePosUpdate = status.getTime()
     if homeNeedsRefresh then
       homeNeedsRefresh = false
-      if status.telemetry.homeLat ~= nil then
-        local h_x, h_y, h_ox, h_oy = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
+      if telemetry.homeLat ~= nil then
+        local h_x, h_y, h_ox, h_oy = mapLib.coord_to_tiles(telemetry.homeLat, telemetry.homeLon, level)
         homeScreenX, homeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, h_x, h_y, h_ox, h_oy, level)
       end
     else
       homeNeedsRefresh = true
-      estimatedHomeGps.lat, estimatedHomeGps.lon = libs.utils.getLatLonFromAngleAndDistance(status.telemetry.homeAngle, status.telemetry.homeDist)
+      estimatedHomeGps.lat, estimatedHomeGps.lon = libs.utils.getLatLonFromAngleAndDistance(telemetry.homeAngle, telemetry.homeDist)
       if estimatedHomeGps.lat ~= nil then
         local e_x, e_y, e_ox, e_oy = mapLib.coord_to_tiles(estimatedHomeGps.lat, estimatedHomeGps.lon, level)
         estimatedHomeScreenX, estimatedHomeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, e_x, e_y, e_ox, e_oy, level)
@@ -524,26 +533,26 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   end
 
   local trailLengthKm = tonumber((status and status.conf and status.conf.mapTrailLength) or 0) or 0
-  if trailLengthKm > 0 and doStateUpdate and status.telemetry.lat ~= nil and status.telemetry.lon ~= nil then
+  if trailLengthKm > 0 and doStateUpdate and telemetry.lat ~= nil and telemetry.lon ~= nil then
     local triggerDist = trailLengthKm * 1000 / 50
     if trailLastLat ~= nil then
-      local delta = libs.utils.haversine(trailLastLat, trailLastLon, status.telemetry.lat, status.telemetry.lon)
+      local delta = libs.utils.haversine(trailLastLat, trailLastLon, telemetry.lat, telemetry.lon)
       trailAccumDist = trailAccumDist + delta
     end
-    trailLastLat = status.telemetry.lat
-    trailLastLon = status.telemetry.lon
+    trailLastLat = telemetry.lat
+    trailLastLon = telemetry.lon
     if trailWpCount == 0 then
       -- First GPS fix: place initial anchor so the dynamic segment starts immediately.
       trailWpCount = 1
-      trailWaypoints[1] = { status.telemetry.lat, status.telemetry.lon }
+      trailWaypoints[1] = { telemetry.lat, telemetry.lon }
     elseif trailAccumDist >= triggerDist then
       trailAccumDist = 0
       if trailWpCount < TRAIL_MAX_WAYPOINTS then
         trailWpCount = trailWpCount + 1
-        trailWaypoints[trailWpCount] = { status.telemetry.lat, status.telemetry.lon }
+        trailWaypoints[trailWpCount] = { telemetry.lat, telemetry.lon }
       else
         table.remove(trailWaypoints, 1)
-        trailWaypoints[TRAIL_MAX_WAYPOINTS] = { status.telemetry.lat, status.telemetry.lon }
+        trailWaypoints[TRAIL_MAX_WAYPOINTS] = { telemetry.lat, telemetry.lon }
       end
     end
   end
@@ -554,8 +563,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     local drawX = myScreenX + renderOffsetX
     local drawY = myScreenY + renderOffsetY
     if heading ~= nil then
-      libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, status.colors.white)
-      libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, status.colors.black)
+      libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, colors.white)
+      libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, colors.black)
     else
       lcd.color(WHITE)
       lcd.drawCircle(drawX, drawY, vehicleR - 3)
@@ -564,8 +573,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
-    local htx, hty, hox, hoy = mapLib.coord_to_tiles(status.telemetry.homeLat, status.telemetry.homeLon, level)
+  if telemetry.homeLat ~= nil and telemetry.homeLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
+    local htx, hty, hox, hoy = mapLib.coord_to_tiles(telemetry.homeLat, telemetry.homeLon, level)
     local homeDrawX = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
     local homeDrawY = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
     local homeCode = libs.drawLib.computeOutCode(homeDrawX, homeDrawY, x + 11, y + 10, x + w - 11, y + h - 10)
@@ -575,7 +584,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   end
 
   if trailLengthKm > 0 and trailWpCount >= 1 and myScreenX ~= nil and uav_tile_x ~= nil then
-    lcd.color(status.colors.yellow)
+    lcd.color(colors.yellow)
     lcd.pen(SOLID)
     local function trailToScreen(lat, lon)
       local tx, ty, ox, oy = mapLib.coord_to_tiles(lat, lon, level)
@@ -596,7 +605,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   if zoomUpdate then
     lcd.color(WHITE)
     lcd.font(FONT_XL)
-    lcd.drawText(x + w/2, y + h/2 - 25*status.scaleY, string.format("ZOOM %d", level), CENTERED)
+    lcd.drawText(x + w/2, y + h/2 - 25*scaleY, string.format("ZOOM %d", level), CENTERED)
     if status.getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
   end
   
