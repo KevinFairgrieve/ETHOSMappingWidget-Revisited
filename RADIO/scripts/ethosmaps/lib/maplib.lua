@@ -29,7 +29,6 @@ local libs = nil
 -- Global map geometry constants and runtime state shared across draw calls.
 local MAP_X = 0
 local MAP_Y = 0
-local DIST_SAMPLES = 10
 
 -- Cached map support state for tiles, screen coordinates, trail history, and redraw throttling.
 local myScreenX, myScreenY
@@ -68,21 +67,6 @@ local estimatedHomeGps = {
   lat = nil,
   lon = nil
 }
-local drawOffsetX = 0
-local drawOffsetY = 0
-
-local lastProcessCycle = 0   -- Initialised to 0; updated from status.getTime() on first cycle.
-
--- Global map geometry constants and runtime state shared across draw calls.
-local processCycle = 0
-
-local avgDistSamples = {}
-local avgDist = 0
-local avgDistSum = 0
-local avgDistSample = 0
-local avgDistSampleCount = 0
-local avgDistLastSampleTime = 0
-avgDistSamples[0] = 0
 
 local coord_to_tiles = nil
 local tiles_to_path = nil
@@ -490,7 +474,6 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       end
 
       mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
-      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, level)
       myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
       widget.drawOffsetX = centerX - myScreenX
@@ -527,7 +510,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     lastHomePosUpdate = status.getTime()
     if homeNeedsRefresh then
       homeNeedsRefresh = false
-      if telemetry.homeLat ~= nil then
+      if telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
         local h_x, h_y, h_ox, h_oy = mapLib.coord_to_tiles(telemetry.homeLat, telemetry.homeLon, level)
         homeScreenX, homeScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, h_x, h_y, h_ox, h_oy, level)
       end

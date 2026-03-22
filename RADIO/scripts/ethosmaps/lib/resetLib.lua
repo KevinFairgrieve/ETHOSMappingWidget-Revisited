@@ -18,7 +18,7 @@ function resetLib.resetLayout(widget)
   -- Clears the loaded layout cache, resets per-screen layout state, and marks the widget for a fresh layout load.
   status.loadCycle = 0
   resetLib.clearTable(status.layout)
-  status.layout = { nil }
+  status.layout = {}
   widget.ready = false
 
   if status.perfActive and status.perfProfileInc then
