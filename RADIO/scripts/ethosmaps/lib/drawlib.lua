@@ -18,6 +18,12 @@
 -- along with this program; if not, see <http://www.gnu.org/licenses>.
 
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local tostring = tostring
+local floor, max, min = math.floor, math.max, math.min
+local sin, cos, rad = math.sin, math.cos, math.rad
+local tinsert = table.insert
+
 local status = nil
 local libs = nil
 
@@ -28,10 +34,16 @@ local topBarValueCache = {}
 local topBarValueCacheCount = 0
 local TOP_BAR_CACHE_MAX = 20
 
+-- Pre-allocated tables reused each frame inside drawTopBar to avoid per-frame allocations.
+local _sensorEntries = {}
+local _sensorNames = {}
+local _candidateFonts_medium = nil  -- lazily filled on first use (FONT constants must be available)
+local _candidateFonts_full   = nil
+
 -- Pre-computed angle offsets for drawRArrow (constants, never change).
-local ARROW_ANG_150  = math.rad(150)
-local ARROW_ANG_N150 = math.rad(-150)
-local ARROW_ANG_180  = math.rad(180)
+local ARROW_ANG_150  = rad(150)
+local ARROW_ANG_N150 = rad(-150)
+local ARROW_ANG_180  = rad(180)
 
 local function safeSensorName(sensor)
   if sensor == nil then
@@ -152,10 +164,10 @@ function drawLib.drawNoGPSData(widget)
   lcd.font(fontBig)
   local textW, textH = lcd.getTextSize("...waiting for GPS")
 
-  local boxW = math.min(math.floor(textW + 80*sx), math.floor(w * 0.88))
-  local boxH = math.floor(textH + 55*sy)
-  local boxX = math.floor((w - boxW) / 2)
-  local boxY = math.floor((h / 2) - boxH / 2) - 15*sy
+  local boxW = min(floor(textW + 80*sx), floor(w * 0.88))
+  local boxH = floor(textH + 55*sy)
+  local boxX = floor((w - boxW) / 2)
+  local boxY = floor((h / 2) - boxH / 2) - 15*sy
 
   lcd.color(RED)
   lcd.drawFilledRectangle(boxX, boxY, boxW, boxH)
@@ -175,34 +187,62 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   local conf = status.conf
   local colors = status.colors
   local top = barTop or 0
-  local barH = barHeight or math.floor(26 * sy)
+  local barH = barHeight or floor(26 * sy)
   local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
   local verticalTiny = w < (status.tinyWidthThreshold or 350)
   local showModelName = w >= 600
   local compactNames = verticalMedium
   local labelFont = TOP_BAR_LABEL_FONT
 
-  local sensorEntries = {
-    { sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}), label = "TX" },
-    { sensor = conf.linkQualitySource, label = nil },
-  }
+  local sensorEntries = _sensorEntries
+  local sensorCount = 0
+
+  -- Slot 1: TX voltage (always present).
+  sensorCount = sensorCount + 1
+  local e1 = sensorEntries[sensorCount]
+  if e1 then e1.sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}); e1.label = "TX"
+  else sensorEntries[sensorCount] = { sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}), label = "TX" } end
+
+  -- Slot 2: link quality (always present).
+  sensorCount = sensorCount + 1
+  local e2 = sensorEntries[sensorCount]
+  if e2 then e2.sensor = conf.linkQualitySource; e2.label = nil
+  else sensorEntries[sensorCount] = { sensor = conf.linkQualitySource, label = nil } end
+
   if not verticalTiny and safeSensorName(conf.userSensor1) ~= nil then
-    table.insert(sensorEntries, { sensor = conf.userSensor1, label = nil })
+    sensorCount = sensorCount + 1
+    local ei = sensorEntries[sensorCount]
+    if ei then ei.sensor = conf.userSensor1; ei.label = nil
+    else sensorEntries[sensorCount] = { sensor = conf.userSensor1, label = nil } end
   end
   if not verticalTiny and safeSensorName(conf.userSensor2) ~= nil then
-    table.insert(sensorEntries, { sensor = conf.userSensor2, label = nil })
+    sensorCount = sensorCount + 1
+    local ei = sensorEntries[sensorCount]
+    if ei then ei.sensor = conf.userSensor2; ei.label = nil
+    else sensorEntries[sensorCount] = { sensor = conf.userSensor2, label = nil } end
   end
   if not verticalTiny and safeSensorName(conf.userSensor3) ~= nil then
-    table.insert(sensorEntries, { sensor = conf.userSensor3, label = nil })
+    sensorCount = sensorCount + 1
+    local ei = sensorEntries[sensorCount]
+    if ei then ei.sensor = conf.userSensor3; ei.label = nil
+    else sensorEntries[sensorCount] = { sensor = conf.userSensor3, label = nil } end
   end
+  -- Clear any leftover slots from a previous frame with more sensors.
+  for i = sensorCount + 1, #sensorEntries do sensorEntries[i] = nil end
 
   -- Pre-cache sensor names to avoid redundant pcall lookups in the font-selection loop.
-  local sensorNames = {}
-  for e = 1, #sensorEntries do
+  local sensorNames = _sensorNames
+  for e = 1, sensorCount do
     sensorNames[e] = safeSensorName(sensorEntries[e].sensor)
   end
+  for i = sensorCount + 1, #sensorNames do sensorNames[i] = nil end
 
-  local candidateFonts = verticalMedium and {FONT_S, FONT_XS} or {FONT_L, FONT_S, FONT_XS}
+  -- Lazily initialise the constant candidate-font tables (ETHOS font globals must be set first).
+  if _candidateFonts_medium == nil then
+    _candidateFonts_medium = {FONT_S, FONT_XS}
+    _candidateFonts_full   = {FONT_L, FONT_S, FONT_XS}
+  end
+  local candidateFonts = verticalMedium and _candidateFonts_medium or _candidateFonts_full
   local modelText = status.modelString or model.name()
   local selectedFont = candidateFonts[#candidateFonts]
   local selectedUsedWidth = 0
@@ -218,7 +258,7 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
     end
 
     local usedWidth = 0
-    for e = 1, #sensorEntries do
+    for e = 1, sensorCount do
       if sensorNames[e] ~= nil then
         local entry = sensorEntries[e]
         local name = getTopBarSensorName(entry.sensor, entry.label, compactNames)
@@ -228,7 +268,7 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
       end
     end
 
-    local availableWidth = math.max(20, (w - 12 * sx) - minTelemetryX)
+    local availableWidth = max(20, (w - 12 * sx) - minTelemetryX)
     selectedFont = candidateFont
     selectedUsedWidth = usedWidth
     selectedAvailableWidth = availableWidth
@@ -252,7 +292,7 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   lcd.drawFilledRectangle(0, top, w, barH)
 
   if showModelName then
-    local modelY = top + math.floor(2 * sy)
+    local modelY = top + floor(2 * sy)
     drawLib.drawText(8*sx, modelY, modelText, selectedFont, colors.barText, LEFT)
     lcd.font(selectedFont)
     local modelW = lcd.getTextSize(modelText)
@@ -260,7 +300,7 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   end
 
   local offset = 12*sx
-  for e = 1, #sensorEntries do
+  for e = 1, sensorCount do
     local entry = sensorEntries[e]
     offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, labelFont, compactNames, top, barH)
   end
@@ -278,7 +318,7 @@ function drawLib.drawTopBarSensor(widget, x, sensor, label, minX, barFont, label
 
   lcd.font(barFont)
   local _, valueH = lcd.getTextSize(valueText)
-  local valueY = (barTop or 0) + math.floor(((barHeight or 0) - valueH) / 2)
+  local valueY = (barTop or 0) + floor(((barHeight or 0) - valueH) / 2)
   local labelY = valueY
 
   drawLib.drawText(x - valW - 2, labelY, name, labelFont, status.colors.barText, RIGHT)
@@ -289,21 +329,21 @@ end
 
 function drawLib.drawRArrow(x,y,r,angle,color)
   -- Draws a rotated arrow primitive used by the map for aircraft heading and home direction overlays.
-  local baseRad = math.rad(angle - 90)
-  local cosB, sinB = math.cos(baseRad), math.sin(baseRad)
+  local baseRad = rad(angle - 90)
+  local cosB, sinB = cos(baseRad), sin(baseRad)
   local x1 = x + r * cosB
   local y1 = y + r * sinB
 
-  local cos2, sin2 = math.cos(baseRad + ARROW_ANG_150), math.sin(baseRad + ARROW_ANG_150)
+  local cos2, sin2 = cos(baseRad + ARROW_ANG_150), sin(baseRad + ARROW_ANG_150)
   local x2 = x + r * cos2
   local y2 = y + r * sin2
 
-  local cos3, sin3 = math.cos(baseRad + ARROW_ANG_N150), math.sin(baseRad + ARROW_ANG_N150)
+  local cos3, sin3 = cos(baseRad + ARROW_ANG_N150), sin(baseRad + ARROW_ANG_N150)
   local x3 = x + r * cos3
   local y3 = y + r * sin3
 
   local r2 = r * 0.5
-  local cos4, sin4 = math.cos(baseRad + ARROW_ANG_180), math.sin(baseRad + ARROW_ANG_180)
+  local cos4, sin4 = cos(baseRad + ARROW_ANG_180), sin(baseRad + ARROW_ANG_180)
   local x4 = x + r2 * cos4
   local y4 = y + r2 * sin4
 

@@ -20,6 +20,14 @@
 
 local mapLib = {}
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local tonumber = tonumber
+local floor, abs, max, min = math.floor, math.abs, math.max, math.min
+local sin, log, atan, deg = math.sin, math.log, math.atan, math.deg
+local pi = math.pi
+local fmt = string.format
+local os_clock = os.clock
+
 local status = nil
 local libs = nil
 
@@ -107,7 +115,7 @@ local function getDirectionalLeadFromHeading(heading)
   end
 
   local normalizedHeading = heading % 360
-  local octant = math.floor((normalizedHeading + 22.5) / 45) % 8
+  local octant = floor((normalizedHeading + 22.5) / 45) % 8
   local octantLead = {
     [0] = { 0, -1 }, -- N
     [1] = { 1, -1 }, -- NE
@@ -164,14 +172,14 @@ local function enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefe
     return
   end
 
-  local leadX = math.max(-1, math.min(1, tonumber(prefetchLeadX) or 0))
-  local leadY = math.max(-1, math.min(1, tonumber(prefetchLeadY) or 0))
+  local leadX = max(-1, min(1, tonumber(prefetchLeadX) or 0))
+  local leadY = max(-1, min(1, tonumber(prefetchLeadY) or 0))
   if leadX == 0 and leadY == 0 then
     return
   end
 
-  local halfX = math.floor(TILES_X / 2 + 0.5)
-  local halfY = math.floor(TILES_Y / 2 + 0.5)
+  local halfX = floor(TILES_X / 2 + 0.5)
+  local halfY = floor(TILES_Y / 2 + 0.5)
 
   if leadX ~= 0 then
     for depth = 1, PREFETCH_STRIP_DEPTH do
@@ -194,9 +202,9 @@ local function enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefe
   end
 end
 
-function mapLib.clip(n, min, max)
+function mapLib.clip(n, lo, hi)
   -- Constrains a numeric value to a valid range before projection and tile math use it.
-  return math.min(math.max(n, min), max)
+  return min(max(n, lo), hi)
 end
 
 function mapLib.tiles_on_level(level)
@@ -228,8 +236,8 @@ function mapLib.google_coord_to_tiles(lat, lng, level)
   lng = mapLib.clip(lng, MinLongitude, MaxLongitude)
 
   local x = (lng + 180) / 360
-  local sinLatitude = math.sin(lat * math.pi / 180)
-  local y = 0.5 - math.log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * math.pi)
+  local sinLatitude = sin(lat * pi / 180)
+  local y = 0.5 - log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * pi)
 
   local mapSizeX, mapSizeY = mapLib.get_tile_matrix_size_pixel(level)
 
@@ -237,32 +245,32 @@ function mapLib.google_coord_to_tiles(lat, lng, level)
   local rx = mapLib.clip(x * mapSizeX + 0.5, 0, mapSizeX - 1)
   local ry = mapLib.clip(y * mapSizeY + 0.5, 0, mapSizeY - 1)
     -- Return tile indexes plus the pixel offset inside the resolved tile.
-  return math.floor(rx/TILES_SIZE), math.floor(ry/TILES_SIZE), math.floor(rx%TILES_SIZE), math.floor(ry%TILES_SIZE)
+  return floor(rx/TILES_SIZE), floor(ry/TILES_SIZE), floor(rx%TILES_SIZE), floor(ry%TILES_SIZE)
 end
 
 function mapLib.gmapcatcher_coord_to_tiles(lat, lon, level)
   -- Projects GPS coordinates into GMapCatcher tile indexes and pixel offsets for the current zoom level.
   local x = world_tiles / 360 * (lon + 180)
-  local e = math.sin(lat * (1/180 * math.pi))
-  local y = world_tiles / 2 + 0.5 * math.log((1+e)/(1-e)) * -1 * tiles_per_radian
-  return math.floor(x % world_tiles), math.floor(y % world_tiles), math.floor((x - math.floor(x)) * TILES_SIZE), math.floor((y - math.floor(y)) * TILES_SIZE)
+  local e = sin(lat * (1/180 * pi))
+  local y = world_tiles / 2 + 0.5 * log((1+e)/(1-e)) * -1 * tiles_per_radian
+  return floor(x % world_tiles), floor(y % world_tiles), floor((x - floor(x)) * TILES_SIZE), floor((y - floor(y)) * TILES_SIZE)
 end
 
 function mapLib.google_tiles_to_path(tile_x, tile_y, level)
   -- Builds the extension-free SD-card path for native Google/OSM tiles in /z/x/y format.
-  return string.format("/%d/%.0f/%.0f", level, tile_x, tile_y)
+  return fmt("/%d/%.0f/%.0f", level, tile_x, tile_y)
 end
 
 function mapLib.esri_tiles_to_path(tile_x, tile_y, level)
   -- Builds the extension-free SD-card path for ESRI tiles in /z/y/x format.
-  return string.format("/%d/%.0f/%.0f", level, tile_y, tile_x)
+  return fmt("/%d/%.0f/%.0f", level, tile_y, tile_x)
 end
 
 function mapLib.gmapcatcher_tiles_to_path(tile_x, tile_y, level)
   -- Builds the relative SD-card path for a GMapCatcher tile from tile coordinates and zoom.
   -- Translate user-facing level (1..20) to the GMapCatcher internal level (-2..17) for the on-disk path.
   local internalLevel = 18 - level
-  return string.format("/%d/%.0f/%.0f/%.0f/s_%.0f.png", internalLevel, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
+  return fmt("/%d/%.0f/%.0f/%.0f/s_%.0f.png", internalLevel, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
 end
 
 function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
@@ -270,7 +278,7 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
-    perfStartMs = os.clock() * 1000
+    perfStartMs = os_clock() * 1000
     status.perfProfileInc("tile_update_calls", 1)
   end
   local now = status.getTime()
@@ -282,8 +290,8 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   lastHeavyUpdate = now
   mapNeedsHeavyUpdate = false
 
-  local windowLeadX = math.max(-1, math.min(1, tonumber(leadX) or 0))
-  local windowLeadY = math.max(-1, math.min(1, tonumber(leadY) or 0))
+  local windowLeadX = max(-1, min(1, tonumber(leadX) or 0))
+  local windowLeadY = max(-1, min(1, tonumber(leadY) or 0))
   local centerTileX = tile_x + windowLeadX
   local centerTileY = tile_y + windowLeadY
 
@@ -292,8 +300,8 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
 
   libs.resetLib.clearTable(tiles_path_to_idx)
 
-  local halfX = math.floor(TILES_X / 2 + 0.5)
-  local halfY = math.floor(TILES_Y / 2 + 0.5)
+  local halfX = floor(TILES_X / 2 + 0.5)
+  local halfY = floor(TILES_Y / 2 + 0.5)
 
   for x=1,TILES_X do
     for y=1,TILES_Y do
@@ -317,13 +325,13 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
 
     -- Enqueue all tile slots for async loading; tiles near the center get high priority
     -- so the aircraft position renders sharply before the outer fringe fills in.
-    local halfX = math.floor(TILES_X / 2 + 0.5)
-    local halfY = math.floor(TILES_Y / 2 + 0.5)
+    local halfX = floor(TILES_X / 2 + 0.5)
+    local halfY = floor(TILES_Y / 2 + 0.5)
     for x = 1, TILES_X do
       for y = 1, TILES_Y do
         local tp = tiles[width * (y - 1) + x]
         if tp ~= nil then
-          local isHighPrio = (math.abs(x - halfX) <= 1 and math.abs(y - halfY) <= 1)
+          local isHighPrio = (abs(x - halfX) <= 1 and abs(y - halfY) <= 1)
           libs.tileLoader.enqueue(tp, isHighPrio)
         end
       end
@@ -338,14 +346,14 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
       status.perfProfileInc("gc_count", 1)
     end
     if status.debugEnabled and libs and libs.utils then
-      libs.utils.logDebug("TILE", string.format("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
+      libs.utils.logDebug("TILE", fmt("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
     end
   end
 
   enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY)
 
   if perfActive then
-    status.perfProfileAddMs("tile_update_ms", os.clock() * 1000 - perfStartMs)
+    status.perfProfileAddMs("tile_update_ms", os_clock() * 1000 - perfStartMs)
   end
 end
 
@@ -355,7 +363,7 @@ function mapLib.drawTiles(width, xmin, ymin)
   local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
-    perfStartMs = os.clock() * 1000
+    perfStartMs = os_clock() * 1000
   end
 
   -- Cache sentinel bitmaps and getBitmap reference outside the loop so each
@@ -411,7 +419,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
-    perfStartMs = os.clock() * 1000
+    perfStartMs = os_clock() * 1000
   end
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
@@ -449,11 +457,11 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       local cacheTiles = libs.tileLoader.getCacheCount and libs.tileLoader.getCacheCount() or 0
       local queueTiles = libs.tileLoader.getQueueLength and libs.tileLoader.getQueueLength() or 0
       local totalTiles = cacheTiles + queueTiles
-      libs.utils.logDebug("TILE", string.format("VIEWPORT_CHANGE | viewport=%dx%d | raster=%dx%d | rasterTiles=%d | cache=%d | queue=%d | total=%d", w, h, TILES_X, TILES_Y, gridTiles, cacheTiles, queueTiles, totalTiles), true)
+      libs.utils.logDebug("TILE", fmt("VIEWPORT_CHANGE | viewport=%dx%d | raster=%dx%d | rasterTiles=%d | cache=%d | queue=%d | total=%d", w, h, TILES_X, TILES_Y, gridTiles, cacheTiles, queueTiles, totalTiles), true)
     end
   end
 
-  local vehicleR = math.floor(34 * math.min(scaleX, scaleY))
+  local vehicleR = floor(34 * min(scaleX, scaleY))
 
   local doStateUpdate = allowStateUpdate ~= false
 
@@ -468,8 +476,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       local centerX = x + (w / 2)
       local centerY = y + (h / 2)
       if myScreenX == nil or myScreenY == nil or
-         math.abs(centerX - myScreenX) > RASTER_REBUILD_OFFSET_THRESHOLD or
-         math.abs(centerY - myScreenY) > RASTER_REBUILD_OFFSET_THRESHOLD then
+         abs(centerX - myScreenX) > RASTER_REBUILD_OFFSET_THRESHOLD or
+         abs(centerY - myScreenY) > RASTER_REBUILD_OFFSET_THRESHOLD then
         mapNeedsHeavyUpdate = true
       end
 
@@ -481,10 +489,10 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  local minX = math.max(0, MAP_X)
-  local minY = math.max(0, MAP_Y)
-  local maxX = math.min(minX + w, minX + TILES_X * TILES_SIZE)
-  local maxY = math.min(minY + h, minY + TILES_Y * TILES_SIZE)
+  local minX = max(0, MAP_X)
+  local minY = max(0, MAP_Y)
+  local maxX = min(minX + w, minX + TILES_X * TILES_SIZE)
+  local maxY = min(minY + h, minY + TILES_Y * TILES_SIZE)
   local renderOffsetX = widget.drawOffsetX
   local renderOffsetY = widget.drawOffsetY
 
@@ -560,7 +568,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
         -- Angle between the two segments via atan2 of cross/dot product.
         local cross = ax * by - ay * bx
         local dot   = ax * bx + ay * by
-        local bendDeg = math.abs(math.deg(math.atan(cross, dot)))
+        local bendDeg = abs(deg(atan(cross, dot)))
         local threshold = tonumber((status.conf and status.conf.mapTrailHeadingThreshold) or 5) or 5
         bendExceeded = (bendDeg >= threshold)
       end
@@ -679,7 +687,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   if zoomUpdate then
     lcd.color(WHITE)
     lcd.font(FONT_XL)
-    lcd.drawText(x + w/2, y + h/2 - 25*scaleY, string.format("ZOOM %d", level), CENTERED)
+    lcd.drawText(x + w/2, y + h/2 - 25*scaleY, fmt("ZOOM %d", level), CENTERED)
     if status.getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
   end
   
@@ -728,11 +736,11 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     libs.tileLoader.clearCache()
 
     world_tiles = mapLib.tiles_on_level(level)
-    tiles_per_radian = world_tiles / (2 * math.pi)
+    tiles_per_radian = world_tiles / (2 * pi)
     configureProjectionHelpers(provider)
     tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
     local scaleDistance = getScaleDistanceForLevel(level)
-    scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
+    scaleLabel = fmt("%.0f%s", scaleDistance, status.conf.distUnitLabel)
     scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
     lastZoomLevel = level
@@ -774,7 +782,7 @@ function mapLib.calculateScale(level)
   local tile_dim = (40075017 / world_tiles) * status.conf.distUnitScale
   local scaleDistance = getScaleDistanceForLevel(level)
 
-  scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
+  scaleLabel = fmt("%.0f%s", scaleDistance, status.conf.distUnitLabel)
   scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
   return scaleLen, scaleLabel

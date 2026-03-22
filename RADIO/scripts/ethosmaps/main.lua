@@ -17,6 +17,16 @@
 -- You should have received a copy of the GNU General Public License
 -- along with this program; if not, see <http://www.gnu.org/licenses>.
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local type = type
+local tostring = tostring
+local tonumber = tonumber
+local pairs = pairs
+local floor, abs, max, min, ceil = math.floor, math.abs, math.max, math.min, math.ceil
+local fmt = string.format
+local tinsert, tremove, tconcat = table.insert, table.remove, table.concat
+local os_clock, os_time = os.clock, os.time
+
 
 local function getTime()
   -- Canonical time source for the entire widget, returning centiseconds.
@@ -32,12 +42,12 @@ local function getTime()
     end
   end
 
-  local wallSec = os.time()
+  local wallSec = os_time()
   if type(wallSec) == "number" and wallSec > 0 then
     return wallSec * 100
   end
 
-  return os.clock() * 100
+  return os_clock() * 100
 end
 
 local logDebugSessionStart
@@ -205,12 +215,12 @@ local mapStatus = {
 
 -- Performance profiler helper functions (must be defined before paint/wakeup/event use them).
 local function perfNowMs()
-  return os.clock() * 1000
+  return os_clock() * 1000
 end
 
 local function perfWindowNowMs()
   -- Use wall-clock seconds for window scheduling; os.clock() is CPU-time and can stall under low load.
-  local wallSec = os.time()
+  local wallSec = os_time()
   if type(wallSec) == "number" and wallSec > 0 then
     return wallSec * 1000
   end
@@ -301,15 +311,15 @@ end
 
 local function perfValueText(value, decimals)
   local scale = 10 ^ (decimals or 0)
-  return tostring(math.floor(value * scale + 0.5) / scale)
+  return tostring(floor(value * scale + 0.5) / scale)
 end
 
 local function perfTableCell(label, value)
-  return string.format("%-16s", label .. "=" .. tostring(value))
+  return fmt("%-16s", label .. "=" .. tostring(value))
 end
 
 local function perfTableRow(rowLabel, firstCell, secondCell, thirdCell)
-  return string.format("| %-8s | %-16s | %-16s | %-16s |", rowLabel, firstCell, secondCell, thirdCell)
+  return fmt("| %-8s | %-16s | %-16s | %-16s |", rowLabel, firstCell, secondCell, thirdCell)
 end
 
 -- Export performance profiler callbacks to mapStatus so libraries can access them.
@@ -346,7 +356,7 @@ local function makeSourceWakeup(sourceName)
 
     local out = telemetryValue * scale
     if decimals == 0 then
-      out = math.floor(0.5 + out)
+      out = floor(0.5 + out)
     end
     pcall(function() source:value(out) end)
   end
@@ -461,7 +471,7 @@ local function bgtasks(widget)
   if not mapStatus.sessionLogged then
     logDebugSessionStart("bgtasks-retry")
   end
-  local gpsData = {}
+  local gpsLat, gpsLon = nil, nil
   local sensorHeadingActive = false
   local sensorSpeedActive = false
   if mapStatus.conf.telemetrySourceMode == 2 then
@@ -469,10 +479,10 @@ local function bgtasks(widget)
     local srcLat = mapStatus.conf.sensorGpsLat
     local srcLon = mapStatus.conf.sensorGpsLon
     if srcLat ~= nil and type(srcLat.value) == "function" then
-      gpsData.lat = srcLat:value()
+      gpsLat = srcLat:value()
     end
     if srcLon ~= nil and type(srcLon.value) == "function" then
-      gpsData.lon = srcLon:value()
+      gpsLon = srcLon:value()
     end
     -- Optional heading source → telemetry.yaw (overrides calculated COG).
     local srcHdg = mapStatus.conf.sensorHeading
@@ -500,12 +510,12 @@ local function bgtasks(widget)
     if cachedGpsSrcLon == nil then
       cachedGpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
     end
-    gpsData.lat = cachedGpsSrcLat and cachedGpsSrcLat:value() or nil
-    gpsData.lon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
+    gpsLat = cachedGpsSrcLat and cachedGpsSrcLat:value() or nil
+    gpsLon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
   end
-  if gpsData.lat ~= nil and gpsData.lon ~= nil then
-    mapStatus.telemetry.lat = gpsData.lat
-    mapStatus.telemetry.lon = gpsData.lon
+  if gpsLat ~= nil and gpsLon ~= nil then
+    mapStatus.telemetry.lat = gpsLat
+    mapStatus.telemetry.lon = gpsLon
 
     -- Log GPS position at most once every 15 seconds to avoid flooding the debug log.
     if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
@@ -513,7 +523,7 @@ local function bgtasks(widget)
       local lon = mapStatus.telemetry.lon or 0
       local gpsLogInterval = 1500 -- centiseconds (15 seconds)
       if now - (mapStatus.lastGpsLogTime or 0) >= gpsLogInterval then
-        mapLibs.utils.logDebug("GPS", string.format("lat=%.6f lon=%.6f", lat, lon))
+        mapLibs.utils.logDebug("GPS", fmt("lat=%.6f lon=%.6f", lat, lon))
         mapStatus.lastGpsLogTime = now
         mapStatus.lastLoggedLat = lat
         mapStatus.lastLoggedLon = lon
@@ -556,8 +566,8 @@ local function bgtasks(widget)
         mapStatus.telemetry.strLat = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lat)
         mapStatus.telemetry.strLon = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lon, mapStatus.telemetry.lat)
       else
-        mapStatus.telemetry.strLat = string.format("%.06f", mapStatus.telemetry.lat)
-        mapStatus.telemetry.strLon = string.format("%.06f", mapStatus.telemetry.lon)
+        mapStatus.telemetry.strLat = fmt("%.06f", mapStatus.telemetry.lat)
+        mapStatus.telemetry.strLon = fmt("%.06f", mapStatus.telemetry.lon)
       end
     end
     -- Only derive COG from GPS movement when no external heading source provided a value.
@@ -657,11 +667,11 @@ local function event(widget, category, value, x, y)
     end
 
     if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
-      mapLibs.utils.logDebug("TOUCH", string.format("value=%s x=%s y=%s", tostring(value), tostring(x), tostring(y)))
+      mapLibs.utils.logDebug("TOUCH", fmt("value=%s x=%s y=%s", tostring(value), tostring(x), tostring(y)))
     end
 
     local scaleFactor = 0.15 + 0.8 * mapStatus.scaleX
-    local btnSize = math.floor(52 * scaleFactor)
+    local btnSize = floor(52 * scaleFactor)
     local btnX = 12 * mapStatus.scaleX
     local ultraTiny =
       (mapStatus.widgetWidth < (mapStatus.tinyWidthThreshold or 350)) and
@@ -679,11 +689,11 @@ local function event(widget, category, value, x, y)
 
     local touchPadding
     if ultraTiny then
-      local maxUltraPadding = math.floor((mapStatus.widgetHeight - 2 * (btnSize + btnX)) / 2) - 1
+      local maxUltraPadding = floor((mapStatus.widgetHeight - 2 * (btnSize + btnX)) / 2) - 1
       if maxUltraPadding < 0 then
         maxUltraPadding = 0
       end
-      touchPadding = math.min(12, maxUltraPadding)
+      touchPadding = min(12, maxUltraPadding)
     else
       touchPadding = 20
     end
@@ -713,7 +723,7 @@ local function event(widget, category, value, x, y)
 
     -- Evaluate minus first so lower-zone taps win in edge overlap scenarios.
     if hitMinus then
-      mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
+      mapStatus.mapZoomLevel = max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
       mapStatus.consumeZoomRelease = true
       markMapDirty()
       if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
@@ -721,7 +731,7 @@ local function event(widget, category, value, x, y)
       end
 
     elseif hitPlus then
-      mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
+      mapStatus.mapZoomLevel = min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
       mapStatus.consumeZoomRelease = true
       markMapDirty()
       if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
@@ -761,8 +771,8 @@ local function menu(widget)
     return {
       { "Maps: Reset", function() reset(widget) end },
       { "Maps: Set Home", function() setHome(widget) end },
-      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1); markMapDirty() end},
-      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1); markMapDirty() end},
+      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1); markMapDirty() end},
+      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1); markMapDirty() end},
     }
   end
   return { { "Maps: Reset", function() reset(widget) end } }
@@ -1031,11 +1041,11 @@ end
 local function getProviderRootCandidates(provider)
   local roots = {}
   if provider == 1 then
-    table.insert(roots, "/bitmaps/yaapu/maps")
+    tinsert(roots, "/bitmaps/yaapu/maps")
     return roots
   end
   local folderName = PROVIDER_FOLDER_NAMES[provider] or ("PROVIDER" .. tostring(provider or ""))
-  table.insert(roots, "/bitmaps/ethosmaps/maps/" .. folderName)
+  tinsert(roots, "/bitmaps/ethosmaps/maps/" .. folderName)
   return roots
 end
 
@@ -1126,12 +1136,12 @@ local function getAvailableProviderChoices(forceRefresh)
       end
     end
     if available then
-      table.insert(choices, {MAP_PROVIDER_LABELS[provider], provider})
+      tinsert(choices, {MAP_PROVIDER_LABELS[provider], provider})
     end
   end
 
   if #choices == 0 then
-    table.insert(choices, {"NONE", 0})
+    tinsert(choices, {"NONE", 0})
   end
   return choices
 end
@@ -1145,12 +1155,12 @@ local function getAvailableMapTypeChoices(provider, forceRefresh)
   for typeId=1,5 do
     local folder = getMapTypeFolder(provider, typeId)
     if folder ~= nil and mapTypeFolderExists(provider, typeId) then
-      table.insert(choices, {MAP_TYPE_LABELS[typeId], typeId})
+      tinsert(choices, {MAP_TYPE_LABELS[typeId], typeId})
     end
   end
 
   if #choices == 0 then
-    table.insert(choices, {"NONE", 0})
+    tinsert(choices, {"NONE", 0})
   end
   return choices
 end
@@ -1165,17 +1175,17 @@ local function getAvailableZoomBounds(provider, mapTypeId)
 
   local searchRoots = {}
   if provider == 2 then
-    table.insert(searchRoots, "/bitmaps/ethosmaps/maps/GOOGLE/" .. folder)
+    tinsert(searchRoots, "/bitmaps/ethosmaps/maps/GOOGLE/" .. folder)
     local yaapuFolder = getGoogleMapTypeYaapuName(mapTypeId)
     if yaapuFolder ~= nil then
-      table.insert(searchRoots, "/bitmaps/yaapu/maps/" .. yaapuFolder)
+      tinsert(searchRoots, "/bitmaps/yaapu/maps/" .. yaapuFolder)
     end
   elseif provider == 1 then
-    table.insert(searchRoots, "/bitmaps/yaapu/maps/" .. folder)
+    tinsert(searchRoots, "/bitmaps/yaapu/maps/" .. folder)
   else
     local roots = getProviderRootCandidates(provider)
     for i = 1, #roots do
-      table.insert(searchRoots, roots[i] .. "/" .. folder)
+      tinsert(searchRoots, roots[i] .. "/" .. folder)
     end
   end
 
@@ -1187,7 +1197,7 @@ local function getAvailableZoomBounds(provider, mapTypeId)
     if type(dirs) == "table" then
       for j = 1, #dirs do
         local zoom = tonumber(dirs[j])
-        if zoom ~= nil and zoom >= 1 and zoom <= 20 and math.floor(zoom) == zoom then
+        if zoom ~= nil and zoom >= 1 and zoom <= 20 and floor(zoom) == zoom then
           if minZoom == nil or zoom < minZoom then
             minZoom = zoom
           end
@@ -1288,7 +1298,7 @@ getSortedDirectories = function(path)
       local name = rawName:gsub("/+$", "")
       if not seen[name] then
         seen[name] = true
-        table.insert(result, name)
+        tinsert(result, name)
       end
     end
   end
@@ -1303,7 +1313,7 @@ local function getRootPathCandidates(rootPath)
   local function addCandidate(path)
     if path ~= nil and path ~= "" and not seen[path] then
       seen[path] = true
-      table.insert(candidates, path)
+      tinsert(candidates, path)
     end
   end
 
@@ -1393,7 +1403,7 @@ local function logSettingsSnapshot()
 
   local keys = {}
   for key in pairs(mapStatus.conf) do
-    table.insert(keys, key)
+    tinsert(keys, key)
   end
   table.sort(keys)
 
@@ -1472,7 +1482,7 @@ local function ensureAvailableMapSelections()
   end
 
   if oldProvider ~= mapStatus.conf.mapProvider or oldMapTypeId ~= mapStatus.conf.mapTypeId then
-    local key = string.format("provider:%s->%s|mapType:%s->%s", tostring(oldProvider), tostring(mapStatus.conf.mapProvider), tostring(oldMapTypeId), tostring(mapStatus.conf.mapTypeId))
+    local key = fmt("provider:%s->%s|mapType:%s->%s", tostring(oldProvider), tostring(mapStatus.conf.mapProvider), tostring(oldMapTypeId), tostring(mapStatus.conf.mapTypeId))
     if mapStatus.lastSelectionAutoFixKey ~= key then
       logMapSelectionAutofix("Auto-adjusted map selection because configured provider/map type folders are not available (" .. key .. ")")
       mapStatus.lastSelectionAutoFixKey = key
@@ -1503,32 +1513,32 @@ local function applyConfig()
   end
 
   if mapStatus.conf.mapProvider == 0 then
-    mapStatus.mapZoomLevel = math.max(1, mapStatus.conf.mapZoomMin or 1)
+    mapStatus.mapZoomLevel = max(1, mapStatus.conf.mapZoomMin or 1)
   else
-    local min = mapStatus.conf.mapZoomMin or 1
-    local max = mapStatus.conf.mapZoomMax or 20
+    local zMin = mapStatus.conf.mapZoomMin or 1
+    local zMax = mapStatus.conf.mapZoomMax or 20
     local def = mapStatus.conf.mapZoomDefault or 18
 
     local availableMin, availableMax = getAvailableZoomBounds(mapStatus.conf.mapProvider, mapStatus.conf.mapTypeId)
     if availableMin ~= nil and availableMax ~= nil then
-      min = math.max(min, availableMin)
-      max = math.min(max, availableMax)
-      if max < min then
-        min = availableMin
-        max = availableMax
+      zMin = max(zMin, availableMin)
+      zMax = min(zMax, availableMax)
+      if zMax < zMin then
+        zMin = availableMin
+        zMax = availableMax
       end
-      mapStatus.conf.mapZoomMin = min
-      mapStatus.conf.mapZoomMax = max
+      mapStatus.conf.mapZoomMin = zMin
+      mapStatus.conf.mapZoomMax = zMax
     end
 
-    if max < min then
-      max = min
-      mapStatus.conf.mapZoomMax = max
+    if zMax < zMin then
+      zMax = zMin
+      mapStatus.conf.mapZoomMax = zMax
     end
-    if def < min then
-      def = min
-    elseif def > max then
-      def = max
+    if def < zMin then
+      def = zMin
+    elseif def > zMax then
+      def = zMax
     end
 
     mapStatus.conf.mapZoomDefault = def

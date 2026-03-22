@@ -24,6 +24,15 @@
 
 local tileLoader = {}
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local type = type
+local tostring = tostring
+local tonumber = tonumber
+local pairs = pairs
+local floor, max, min = math.floor, math.max, math.min
+local fmt = string.format
+local io_open = io.open
+
 local status = nil
 local libs   = nil
 
@@ -73,7 +82,7 @@ local lastNoTilesLogKey      = nil
 -- ── File I/O helpers ─────────────────────────────────────────────────────────
 
 local function fileExists(path)
-  local f = io.open(path, "r")
+  local f = io_open(path, "r")
   if f ~= nil then
     io.close(f)
     return true
@@ -94,7 +103,7 @@ local function getGoogleFallbackBasePath(mapType, tilePath)
   local fallbackTilePath = tilePath
   local z, x, y = tilePath:match("^/(%d+)/(%d+)/(%d+)$")
   if z ~= nil and x ~= nil and y ~= nil then
-    fallbackTilePath = string.format("/%s/%s/s_%s", z, y, x)
+    fallbackTilePath = fmt("/%s/%s/s_%s", z, y, x)
   end
   return "/bitmaps/yaapu/maps/" .. yaapuMapType .. fallbackTilePath
 end
@@ -177,7 +186,7 @@ local function loadTileFromDisk(tilePath)
   if bmp ~= nil then
     -- Log the tile format the first time it is seen for this provider+mapType combination.
     if status.debugEnabled and libs and libs.utils and libs.utils.logDebug then
-      local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
+      local logKey = fmt("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
       if lastTileFormatLogByKey[logKey] == nil then
         local ext    = (type(loadedPath) == "string" and (loadedPath:match("%.([%a%d]+)$") or "unknown"):lower()) or "unknown"
         local source = "ethosmaps"
@@ -195,7 +204,7 @@ local function loadTileFromDisk(tilePath)
 
   -- No file found – log once per provider+mapType, then return the shared nomap sentinel.
   if status.debugEnabled and libs and libs.utils and libs.utils.logDebug then
-    local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
+    local logKey = fmt("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
     if lastNoTilesLogKey ~= logKey then
       libs.utils.logDebug("TILE", "No tile files found for " .. logKey .. "; using fallback bitmap", true)
       if type(tilePath) == "string" then
@@ -344,10 +353,10 @@ function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, l
     return 0
   end
 
-  local leadTileX = math.max(-1, math.min(1, tonumber(leadX) or 0))
-  local leadTileY = math.max(-1, math.min(1, tonumber(leadY) or 0))
-  local keepTilesX = math.max(1, tonumber(tilesX) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
-  local keepTilesY = math.max(1, tonumber(tilesY) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
+  local leadTileX = max(-1, min(1, tonumber(leadX) or 0))
+  local leadTileY = max(-1, min(1, tonumber(leadY) or 0))
+  local keepTilesX = max(1, tonumber(tilesX) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
+  local keepTilesY = max(1, tonumber(tilesY) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
 
   local keepMinX = 1 - TILE_CACHE_RING_TILES
   local keepMaxX = keepTilesX + TILE_CACHE_RING_TILES
@@ -370,8 +379,8 @@ function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, l
   end
 
   local keep  = {}
-  local halfX = math.floor(keepTilesX / 2 + 0.5)
-  local halfY = math.floor(keepTilesY / 2 + 0.5)
+  local halfX = floor(keepTilesX / 2 + 0.5)
+  local halfY = floor(keepTilesY / 2 + 0.5)
 
   for x = keepMinX, keepMaxX do
     for y = keepMinY, keepMaxY do

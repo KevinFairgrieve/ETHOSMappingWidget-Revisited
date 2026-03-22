@@ -20,6 +20,17 @@
 
 local utils = {}
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local type = type
+local tostring = tostring
+local floor, abs = math.floor, math.abs
+local sin, cos, rad, asin, sqrt, atan, deg = math.sin, math.cos, math.rad, math.asin, math.sqrt, math.atan, math.deg
+local pi = math.pi
+local fmt = string.format
+local io_open = io.open
+local os_rename, os_remove = os.rename, os.remove
+local tinsert = table.insert
+
 local status = nil
 local libs = nil
 
@@ -61,7 +72,7 @@ function utils.performRollover()
   
   -- Count the current number of log lines before choosing how much history to keep.
   local totalLines = 0
-  local fCount = io.open(debugLogPath, "r")
+  local fCount = io_open(debugLogPath, "r")
   if fCount then
     local line = fCount:read("*l")
     while line do
@@ -75,11 +86,11 @@ function utils.performRollover()
   end
 
   -- Copy only the newest 70% of the configured log limit into the replacement file.
-  local keepCount = math.floor(maxLogLines * 0.7)  -- Example: keep 3500 lines when the limit is 5000.
+  local keepCount = floor(maxLogLines * 0.7)  -- Example: keep 3500 lines when the limit is 5000.
   local skipCount = totalLines - keepCount         -- Skip the oldest lines first.
 
-  local f  = io.open(debugLogPath, "r")
-  local f2 = io.open(tmpPath, "w")
+  local f  = io_open(debugLogPath, "r")
+  local f2 = io_open(tmpPath, "w")
   
   if f and f2 then
     local lineIndex = 0
@@ -99,9 +110,9 @@ function utils.performRollover()
     
     -- Protect file operations with pcall to avoid runtime aborts on rename/remove failures.
     pcall(function()
-      os.rename(debugLogPath, backupPath)
-      os.rename(tmpPath, debugLogPath)
-      os.remove(backupPath)
+      os_rename(debugLogPath, backupPath)
+      os_rename(tmpPath, debugLogPath)
+      os_remove(backupPath)
     end)
     
     utils.debugLineCount = keepCount + 1
@@ -114,7 +125,7 @@ function utils.performRollover()
     -- Ensure all opened handles are closed and the temporary file is cleaned up on failure.
     if f then f:close() end
     if f2 then f2:close() end
-    os.remove(tmpPath)
+    os_remove(tmpPath)
   end
 end
 
@@ -126,7 +137,7 @@ local function initDebugLineCount()
   end
 
   local count = 0
-  local f = io.open(debugLogPath, "r")
+  local f = io_open(debugLogPath, "r")
   if f then
     local line = f:read("*l")
     while line do
@@ -165,20 +176,20 @@ function utils.logDebug(category, message, force)
   if not force and now - lastLogWrite < 10 then return end
   lastLogWrite = now
 
-  local timestamp = string.format("%02d:%02d:%02d.%02d",
-    math.floor(now/360000)%24,
-    math.floor(now/6000)%60,
-    math.floor(now/100)%60,
-    math.floor(now % 100))
+  local timestamp = fmt("%02d:%02d:%02d.%02d",
+    floor(now/360000)%24,
+    floor(now/6000)%60,
+    floor(now/100)%60,
+    floor(now % 100))
 
-  local cat = string.format("%-8s", category)
+  local cat = fmt("%-8s", category)
   local line = timestamp .. " | " .. cat .. " | " .. tostring(message) .. "\n"
 
   local function writeLines(lines)
     if #lines == 0 then
       return
     end
-    local f = io.open(debugLogPath, "a")
+    local f = io_open(debugLogPath, "a")
     if f then
       for i = 1, #lines do
         f:write(lines[i])
@@ -210,7 +221,7 @@ function utils.logDebug(category, message, force)
     writeLines({line})
     lastLogFlush = now
   else
-    table.insert(logBuffer, line)
+    tinsert(logBuffer, line)
     if #logBuffer >= maxBufferedLines then
       flushBuffer(true)
     else
@@ -239,7 +250,7 @@ function utils.flushLogs(force)
     return
   end
 
-  local f = io.open(debugLogPath, "a")
+  local f = io_open(debugLogPath, "a")
   if f then
     for i = 1, #logBuffer do
       f:write(logBuffer[i])
@@ -257,32 +268,32 @@ end
 
 function utils.haversine(lat1, lon1, lat2, lon2)
   -- Converts two GPS coordinates into a great-circle distance in meters for speed, trail, and home calculations.
-  local lat1 = lat1 * math.pi / 180
-  local lon1 = lon1 * math.pi / 180
-  local lat2 = lat2 * math.pi / 180
-  local lon2 = lon2 * math.pi / 180
+  local lat1 = lat1 * pi / 180
+  local lon1 = lon1 * pi / 180
+  local lat2 = lat2 * pi / 180
+  local lon2 = lon2 * pi / 180
 
   local lat_dist = lat2 - lat1
   local lon_dist = lon2 - lon1
-  local lat_hsin  = math.sin(lat_dist/2)^2
-  local lon_hsin  = math.sin(lon_dist/2)^2
+  local lat_hsin  = sin(lat_dist/2)^2
+  local lon_hsin  = sin(lon_dist/2)^2
 
-  local a = lat_hsin + math.cos(lat1) * math.cos(lat2) * lon_hsin
-  return 2 * 6372.8 * math.asin(math.sqrt(a)) * 1000
+  local a = lat_hsin + cos(lat1) * cos(lat2) * lon_hsin
+  return 2 * 6372.8 * asin(sqrt(a)) * 1000
 end
 
 function utils.getAngleFromLatLon(lat1, lon1, lat2, lon2)
   -- Calculates the bearing from one GPS coordinate to another and returns the heading in degrees.
-  local la1 = math.rad(lat1)
-  local lo1 = math.rad(lon1)
-  local la2 = math.rad(lat2)
-  local lo2 = math.rad(lon2)
+  local la1 = rad(lat1)
+  local lo1 = rad(lon1)
+  local la2 = rad(lat2)
+  local lo2 = rad(lon2)
 
-  local y = math.sin(lo2-lo1) * math.cos(la2);
-  local x = math.cos(la1)*math.sin(la2) - math.sin(la1)*math.cos(la2)*math.cos(lo2-lo1);
-  local a = math.atan(y, x);
+  local y = sin(lo2-lo1) * cos(la2);
+  local x = cos(la1)*sin(la2) - sin(la1)*cos(la2)*cos(lo2-lo1);
+  local a = atan(y, x);
 
-  return (a*180/math.pi + 360) % 360 -- Returned in degrees.
+  return (a*180/pi + 360) % 360 -- Returned in degrees.
 end
 
 function utils.updateCog()
@@ -319,28 +330,28 @@ function utils.getLatLonFromAngleAndDistance(angle, distance)
   if status.telemetry.lat == nil or status.telemetry.lon == nil then
     return nil,nil -- Safeguard: projection requires a valid current GPS position.
   end
-  local lat1 = math.rad(status.telemetry.lat)
-  local lon1 = math.rad(status.telemetry.lon)
+  local lat1 = rad(status.telemetry.lat)
+  local lon1 = rad(status.telemetry.lon)
   local Ad = distance/(6371000) -- Angular distance in radians for Earth-radius based projection.
-  local lat2 = math.asin( math.sin(lat1) * math.cos(Ad) + math.cos(lat1) * math.sin(Ad) * math.cos( math.rad(angle)) )
-  local lon2 = lon1 + math.atan( math.sin( math.rad(angle) ) * math.sin(Ad) * math.cos(lat1) , math.cos(Ad) - math.sin(lat1) * math.sin(lat2))
-  return math.deg(lat2), math.deg(lon2)
+  local lat2 = asin( sin(lat1) * cos(Ad) + cos(lat1) * sin(Ad) * cos( rad(angle)) )
+  local lon2 = lon1 + atan( sin( rad(angle) ) * sin(Ad) * cos(lat1) , cos(Ad) - sin(lat1) * sin(lat2))
+  return deg(lat2), deg(lon2)
 end
 
 function utils.decToDMS(dec,lat)
   -- Converts decimal degrees into a compact DMS string for overlay text and telemetry labels.
-  local D = math.floor(math.abs(dec))
-  local M = (math.abs(dec) - D)*60
-  local S = (math.abs((math.abs(dec) - D)*60) - M)*60
-	return D .. string.format("°%04.2f", M) .. (lat and (dec >= 0 and "E" or "W") or (dec >= 0 and "N" or "S"))
+  local D = floor(abs(dec))
+  local M = (abs(dec) - D)*60
+  local S = (abs((abs(dec) - D)*60) - M)*60
+	return D .. fmt("°%04.2f", M) .. (lat and (dec >= 0 and "E" or "W") or (dec >= 0 and "N" or "S"))
 end
 
 function utils.decToDMSFull(dec,lat)
   -- Converts decimal degrees into a full DMS string for detailed coordinate displays.
-  local D = math.floor(math.abs(dec))
-  local M = math.floor((math.abs(dec) - D)*60)
-  local S = (math.abs((math.abs(dec) - D)*60) - M)*60
-	return D .. string.format("°%d'%04.1f", M, S) .. (lat and (dec >= 0 and "E" or "W") or (dec >= 0 and "N" or "S"))
+  local D = floor(abs(dec))
+  local M = floor((abs(dec) - D)*60)
+  local S = (abs((abs(dec) - D)*60) - M)*60
+	return D .. fmt("°%d'%04.1f", M, S) .. (lat and (dec >= 0 and "E" or "W") or (dec >= 0 and "N" or "S"))
 end
 
 function utils.init(param_status, param_libs)
