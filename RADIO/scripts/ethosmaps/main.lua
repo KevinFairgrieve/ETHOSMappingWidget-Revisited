@@ -1864,7 +1864,7 @@ local function configure(widget)
   widget.sensorSpeedField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0")
+  form.addStaticText(line, nil, "1.1.0")
 
 end
 
