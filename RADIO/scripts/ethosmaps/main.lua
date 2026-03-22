@@ -28,25 +28,30 @@ local tinsert, tremove, tconcat = table.insert, table.remove, table.concat
 local os_clock, os_time = os.clock, os.time
 
 
+local _getTimeImpl = nil
+
 local function getTime()
   -- Canonical time source for the entire widget, returning centiseconds.
-  -- Uses a monotonic wall-clock-like timer when available.
-  -- os.clock() tracks CPU time and can stall when the widget is not in fullscreen,
-  -- which pauses scheduler-driven redraws.
-  -- Published as status.getTime — every library must use that reference
-  -- instead of defining its own copy.
+  -- Caches the winning source on first successful call to avoid re-probing each frame.
+  if _getTimeImpl ~= nil then
+    return _getTimeImpl()
+  end
+
   if system ~= nil and type(system.getTimeCounter) == "function" then
     local ms = system.getTimeCounter()
     if type(ms) == "number" and ms >= 0 then
+      _getTimeImpl = function() return system.getTimeCounter() / 10 end
       return ms / 10
     end
   end
 
   local wallSec = os_time()
   if type(wallSec) == "number" and wallSec > 0 then
+    _getTimeImpl = function() return os_time() * 100 end
     return wallSec * 100
   end
 
+  _getTimeImpl = function() return os_clock() * 100 end
   return os_clock() * 100
 end
 
