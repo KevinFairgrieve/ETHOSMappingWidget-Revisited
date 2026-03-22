@@ -27,20 +27,7 @@ local tileLoader = {}
 local status = nil
 local libs   = nil
 
-local function flagEnabled(value)
-  if value == true then
-    return true
-  end
-  local valueType = type(value)
-  if valueType == "number" then
-    return value ~= 0
-  end
-  if valueType == "string" then
-    local normalized = string.lower(value)
-    return normalized == "true" or normalized == "1" or normalized == "on"
-  end
-  return false
-end
+-- flagEnabled() removed — use status.flagEnabled() (published by utils.init)
 
 -- Spatial ring radius for cache eviction (tiles beyond this radius around the visible
 -- window are discarded when trimCache() is called from maplib).
@@ -69,6 +56,15 @@ local lowHead     = 1
 
 -- Running count of cache entries; avoids O(n) iteration on every trim check.
 local cacheCount = 0
+
+-- GC synchronisation flag.  Set by trimCache() after evicting bitmap entries so
+-- processQueue() can run collectgarbage() *before* allocating new bitmaps.
+-- Without this, old and new bitmap userdata coexist until the next periodic GC
+-- cycle (every 10 wakeups), causing a transient RAM peak that can exceed the
+-- ETHOS per-widget memory budget and trigger an immediate kill – even when the
+-- steady-state cache size is well within limits.  See Docs/development/
+-- ETHOS-BITMAP-GC-TIMING.md for a detailed write-up.
+local pendingGCBeforeLoad = false
 
 -- One-time log keys so we don't flood the debug log with repeated messages.
 local lastTileFormatLogByKey = {}
@@ -180,7 +176,7 @@ local function loadTileFromDisk(tilePath)
 
   if bmp ~= nil then
     -- Log the tile format the first time it is seen for this provider+mapType combination.
-    if status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils and libs.utils.logDebug then
+    if status.debugEnabled and libs and libs.utils and libs.utils.logDebug then
       local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
       if lastTileFormatLogByKey[logKey] == nil then
         local ext    = (type(loadedPath) == "string" and (loadedPath:match("%.([%a%d]+)$") or "unknown"):lower()) or "unknown"
@@ -198,7 +194,7 @@ local function loadTileFromDisk(tilePath)
   end
 
   -- No file found – log once per provider+mapType, then return the shared nomap sentinel.
-  if status and status.conf and flagEnabled(status.conf.enableDebugLog) and libs and libs.utils and libs.utils.logDebug then
+  if status.debugEnabled and libs and libs.utils and libs.utils.logDebug then
     local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
     if lastNoTilesLogKey ~= logKey then
       libs.utils.logDebug("TILE", "No tile files found for " .. logKey .. "; using fallback bitmap", true)
@@ -226,10 +222,7 @@ function tileLoader.getBitmap(tilePath)
   return mapBitmapByPath[tilePath]
 end
 
-function tileLoader.getFallbackBitmap()
-  -- Backward-compatible alias for legacy callers; maps to NO MAP DATA bitmap.
-  return noMapBitmap
-end
+-- getFallbackBitmap() removed — was an identical alias for getNoMapBitmap().
 
 function tileLoader.getNoMapBitmap()
   -- Returns the shared "NO MAP DATA" bitmap preloaded outside the paint path.
@@ -270,27 +263,38 @@ function tileLoader.processQueue(budget)
 
   local loaded = 0
 
+  -- Flush dead bitmap userdata before allocating new ones.  trimCache() sets
+  -- the flag whenever it evicts entries; a single full GC cycle here ensures
+  -- the freed memory is actually reclaimed before lcd.loadBitmap() allocates.
+  if pendingGCBeforeLoad then
+    collectgarbage()
+    collectgarbage()  -- two passes: first marks, second finalises/frees
+    pendingGCBeforeLoad = false
+  end
+
   while loaded < budget and highHead <= #highQueue do
     local path        = highQueue[highHead]
-    highQueue[highHead] = nil
     highHead          = highHead + 1
-    highQueueSet[path] = nil
-    if mapBitmapByPath[path] == nil then
-      loadTileFromDisk(path)
-      cacheCount = cacheCount + 1
-      loaded     = loaded + 1
+    if path ~= nil then
+      highQueueSet[path] = nil
+      if mapBitmapByPath[path] == nil then
+        loadTileFromDisk(path)
+        cacheCount = cacheCount + 1
+        loaded     = loaded + 1
+      end
     end
   end
 
   while loaded < budget and lowHead <= #lowQueue do
     local path        = lowQueue[lowHead]
-    lowQueue[lowHead] = nil
     lowHead           = lowHead + 1
-    lowQueueSet[path] = nil
-    if mapBitmapByPath[path] == nil then
-      loadTileFromDisk(path)
-      cacheCount = cacheCount + 1
-      loaded     = loaded + 1
+    if path ~= nil then
+      lowQueueSet[path] = nil
+      if mapBitmapByPath[path] == nil then
+        loadTileFromDisk(path)
+        cacheCount = cacheCount + 1
+        loaded     = loaded + 1
+      end
     end
   end
 
@@ -386,6 +390,7 @@ function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, l
 
   if removed > 0 then
     cacheCount = cacheCount - removed
+    pendingGCBeforeLoad = true
 
     -- Purge evicted paths from the high queue.
     local newHigh    = {}

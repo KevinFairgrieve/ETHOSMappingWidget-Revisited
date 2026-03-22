@@ -35,6 +35,7 @@ RADIO/sensors.json.*.bak
 
 # Local debug/runtime artifacts
 RADIO/scripts/ethosmaps/debug.log
+RADIO/scripts/TelemetryReplay/
 
 # Workspace-local VS Code settings
 .vscode/settings.json

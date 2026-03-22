@@ -25,21 +25,13 @@ local drawLib = {}
 local bitmaps = {}
 local topBarUnifiedFont = nil
 local topBarValueCache = {}
+local topBarValueCacheCount = 0
+local TOP_BAR_CACHE_MAX = 20
 
-local function flagEnabled(value)
-  if value == true then
-    return true
-  end
-  local valueType = type(value)
-  if valueType == "number" then
-    return value ~= 0
-  end
-  if valueType == "string" then
-    local normalized = string.lower(value)
-    return normalized == "true" or normalized == "1" or normalized == "on"
-  end
-  return false
-end
+-- Pre-computed angle offsets for drawRArrow (constants, never change).
+local ARROW_ANG_150  = math.rad(150)
+local ARROW_ANG_N150 = math.rad(-150)
+local ARROW_ANG_180  = math.rad(180)
 
 local function safeSensorName(sensor)
   if sensor == nil then
@@ -85,10 +77,15 @@ local function safeSensorValueText(sensor)
     end
   end
 
+  if topBarValueCacheCount >= TOP_BAR_CACHE_MAX then
+    topBarValueCache = {}
+    topBarValueCacheCount = 0
+  end
   topBarValueCache[cacheKey] = {
     tickSerial = barTickSerial,
     text = valueText
   }
+  topBarValueCacheCount = topBarValueCacheCount + 1
 
   return valueText
 end
@@ -121,14 +118,8 @@ local function getTopBarSensorBlockWidth(name, valueText, barFont, labelFont)
   return valW + lblW + 10, valW
 end
 
-local function getTopBarLabelFont(valueFont)
-  if valueFont == FONT_L then
-    return FONT_XS
-  elseif valueFont == FONT_S then
-    return FONT_XS
-  end
-  return FONT_XS
-end
+-- Label font for the top bar is always FONT_XS regardless of the value font.
+local TOP_BAR_LABEL_FONT = FONT_XS
 
 function drawLib.drawText(x, y, txt, font, color, flags, blink)
   -- Draws text with the requested font and color, using the shared blink state to optionally suppress output.
@@ -145,44 +136,6 @@ function drawLib.drawNumber(x, y, num, precision, font, color, flags, blink)
   lcd.color(color)
   if status.blinkon == true or blink == nil or blink == false then
     lcd.drawNumber(x, y, num, nil, precision, flags)
-  end
-end
-
-function drawLib.resetBacklightTimeout()
-  -- Requests a backlight timeout reset through Ethos so user-facing alerts keep the screen awake.
-  if system and system.resetBacklightTimeout then
-    system.resetBacklightTimeout()
-  end
-end
-
-function drawLib.drawNoTelemetryData(widget)
-  -- Draws the telemetry-loss warning overlay after querying the utility layer for current link availability.
-  if not libs.utils.telemetryEnabled() then
-    local w = status.widgetWidth
-    local h = status.widgetHeight
-    local sx = status.scaleX
-    local sy = status.scaleY
-    local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
-
-    local fontBig = verticalMedium and FONT_L or FONT_XXL
-    local fontSmall = verticalMedium and FONT_S or FONT_STD
-
-    lcd.font(fontBig)
-    local textW, textH = lcd.getTextSize("NO TELEMETRY")
-
-    local boxW = math.min(math.floor(textW + 80*sx), math.floor(w * 0.88))
-    local boxH = math.floor(textH + 55*sy)
-    local boxX = math.floor((w - boxW) / 2)
-    local boxY = math.floor((h / 2) - boxH / 2) - 15*sy
-
-    lcd.color(RED)
-    lcd.drawFilledRectangle(boxX, boxY, boxW, boxH)
-
-    lcd.color(WHITE)
-    lcd.drawRectangle(boxX, boxY, boxW, boxH, 3)
-
-    lcd.font(fontBig)
-    lcd.drawText(w / 2, boxY + 25*sy, "NO TELEMETRY", CENTERED)
   end
 end
 
@@ -214,38 +167,39 @@ function drawLib.drawNoGPSData(widget)
   lcd.drawText(w / 2, boxY + 25*sy, "...waiting for GPS", CENTERED)
 end
 
-function drawLib.drawCompassRibbon(widget, ...)
-  -- Placeholder for a future compass ribbon renderer.
-end
-
-function drawLib.drawWindArrow(widget, ...)
-  -- Placeholder for a future wind-arrow renderer.
-end
-
 function drawLib.drawTopBar(widget, barTop, barHeight)
   -- Draws the top status bar by combining model info, system voltage, and user-selected telemetry sources.
   local w = status.widgetWidth
   local sx = status.scaleX
   local sy = status.scaleY
+  local conf = status.conf
+  local colors = status.colors
   local top = barTop or 0
   local barH = barHeight or math.floor(26 * sy)
   local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
   local verticalTiny = w < (status.tinyWidthThreshold or 350)
   local showModelName = w >= 600
   local compactNames = verticalMedium
+  local labelFont = TOP_BAR_LABEL_FONT
 
   local sensorEntries = {
     { sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}), label = "TX" },
-    { sensor = status.conf.linkQualitySource, label = nil },
+    { sensor = conf.linkQualitySource, label = nil },
   }
-  if not verticalTiny and safeSensorName(status.conf.userSensor1) ~= nil then
-    table.insert(sensorEntries, { sensor = status.conf.userSensor1, label = nil })
+  if not verticalTiny and safeSensorName(conf.userSensor1) ~= nil then
+    table.insert(sensorEntries, { sensor = conf.userSensor1, label = nil })
   end
-  if not verticalTiny and safeSensorName(status.conf.userSensor2) ~= nil then
-    table.insert(sensorEntries, { sensor = status.conf.userSensor2, label = nil })
+  if not verticalTiny and safeSensorName(conf.userSensor2) ~= nil then
+    table.insert(sensorEntries, { sensor = conf.userSensor2, label = nil })
   end
-  if not verticalTiny and safeSensorName(status.conf.userSensor3) ~= nil then
-    table.insert(sensorEntries, { sensor = status.conf.userSensor3, label = nil })
+  if not verticalTiny and safeSensorName(conf.userSensor3) ~= nil then
+    table.insert(sensorEntries, { sensor = conf.userSensor3, label = nil })
+  end
+
+  -- Pre-cache sensor names to avoid redundant pcall lookups in the font-selection loop.
+  local sensorNames = {}
+  for e = 1, #sensorEntries do
+    sensorNames[e] = safeSensorName(sensorEntries[e].sensor)
   end
 
   local candidateFonts = verticalMedium and {FONT_S, FONT_XS} or {FONT_L, FONT_S, FONT_XS}
@@ -255,7 +209,6 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   local selectedAvailableWidth = 0
   for i = 1, #candidateFonts do
     local candidateFont = candidateFonts[i]
-    local candidateLabelFont = getTopBarLabelFont(candidateFont)
 
     local minTelemetryX = 6 * sx
     if showModelName then
@@ -266,11 +219,11 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
 
     local usedWidth = 0
     for e = 1, #sensorEntries do
-      local entry = sensorEntries[e]
-      if safeSensorName(entry.sensor) ~= nil then
+      if sensorNames[e] ~= nil then
+        local entry = sensorEntries[e]
         local name = getTopBarSensorName(entry.sensor, entry.label, compactNames)
         local valueText = safeSensorValueText(entry.sensor)
-        local blockW = getTopBarSensorBlockWidth(name, valueText, candidateFont, candidateLabelFont)
+        local blockW = getTopBarSensorBlockWidth(name, valueText, candidateFont, labelFont)
         usedWidth = usedWidth + blockW
       end
     end
@@ -292,16 +245,15 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   end
   topBarUnifiedFont = selectedFont
 
-  local selectedLabelFont = getTopBarLabelFont(selectedFont)
   local minTelemetryX = 6 * sx
 
-  lcd.color(status.colors.barBackground)
+  lcd.color(colors.barBackground)
   lcd.pen(SOLID)
   lcd.drawFilledRectangle(0, top, w, barH)
 
   if showModelName then
     local modelY = top + math.floor(2 * sy)
-    drawLib.drawText(8*sx, modelY, modelText, selectedFont, status.colors.barText, LEFT)
+    drawLib.drawText(8*sx, modelY, modelText, selectedFont, colors.barText, LEFT)
     lcd.font(selectedFont)
     local modelW = lcd.getTextSize(modelText)
     minTelemetryX = 8 * sx + modelW + 12 * sx
@@ -310,7 +262,7 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   local offset = 12*sx
   for e = 1, #sensorEntries do
     local entry = sensorEntries[e]
-    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, selectedLabelFont, compactNames, top, barH)
+    offset = offset + drawLib.drawTopBarSensor(widget, w - offset, entry.sensor, entry.label, minTelemetryX, selectedFont, labelFont, compactNames, top, barH)
   end
 end
 
@@ -337,21 +289,23 @@ end
 
 function drawLib.drawRArrow(x,y,r,angle,color)
   -- Draws a rotated arrow primitive used by the map for aircraft heading and home direction overlays.
-  local ang = math.rad(angle - 90)
-  local x1 = x + r * math.cos(ang)
-  local y1 = y + r * math.sin(ang)
+  local baseRad = math.rad(angle - 90)
+  local cosB, sinB = math.cos(baseRad), math.sin(baseRad)
+  local x1 = x + r * cosB
+  local y1 = y + r * sinB
 
-  ang = math.rad(angle - 90 + 150)
-  local x2 = x + r * math.cos(ang)
-  local y2 = y + r * math.sin(ang)
+  local cos2, sin2 = math.cos(baseRad + ARROW_ANG_150), math.sin(baseRad + ARROW_ANG_150)
+  local x2 = x + r * cos2
+  local y2 = y + r * sin2
 
-  ang = math.rad(angle - 90 - 150)
-  local x3 = x + r * math.cos(ang)
-  local y3 = y + r * math.sin(ang)
+  local cos3, sin3 = math.cos(baseRad + ARROW_ANG_N150), math.sin(baseRad + ARROW_ANG_N150)
+  local x3 = x + r * cos3
+  local y3 = y + r * sin3
 
-  ang = math.rad(angle - 270)
-  local x4 = x + r * 0.5 * math.cos(ang)
-  local y4 = y + r * 0.5 * math.sin(ang)
+  local r2 = r * 0.5
+  local cos4, sin4 = math.cos(baseRad + ARROW_ANG_180), math.sin(baseRad + ARROW_ANG_180)
+  local x4 = x + r2 * cos4
+  local y4 = y + r2 * sin4
 
   lcd.pen(SOLID)
   lcd.color(color)
@@ -369,53 +323,12 @@ function drawLib.drawBitmap(x, y, bitmap, w, h)
   end
 end
 
-function drawLib.drawBlinkBitmap(x, y, bitmap, w, h)
-  -- Draws a bitmap only on active blink phases so warning icons can flash without state duplication.
-  if status.blinkon == true then
-    local bmp = drawLib.getBitmap(bitmap)
-    if bmp ~= nil then
-      lcd.drawBitmap(x, y, bmp, w, h)
-    end
-  end
-end
-
 function drawLib.getBitmap(name)
   -- Lazily loads a bitmap from the SD card and keeps it cached for repeated draw calls.
   if bitmaps[name] == nil then
     bitmaps[name] = lcd.loadBitmap("/bitmaps/ethosmaps/bitmaps/"..name..".png")
   end
   return bitmaps[name]
-end
-
-function drawLib.unloadBitmap(name)
-  -- Removes a cached bitmap from memory and nudges Lua garbage collection to reclaim it.
-  if bitmaps[name] ~= nil then
-    bitmaps[name] = nil
-    if status and status.perfProfileInc and status.conf and flagEnabled(status.conf.enableDebugLog) and flagEnabled(status.conf.enablePerfProfile) then
-      status.perfProfileInc("gc_count", 2)
-    end
-    -- GC wird jetzt periodisch im wakeup() ausgeführt
-  end
-end
-
-function drawLib.drawLineWithClippingXY(x0, y0, x1, y1, xmin, ymin, xmax, ymax)
-  -- Draws a line segment inside a temporary clipping rectangle and restores unclipped drawing afterwards.
-  lcd.setClipping(xmin, ymin, xmax-xmin, ymax-ymin)
-  lcd.drawLine(x0,y0,x1,y1)
-  lcd.setClipping()
-end
-
-function drawLib.drawLineWithClipping(ox, oy, angle, len, xmin,ymin, xmax, ymax)
-  -- Converts an origin, angle, and length into endpoints and forwards the result to the clipped line renderer.
-  local xx = math.cos(math.rad(angle)) * len * 0.5
-  local yy = math.sin(math.rad(angle)) * len * 0.5
-
-  local x0 = ox - xx
-  local x1 = ox + xx
-  local y0 = oy - yy
-  local y1 = oy + yy
-
-  drawLib.drawLineWithClippingXY(x0,y0,x1,y1,xmin,ymin,xmax,ymax)
 end
 
 function drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax)
@@ -433,9 +346,37 @@ function drawLib.isInside(x,y,xmin,ymin,xmax,ymax)
   return drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax) == 0
 end
 
-function drawLib.drawHomeIcon(x,y)
-  -- Draws the compact home icon bitmap used by map overlays.
-  drawLib.drawBitmap(x,y,"minihomeorange")
+-- Cohen-Sutherland line clipping against a rectangular viewport.
+-- Returns clipped x1,y1,x2,y2 or nil if the segment is entirely outside.
+function drawLib.clipLine(x1, y1, x2, y2, xmin, ymin, xmax, ymax)
+  local function outCode(x, y)
+    local code = 0
+    if x < xmin then code = code | 1
+    elseif x > xmax then code = code | 2 end
+    if y < ymin then code = code | 8
+    elseif y > ymax then code = code | 4 end
+    return code
+  end
+  local code1 = outCode(x1, y1)
+  local code2 = outCode(x2, y2)
+  for _ = 1, 20 do
+    if (code1 | code2) == 0 then return x1, y1, x2, y2 end
+    if (code1 & code2) ~= 0 then return nil end
+    local codeOut = code1 ~= 0 and code1 or code2
+    local x, y
+    if (codeOut & 8) ~= 0 then
+      x = x1 + (x2 - x1) * (ymin - y1) / (y2 - y1); y = ymin
+    elseif (codeOut & 4) ~= 0 then
+      x = x1 + (x2 - x1) * (ymax - y1) / (y2 - y1); y = ymax
+    elseif (codeOut & 2) ~= 0 then
+      y = y1 + (y2 - y1) * (xmax - x1) / (x2 - x1); x = xmax
+    else
+      y = y1 + (y2 - y1) * (xmin - x1) / (x2 - x1); x = xmin
+    end
+    if codeOut == code1 then x1 = x; y1 = y; code1 = outCode(x, y)
+    else x2 = x; y2 = y; code2 = outCode(x, y) end
+  end
+  return nil
 end
 
 function drawLib.init(param_status, param_libs)
@@ -443,6 +384,7 @@ function drawLib.init(param_status, param_libs)
   status = param_status
   libs = param_libs
   topBarValueCache = {}
+  topBarValueCacheCount = 0
   return drawLib
 end
 

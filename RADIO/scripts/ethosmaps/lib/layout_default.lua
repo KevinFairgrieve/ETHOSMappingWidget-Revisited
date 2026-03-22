@@ -18,11 +18,7 @@
 -- along with this program; if not, see <http://www.gnu.org/licenses>.
 
 
-local function getTime()
-  -- Converts Lua CPU time into centiseconds so layout timing stays aligned with the other libraries.
-  return os.clock()*100
-end
-
+-- getTime() removed — use status.getTime() (published by main.lua)
 
 local panel = {}
 
@@ -48,8 +44,8 @@ local function getBarSnapshot()
   end
 
   if status.barSnapshot.lastTickSerial ~= barTickSerial then
-    status.barSnapshot.groundSpeed = (status.avgSpeed and status.avgSpeed.value) or 0
-    status.barSnapshot.heading = (status.telemetry and status.telemetry.cog) or 0
+    status.barSnapshot.groundSpeed = (status.telemetry and status.telemetry.groundSpeed) or 0
+    status.barSnapshot.heading = (status.telemetry and (status.telemetry.yaw or status.telemetry.cog)) or 0
     status.barSnapshot.travelDist = (status.avgSpeed and status.avgSpeed.travelDist) or 0
     status.barSnapshot.homeDist = (status.telemetry and status.telemetry.homeDist) or 0
     status.barSnapshot.lastTickSerial = barTickSerial
@@ -166,7 +162,7 @@ function panel.draw(widget)
   status.mapLastZoom = status.mapZoomLevel
 
   -- Draw the map viewport for the current layout.
-  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, mapTilesX, mapTilesY, status.telemetry.cog, mapNeedsUpdate)
+  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, mapTilesX, mapTilesY, status.telemetry.yaw or status.telemetry.cog, mapNeedsUpdate)
 
   -- Draw the dedicated left-side zoom buttons.
   local scaleFactor = 0.15 + 0.8 * status.scaleX
