@@ -94,6 +94,13 @@ local mapStatus = {
     mapTrailLength = 5,  -- Trail length in km (0=off, 1, 5, 10, 25, 50).
     enableDebugLog = false,   -- Enables the on-device debug log.
     enablePerfProfile = false, -- Emits 5s performance summaries into debug.log.
+    -- Telemetry source mode: 1 = ETHOS (hardcoded GPS), 2 = Sensors (user-assigned sources).
+    -- "Sensors" mode is only available when debug logging is enabled.
+    telemetrySourceMode = 1,
+    sensorGpsLat = nil,    -- Source for GPS latitude (Sensors mode)
+    sensorGpsLon = nil,    -- Source for GPS longitude (Sensors mode)
+    sensorHeading = nil,   -- Source for heading/yaw (optional, nil = calculated from GPS)
+    sensorSpeed = nil,     -- Source for ground speed (optional, nil = calculated from GPS)
     gpsFormat = 0, -- 0 = decimal, 1 = DMS
     -- Layout selection persisted for future layout variants.
     layout = 1,
@@ -453,11 +460,40 @@ local function bgtasks(widget)
   if not mapStatus.sessionLogged then
     logDebugSessionStart("bgtasks-retry")
   end
-  local gpsSrcLat = system.getSource({name="GPS", options=OPTION_LATITUDE})
-  local gpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
   local gpsData = {}
-  gpsData.lat = gpsSrcLat and gpsSrcLat:value() or nil
-  gpsData.lon = gpsSrcLon and gpsSrcLon:value() or nil
+  if mapStatus.conf.telemetrySourceMode == 2 then
+    -- Sensors mode: read from user-assigned sources.
+    local srcLat = mapStatus.conf.sensorGpsLat
+    local srcLon = mapStatus.conf.sensorGpsLon
+    if srcLat ~= nil and type(srcLat.value) == "function" then
+      gpsData.lat = srcLat:value()
+    end
+    if srcLon ~= nil and type(srcLon.value) == "function" then
+      gpsData.lon = srcLon:value()
+    end
+    -- Optional heading source → telemetry.yaw (overrides calculated COG).
+    local srcHdg = mapStatus.conf.sensorHeading
+    if srcHdg ~= nil and type(srcHdg.value) == "function" then
+      local hdg = srcHdg:value()
+      if hdg ~= nil then
+        mapStatus.telemetry.yaw = hdg
+      end
+    end
+    -- Optional speed source → telemetry.groundSpeed (overrides calculated speed).
+    local srcSpd = mapStatus.conf.sensorSpeed
+    if srcSpd ~= nil and type(srcSpd.value) == "function" then
+      local spd = srcSpd:value()
+      if spd ~= nil then
+        mapStatus.telemetry.groundSpeed = spd
+      end
+    end
+  else
+    -- ETHOS mode: hardcoded GPS source.
+    local gpsSrcLat = system.getSource({name="GPS", options=OPTION_LATITUDE})
+    local gpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
+    gpsData.lat = gpsSrcLat and gpsSrcLat:value() or nil
+    gpsData.lon = gpsSrcLon and gpsSrcLon:value() or nil
+  end
   if gpsData.lat ~= nil and gpsData.lon ~= nil then
     mapStatus.telemetry.lat = gpsData.lat
     mapStatus.telemetry.lon = gpsData.lon
@@ -486,7 +522,9 @@ local function bgtasks(widget)
     if now - mapStatus.avgSpeed.lastSampleTime > 100 then
       local travelDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.avgSpeed.lastLat, mapStatus.avgSpeed.lastLon)
       local travelTime = now - mapStatus.avgSpeed.lastSampleTime
-      if travelDist < 10000 then
+      -- Only derive speed from GPS deltas when no external speed source is active.
+      local hasExternalSpeed = (mapStatus.conf.telemetrySourceMode == 2 and mapStatus.conf.sensorSpeed ~= nil)
+      if not hasExternalSpeed and travelDist < 10000 then
         mapStatus.avgSpeed.avgTravelDist = mapStatus.avgSpeed.avgTravelDist * 0.8 + travelDist*0.2
         mapStatus.avgSpeed.avgTravelTime = mapStatus.avgSpeed.avgTravelTime * 0.8 + 0.01 * travelTime * 0.2
         mapStatus.avgSpeed.value = mapStatus.avgSpeed.avgTravelDist/mapStatus.avgSpeed.avgTravelTime
@@ -514,7 +552,11 @@ local function bgtasks(widget)
         mapStatus.telemetry.strLon = string.format("%.06f", mapStatus.telemetry.lon)
       end
     end
-    mapLibs.utils.updateCog()
+    -- Only derive COG from GPS movement when no external heading source is active.
+    local hasExternalHeading = (mapStatus.conf.telemetrySourceMode == 2 and mapStatus.conf.sensorHeading ~= nil)
+    if not hasExternalHeading then
+      mapLibs.utils.updateCog()
+    end
   end
 
   if now - mapStatus.blinkTimer > 60 then
@@ -1710,6 +1752,8 @@ local function configure(widget)
     function(value) mapStatus.conf.mapTrailLength = value end
   )
 
+  -- ── Debug & Developer Tools ─────────────────────────────────────────────
+
   -- Debug logging is opt-in because writes go to the SD card during runtime.
   line = form.addLine("Enable debug log")
   widget.enableDebugLogField = form.addBooleanField(line, nil, 
@@ -1742,6 +1786,16 @@ local function configure(widget)
       if widget.enablePerfProfileField ~= nil then
         widget.enablePerfProfileField:enable(mapStatus.flagEnabled(value))
       end
+      -- Toggle telemetry source fields based on debug log state
+      local debugOn = mapStatus.flagEnabled(value)
+      if widget.telemetrySourceModeField ~= nil then
+        widget.telemetrySourceModeField:enable(debugOn)
+      end
+      local sensorsActive = debugOn and mapStatus.conf.telemetrySourceMode == 2
+      if widget.sensorGpsLatField ~= nil then widget.sensorGpsLatField:enable(sensorsActive) end
+      if widget.sensorGpsLonField ~= nil then widget.sensorGpsLonField:enable(sensorsActive) end
+      if widget.sensorHeadingField ~= nil then widget.sensorHeadingField:enable(sensorsActive) end
+      if widget.sensorSpeedField ~= nil then widget.sensorSpeedField:enable(sensorsActive) end
     end
   )
 
@@ -1771,6 +1825,51 @@ local function configure(widget)
   -- Only show perf profile option when debug logging is enabled.
   widget.enablePerfProfileField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog))
 
+  -- Telemetry source mode: only visible when debug logging is enabled.
+  line = form.addLine("Telemetry source")
+  widget.telemetrySourceModeField = form.addChoiceField(line, form.getFieldSlots(line)[0],
+    {{"ETHOS", 1}, {"Sensors", 2}},
+    function() return mapStatus.conf.telemetrySourceMode or 1 end,
+    function(value)
+      mapStatus.conf.telemetrySourceMode = value
+      -- Toggle sensor source field visibility.
+      local sensorsActive = (value == 2)
+      if widget.sensorGpsLatField ~= nil then widget.sensorGpsLatField:enable(sensorsActive) end
+      if widget.sensorGpsLonField ~= nil then widget.sensorGpsLonField:enable(sensorsActive) end
+      if widget.sensorHeadingField ~= nil then widget.sensorHeadingField:enable(sensorsActive) end
+      if widget.sensorSpeedField ~= nil then widget.sensorSpeedField:enable(sensorsActive) end
+    end
+  )
+  widget.telemetrySourceModeField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog))
+
+  line = form.addLine("GPS Lat source")
+  widget.sensorGpsLatField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorGpsLat end,
+    function(value) mapStatus.conf.sensorGpsLat = value end
+  )
+  widget.sensorGpsLatField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+
+  line = form.addLine("GPS Lon source")
+  widget.sensorGpsLonField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorGpsLon end,
+    function(value) mapStatus.conf.sensorGpsLon = value end
+  )
+  widget.sensorGpsLonField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+
+  line = form.addLine("Heading source (optional)")
+  widget.sensorHeadingField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorHeading end,
+    function(value) mapStatus.conf.sensorHeading = value end
+  )
+  widget.sensorHeadingField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+
+  line = form.addLine("Speed source (optional)")
+  widget.sensorSpeedField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorSpeed end,
+    function(value) mapStatus.conf.sensorSpeed = value end
+  )
+  widget.sensorSpeedField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+
   line = form.addLine("Widget version")
   form.addStaticText(line, nil, "1.0.0 beta4")
 
@@ -1796,6 +1895,11 @@ local function read(widget)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
   mapStatus.conf.userSensor2 = storageToConfig("userSensor2", nil)
   mapStatus.conf.userSensor3 = storageToConfig("userSensor3", nil)
+  mapStatus.conf.telemetrySourceMode = storageToConfig("telemetrySourceMode", 1)
+  mapStatus.conf.sensorGpsLat = storageToConfig("sensorGpsLat", nil)
+  mapStatus.conf.sensorGpsLon = storageToConfig("sensorGpsLon", nil)
+  mapStatus.conf.sensorHeading = storageToConfig("sensorHeading", nil)
+  mapStatus.conf.sensorSpeed = storageToConfig("sensorSpeed", nil)
 
   applyConfig()
 end
@@ -1820,6 +1924,11 @@ local function write(widget)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
   storage.write("userSensor2", mapStatus.conf.userSensor2)
   storage.write("userSensor3", mapStatus.conf.userSensor3)
+  storage.write("telemetrySourceMode", mapStatus.conf.telemetrySourceMode)
+  storage.write("sensorGpsLat", mapStatus.conf.sensorGpsLat)
+  storage.write("sensorGpsLon", mapStatus.conf.sensorGpsLon)
+  storage.write("sensorHeading", mapStatus.conf.sensorHeading)
+  storage.write("sensorSpeed", mapStatus.conf.sensorSpeed)
 
   applyConfig()
   mapLibs.resetLib.resetLayout(widget)
