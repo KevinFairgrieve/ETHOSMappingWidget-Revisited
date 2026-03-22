@@ -258,11 +258,13 @@ function tileLoader.processQueue(budget)
     local path        = highQueue[highHead]
     highQueue[highHead] = nil
     highHead          = highHead + 1
-    highQueueSet[path] = nil
-    if mapBitmapByPath[path] == nil then
-      loadTileFromDisk(path)
-      cacheCount = cacheCount + 1
-      loaded     = loaded + 1
+    if path ~= nil then
+      highQueueSet[path] = nil
+      if mapBitmapByPath[path] == nil then
+        loadTileFromDisk(path)
+        cacheCount = cacheCount + 1
+        loaded     = loaded + 1
+      end
     end
   end
 
@@ -270,11 +272,13 @@ function tileLoader.processQueue(budget)
     local path        = lowQueue[lowHead]
     lowQueue[lowHead] = nil
     lowHead           = lowHead + 1
-    lowQueueSet[path] = nil
-    if mapBitmapByPath[path] == nil then
-      loadTileFromDisk(path)
-      cacheCount = cacheCount + 1
-      loaded     = loaded + 1
+    if path ~= nil then
+      lowQueueSet[path] = nil
+      if mapBitmapByPath[path] == nil then
+        loadTileFromDisk(path)
+        cacheCount = cacheCount + 1
+        loaded     = loaded + 1
+      end
     end
   end
 

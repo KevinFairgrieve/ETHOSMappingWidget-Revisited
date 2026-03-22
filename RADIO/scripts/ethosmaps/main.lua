@@ -40,11 +40,6 @@ local function getTime()
   return os.clock() * 100
 end
 
-local hasLfs, lfs = pcall(require, "lfs")
-if not hasLfs then
-  lfs = nil
-end
-
 local logDebugSessionStart
 local configRebuildInProgress = false
 
@@ -983,20 +978,33 @@ local PROVIDER_FOLDER_NAMES = {
   [4] = "OSM",
 }
 
-local function pathExists(path)
+local function directoryExists(path)
+  -- Checks whether a directory exists by listing the parent and looking for the target entry.
+  -- Replaces the old os.rename(path,path) hack that caused f_rename errors on ETHOS.
   if path == nil or path == "" then
     return false
   end
-  local f = io.open(path, "r")
-  if f ~= nil then
-    io.close(f)
-    return true
+  local parent, target = path:match("^(.+)/([^/]+)$")
+  if not parent or not target then
+    return false
   end
-  local ok, _, code = os.rename(path, path)
-  if ok then
-    return true
+  if not system or type(system.listFiles) ~= "function" then
+    return false
   end
-  return code == 13
+  local ok, entries = pcall(system.listFiles, parent)
+  if not ok or type(entries) ~= "table" then
+    return false
+  end
+  for i = 1, #entries do
+    local name = entries[i]
+    if type(name) == "string" then
+      name = name:gsub("/+$", "")
+      if name == target then
+        return true
+      end
+    end
+  end
+  return false
 end
 
 local function getProviderRootCandidates(provider)
@@ -1052,11 +1060,11 @@ local function mapTypeFolderExists(provider, mapTypeId)
   if provider == 2 then
     -- For Google, check BOTH ethosmaps and Yaapu paths for availability.
     local ethosmapsRoot = "/bitmaps/ethosmaps/maps/GOOGLE"
-    if pathExists(ethosmapsRoot .. "/" .. folder) then
+    if directoryExists(ethosmapsRoot .. "/" .. folder) then
       return true
     end
     local yaapuFolder = getGoogleMapTypeYaapuName(mapTypeId)
-    if pathExists("/bitmaps/yaapu/maps/" .. yaapuFolder) then
+    if directoryExists("/bitmaps/yaapu/maps/" .. yaapuFolder) then
       return true
     end
     return false
@@ -1064,7 +1072,7 @@ local function mapTypeFolderExists(provider, mapTypeId)
   
   local roots = getProviderRootCandidates(provider)
   for r=1,#roots do
-    if pathExists(roots[r] .. "/" .. folder) then
+    if directoryExists(roots[r] .. "/" .. folder) then
       return true
     end
   end
@@ -1244,91 +1252,27 @@ local function toLogValue(value)
 end
 
 getSortedDirectories = function(path)
-  if system and type(system.listFiles) == "function" then
-    local ok, entries = pcall(system.listFiles, path)
-    if ok and type(entries) == "table" then
-      local result = {}
-      local seen = {}
-      for i = 1, #entries do
-        local rawName = entries[i]
-        if type(rawName) == "string" and rawName ~= "." and rawName ~= ".." and rawName ~= "" then
-          local name = rawName:gsub("/+$", "")
-          if not seen[name] then
-            seen[name] = true
-            table.insert(result, name)
-          end
-        end
+  if not system or type(system.listFiles) ~= "function" then
+    return nil, "no_directory_api"
+  end
+  local ok, entries = pcall(system.listFiles, path)
+  if not ok or type(entries) ~= "table" then
+    return {}, nil
+  end
+  local result = {}
+  local seen = {}
+  for i = 1, #entries do
+    local rawName = entries[i]
+    if type(rawName) == "string" and rawName ~= "." and rawName ~= ".." and rawName ~= "" then
+      local name = rawName:gsub("/+$", "")
+      if not seen[name] then
+        seen[name] = true
+        table.insert(result, name)
       end
-      table.sort(result)
-      return result, nil
     end
   end
-
-  if lfs ~= nil then
-    local attr = lfs.attributes(path)
-    if not attr or attr.mode ~= "directory" then
-      return {}, nil
-    end
-
-    local result = {}
-    for entry in lfs.dir(path) do
-      if entry ~= "." and entry ~= ".." then
-        local fullPath = path .. "/" .. entry
-        local entryAttr = lfs.attributes(fullPath)
-        if entryAttr and entryAttr.mode == "directory" then
-          table.insert(result, entry)
-        end
-      end
-    end
-    table.sort(result)
-    return result, nil
-  end
-
-  if type(dir) == "function" then
-    local ok, iterator = pcall(dir, path)
-    if not ok or type(iterator) ~= "function" then
-      return {}, nil
-    end
-
-    local result = {}
-    local seen = {}
-
-    while true do
-      local entry, entryAttr = iterator()
-      if entry == nil then
-        break
-      end
-      if entry ~= "." and entry ~= ".." then
-        local isDirectory = false
-
-        if type(entryAttr) == "table" then
-          if entryAttr.mode == "directory" or entryAttr.isdir == true or entryAttr.directory == true then
-            isDirectory = true
-          end
-        end
-
-        if not isDirectory then
-          local fullPath = path .. "/" .. entry
-          local file = io.open(fullPath, "r")
-          if file then
-            io.close(file)
-          elseif pathExists(fullPath) then
-            isDirectory = true
-          end
-        end
-
-        if isDirectory and not seen[entry] then
-          seen[entry] = true
-          table.insert(result, entry)
-        end
-      end
-    end
-
-    table.sort(result)
-    return result, nil
-  end
-
-  return nil, "no_directory_api"
+  table.sort(result)
+  return result, nil
 end
 
 local function getRootPathCandidates(rootPath)

@@ -4,17 +4,14 @@ local libs = nil
 
 -- flagEnabled() removed — use status.flagEnabled() (published by utils.init)
 
--- Recursively clears a table tree so cached layouts, tiles, and other transient state can be released.
+-- Clears all entries from a table so cached layouts, tiles, and other transient state can be released.
+-- Sub-tables are collected by Lua GC once no references remain.
 function resetLib.clearTable(t)
-  if type(t)=="table" then
-    for i,v in pairs(t) do
-      if type(v) == "table" then
-        resetLib.clearTable(v)
-      end
-      t[i] = nil
+  if type(t) == "table" then
+    for k in pairs(t) do
+      t[k] = nil
     end
   end
-  t = nil
 end
 
 function resetLib.resetLayout(widget)
