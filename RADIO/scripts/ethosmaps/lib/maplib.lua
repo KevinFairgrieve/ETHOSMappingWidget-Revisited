@@ -43,13 +43,22 @@ local tiles_per_radian
 local tile_dim
 local scaleLen
 local scaleLabel
--- GPS-based trail: stores up to TRAIL_MAX_WAYPOINTS lat/lon anchors; survives zoom changes.
+-- GPS-based trail: ring-buffer of up to TRAIL_MAX_WAYPOINTS lat/lon anchors.
+-- A new waypoint is committed only when BOTH the configured minimum distance has
+-- been travelled AND the angle between the last committed segment and the pending
+-- segment (last WP → UAV) exceeds the configured threshold.  This measures the
+-- actual visual bend in the trail rather than relying on heading/COG which can
+-- fluctuate with wind and gusts.
 local TRAIL_MAX_WAYPOINTS = 51
 local trailWaypoints = {}
 local trailWpCount = 0
+local trailHead = 0       -- ring-buffer write index (1-based, wraps at TRAIL_MAX_WAYPOINTS)
 local trailAccumDist = 0
 local trailLastLat = nil
 local trailLastLon = nil
+local trailCachedLevel = nil  -- zoom level for which tpx/tpy are cached
+local trailTpx = {}           -- cached tile-pixel X per waypoint slot
+local trailTpy = {}           -- cached tile-pixel Y per waypoint slot
 local homeNeedsRefresh = true
 local lastHomePosUpdate = 0   -- Initialised to 0; first check after init always triggers.
 local lastZoomLevel = -99
@@ -532,9 +541,9 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  local trailLengthKm = tonumber((status and status.conf and status.conf.mapTrailLength) or 0) or 0
-  if trailLengthKm > 0 and doStateUpdate and telemetry.lat ~= nil and telemetry.lon ~= nil then
-    local triggerDist = trailLengthKm * 1000 / 50
+  local trailResolution = tonumber((status and status.conf and status.conf.mapTrailResolution) or 0) or 0
+  if trailResolution > 0 and doStateUpdate and telemetry.lat ~= nil and telemetry.lon ~= nil
+      and (telemetry.lat ~= 0 or telemetry.lon ~= 0) then
     if trailLastLat ~= nil then
       local delta = libs.utils.haversine(trailLastLat, trailLastLon, telemetry.lat, telemetry.lon)
       trailAccumDist = trailAccumDist + delta
@@ -544,17 +553,59 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     if trailWpCount == 0 then
       -- First GPS fix: place initial anchor so the dynamic segment starts immediately.
       trailWpCount = 1
+      trailHead = 1
       trailWaypoints[1] = { telemetry.lat, telemetry.lon }
-    elseif trailAccumDist >= triggerDist then
-      trailAccumDist = 0
-      if trailWpCount < TRAIL_MAX_WAYPOINTS then
-        trailWpCount = trailWpCount + 1
-        trailWaypoints[trailWpCount] = { telemetry.lat, telemetry.lon }
-      else
-        table.remove(trailWaypoints, 1)
-        trailWaypoints[TRAIL_MAX_WAYPOINTS] = { telemetry.lat, telemetry.lon }
+      trailCachedLevel = nil  -- force reproject on next paint
+    elseif trailAccumDist >= trailResolution then
+      -- Angle check: compute the bend between the last committed segment and the
+      -- pending segment (last WP → current UAV position).  Only commit when the
+      -- angle exceeds the configured threshold.
+      local bendExceeded = true
+      if trailWpCount >= 2 then
+        -- Find the previous waypoint (N-1) in the ring-buffer.
+        local prevIdx
+        if trailWpCount < TRAIL_MAX_WAYPOINTS then
+          prevIdx = trailHead - 1
+        else
+          prevIdx = ((trailHead - 2) % TRAIL_MAX_WAYPOINTS) + 1
+        end
+        local prevWp = trailWaypoints[prevIdx]
+        local headWp = trailWaypoints[trailHead]
+        -- Vectors: segment A (prevWp → headWp) and segment B (headWp → UAV)
+        local ax, ay = headWp[2] - prevWp[2], headWp[1] - prevWp[1]
+        local bx, by = telemetry.lon - headWp[2], telemetry.lat - headWp[1]
+        -- Angle between the two segments via atan2 of cross/dot product.
+        local cross = ax * by - ay * bx
+        local dot   = ax * bx + ay * by
+        local bendDeg = math.abs(math.deg(math.atan(cross, dot)))
+        local threshold = tonumber((status.conf and status.conf.mapTrailHeadingThreshold) or 5) or 5
+        bendExceeded = (bendDeg >= threshold)
+      end
+      if bendExceeded then
+        trailAccumDist = 0
+        local newSlot
+        if trailWpCount < TRAIL_MAX_WAYPOINTS then
+          trailWpCount = trailWpCount + 1
+          trailHead = trailWpCount
+          newSlot = trailWpCount
+          trailWaypoints[newSlot] = { telemetry.lat, telemetry.lon }
+        else
+          -- Ring-buffer: overwrite oldest slot (O(1) instead of O(n) table.remove)
+          trailHead = (trailHead % TRAIL_MAX_WAYPOINTS) + 1
+          newSlot = trailHead
+          trailWaypoints[newSlot] = { telemetry.lat, telemetry.lon }
+        end
+        -- Update tile-pixel cache for the new slot inline (avoids full reproject).
+        if trailCachedLevel ~= nil then
+          local tx, ty, ox, oy = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, trailCachedLevel)
+          trailTpx[newSlot] = tx * TILES_SIZE + ox
+          trailTpy[newSlot] = ty * TILES_SIZE + oy
+        end
       end
     end
+  elseif trailResolution == 0 and trailWpCount > 0 then
+    -- Trail disabled: free waypoint memory immediately.
+    mapLib.clearTrail()
   end
 
   mapLib.drawTiles(TILES_X, minX + renderOffsetX, minY + renderOffsetY)
@@ -583,23 +634,63 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  if trailLengthKm > 0 and trailWpCount >= 1 and myScreenX ~= nil and uav_tile_x ~= nil then
+  if trailResolution > 0 and trailWpCount >= 1 and myScreenX ~= nil and uav_tile_x ~= nil then
     lcd.color(colors.yellow)
     lcd.pen(SOLID)
-    local function trailToScreen(lat, lon)
-      local tx, ty, ox, oy = mapLib.coord_to_tiles(lat, lon, level)
-      return myScreenX + (tx - uav_tile_x) * TILES_SIZE + (ox - uav_offset_x) + renderOffsetX,
-             myScreenY + (ty - uav_tile_y) * TILES_SIZE + (oy - uav_offset_y) + renderOffsetY
+    local clipLine = libs.drawLib.clipLine
+    local baseX = myScreenX - uav_tile_x * TILES_SIZE - uav_offset_x + renderOffsetX
+    local baseY = myScreenY - uav_tile_y * TILES_SIZE - uav_offset_y + renderOffsetY
+
+    -- Reproject trail waypoints only when zoom level changes (expensive trig).
+    if trailCachedLevel ~= level then
+      local coordToTiles = mapLib.coord_to_tiles
+      for i = 1, trailWpCount do
+        local slot
+        if trailWpCount < TRAIL_MAX_WAYPOINTS then
+          slot = i
+        else
+          slot = ((trailHead + i - 1) % TRAIL_MAX_WAYPOINTS) + 1
+        end
+        local wp = trailWaypoints[slot]
+        local tx, ty, ox, oy = coordToTiles(wp[1], wp[2], level)
+        trailTpx[slot] = tx * TILES_SIZE + ox
+        trailTpy[slot] = ty * TILES_SIZE + oy
+      end
+      trailCachedLevel = level
     end
-    -- Static segments between consecutive fixed waypoints.
-    for i = 1, trailWpCount - 1 do
-      local x1, y1 = trailToScreen(trailWaypoints[i][1], trailWaypoints[i][2])
-      local x2, y2 = trailToScreen(trailWaypoints[i + 1][1], trailWaypoints[i + 1][2])
-      lcd.drawLine(x1, y1, x2, y2)
+
+    -- Iterate ring-buffer in insertion order (oldest to newest).
+    -- Segments shorter than MIN_TRAIL_PX are skipped to reduce draw calls.
+    local MIN_TRAIL_PX_SQ = 15 * 15  -- squared to avoid sqrt per segment
+    local anchorSX, anchorSY = nil, nil
+    for k = 1, trailWpCount do
+      -- Ring-buffer index: oldest is (trailHead % trailWpCount) + 1 when full.
+      local idx
+      if trailWpCount < TRAIL_MAX_WAYPOINTS then
+        idx = k
+      else
+        idx = ((trailHead + k - 1) % TRAIL_MAX_WAYPOINTS) + 1
+      end
+      local sx = baseX + trailTpx[idx]
+      local sy = baseY + trailTpy[idx]
+      if anchorSX then
+        local dx, dy = sx - anchorSX, sy - anchorSY
+        if dx * dx + dy * dy >= MIN_TRAIL_PX_SQ then
+          local cx1, cy1, cx2, cy2 = clipLine(anchorSX, anchorSY, sx, sy, x, y, x + w, y + h)
+          if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+          anchorSX, anchorSY = sx, sy
+        end
+        -- else: segment too short, keep anchor, skip draw
+      else
+        anchorSX, anchorSY = sx, sy
+      end
     end
-    -- Dynamic segment: last fixed anchor to current UAV position.
-    local x1, y1 = trailToScreen(trailWaypoints[trailWpCount][1], trailWaypoints[trailWpCount][2])
-    lcd.drawLine(x1, y1, myScreenX + renderOffsetX, myScreenY + renderOffsetY)
+    -- Dynamic segment: newest waypoint to current UAV position.
+    if anchorSX then
+      local uavX, uavY = myScreenX + renderOffsetX, myScreenY + renderOffsetY
+      local cx1, cy1, cx2, cy2 = clipLine(anchorSX, anchorSY, uavX, uavY, x, y, x + w, y + h)
+      if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+    end
   end
 
   if zoomUpdate then
@@ -662,21 +753,22 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
     lastZoomLevel = level
-    if provider ~= lastMapProvider then
-      mapLib.clearTrail()
-    end
     lastMapProvider = provider
     lastMapType = mapType
   end
 end
 
 function mapLib.clearTrail()
-  -- Resets the GPS trail chain. Called on map provider change and on user-triggered widget reset.
+  -- Resets the GPS trail ring-buffer. Called on disable and user reset.
   libs.resetLib.clearTable(trailWaypoints)
+  libs.resetLib.clearTable(trailTpx)
+  libs.resetLib.clearTable(trailTpy)
   trailWpCount = 0
+  trailHead = 0
   trailAccumDist = 0
   trailLastLat = nil
   trailLastLon = nil
+  trailCachedLevel = nil
 end
 
 function mapLib.init(param_status, param_libs)

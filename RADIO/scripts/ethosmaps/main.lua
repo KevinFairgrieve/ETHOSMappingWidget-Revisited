@@ -91,7 +91,8 @@ local mapStatus = {
     mapZoomLevel = 19,
     mapZoomMax = 20,
     mapZoomMin = 1,
-    mapTrailLength = 5,  -- Trail length in km (0=off, 1, 5, 10, 25, 50).
+    mapTrailResolution = 50, -- Trail waypoint distance in meters (0=off, 20, 50, 100, 500, 1000).
+    mapTrailHeadingThreshold = 5, -- Minimum heading change (degrees) before committing a new trail waypoint.
     enableDebugLog = false,   -- Enables the on-device debug log.
     enablePerfProfile = false, -- Emits 5s performance summaries into debug.log.
     -- Telemetry source mode: 1 = ETHOS (hardcoded GPS), 2 = Sensors (user-assigned sources).
@@ -450,17 +451,19 @@ end
 
 mapStatus.blinkTimer = getTime()
 local bgclock = 0
+local cachedGpsSrcLat = nil
+local cachedGpsSrcLon = nil
 
 local function bgtasks(widget)
   -- Collects telemetry from Ethos sources, derives navigation values, and writes the updated state back into mapStatus.
   local now = getTime()
-  mapStatus.counter = mapStatus.counter + 1
-
   -- Re-emit session header if it was skipped (e.g. after a log rollover or a failed first attempt).
   if not mapStatus.sessionLogged then
     logDebugSessionStart("bgtasks-retry")
   end
   local gpsData = {}
+  local sensorHeadingActive = false
+  local sensorSpeedActive = false
   if mapStatus.conf.telemetrySourceMode == 2 then
     -- Sensors mode: read from user-assigned sources.
     local srcLat = mapStatus.conf.sensorGpsLat
@@ -475,24 +478,30 @@ local function bgtasks(widget)
     local srcHdg = mapStatus.conf.sensorHeading
     if srcHdg ~= nil and type(srcHdg.value) == "function" then
       local hdg = srcHdg:value()
-      if hdg ~= nil then
+      if hdg ~= nil and hdg ~= 0 then
         mapStatus.telemetry.yaw = hdg
+        sensorHeadingActive = true
       end
     end
     -- Optional speed source → telemetry.groundSpeed (overrides calculated speed).
     local srcSpd = mapStatus.conf.sensorSpeed
     if srcSpd ~= nil and type(srcSpd.value) == "function" then
       local spd = srcSpd:value()
-      if spd ~= nil then
+      if spd ~= nil and spd ~= 0 then
         mapStatus.telemetry.groundSpeed = spd
+        sensorSpeedActive = true
       end
     end
   else
-    -- ETHOS mode: hardcoded GPS source.
-    local gpsSrcLat = system.getSource({name="GPS", options=OPTION_LATITUDE})
-    local gpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
-    gpsData.lat = gpsSrcLat and gpsSrcLat:value() or nil
-    gpsData.lon = gpsSrcLon and gpsSrcLon:value() or nil
+    -- ETHOS mode: hardcoded GPS source (cached to avoid per-cycle allocations).
+    if cachedGpsSrcLat == nil then
+      cachedGpsSrcLat = system.getSource({name="GPS", options=OPTION_LATITUDE})
+    end
+    if cachedGpsSrcLon == nil then
+      cachedGpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
+    end
+    gpsData.lat = cachedGpsSrcLat and cachedGpsSrcLat:value() or nil
+    gpsData.lon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
   end
   if gpsData.lat ~= nil and gpsData.lon ~= nil then
     mapStatus.telemetry.lat = gpsData.lat
@@ -522,9 +531,8 @@ local function bgtasks(widget)
     if now - mapStatus.avgSpeed.lastSampleTime > 100 then
       local travelDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.avgSpeed.lastLat, mapStatus.avgSpeed.lastLon)
       local travelTime = now - mapStatus.avgSpeed.lastSampleTime
-      -- Only derive speed from GPS deltas when no external speed source is active.
-      local hasExternalSpeed = (mapStatus.conf.telemetrySourceMode == 2 and mapStatus.conf.sensorSpeed ~= nil)
-      if not hasExternalSpeed and travelDist < 10000 then
+      -- Only derive speed from GPS deltas when no external speed source provided a value.
+      if not sensorSpeedActive and travelDist < 10000 then
         mapStatus.avgSpeed.avgTravelDist = mapStatus.avgSpeed.avgTravelDist * 0.8 + travelDist*0.2
         mapStatus.avgSpeed.avgTravelTime = mapStatus.avgSpeed.avgTravelTime * 0.8 + 0.01 * travelTime * 0.2
         mapStatus.avgSpeed.value = mapStatus.avgSpeed.avgTravelDist/mapStatus.avgSpeed.avgTravelTime
@@ -552,10 +560,13 @@ local function bgtasks(widget)
         mapStatus.telemetry.strLon = string.format("%.06f", mapStatus.telemetry.lon)
       end
     end
-    -- Only derive COG from GPS movement when no external heading source is active.
-    local hasExternalHeading = (mapStatus.conf.telemetrySourceMode == 2 and mapStatus.conf.sensorHeading ~= nil)
-    if not hasExternalHeading then
+    -- Only derive COG from GPS movement when no external heading source provided a value.
+    if not sensorHeadingActive then
       mapLibs.utils.updateCog()
+      -- Sync yaw from cog so displays reading (yaw or cog) show the calculated heading.
+      if mapStatus.telemetry.cog then
+        mapStatus.telemetry.yaw = mapStatus.telemetry.cog
+      end
     end
   end
 
@@ -832,73 +843,40 @@ local function wakeup(widget)
         fps = paintCalls / elapsedSec
       end
 
-      mapLibs.utils.logDebug("PERF", "=== PERF WINDOW " .. perfValueText(elapsedSec, 1) .. "s ===", true)
-      mapLibs.utils.logDebug("PERF", "+----------+------------------+------------------+------------------+", true)
-      mapLibs.utils.logDebug(
-        "PERF",
-        perfTableRow(
-          "rate",
+      -- Build all perf rows first, then print once to avoid UART buffer overflow.
+      local perfBorder = "+----------+------------------+------------------+------------------+"
+      local perfRows = {
+        "=== PERF WINDOW " .. perfValueText(elapsedSec, 1) .. "s ===",
+        perfBorder,
+        perfTableRow("rate",
           perfTableCell("fps", perfValueText(fps, 2)),
           perfTableCell("wakeups", wakeupCalls),
-          perfTableCell("paints", paintCalls)
-        ),
-        true
-      )
-      mapLibs.utils.logDebug(
-        "PERF",
-        perfTableRow(
-          "draw",
+          perfTableCell("paints", paintCalls)),
+        perfTableRow("draw",
           perfTableCell("paintMs", perfValueText(perfMetricAvg("paint_total_ms"), 2)),
           perfTableCell("layoutMs", perfValueText(perfMetricAvg("layout_draw_ms"), 2)),
-          perfTableCell("tileMs", perfValueText(perfMetricAvg("tile_update_ms"), 2))
-        ),
-        true
-      )
-      mapLibs.utils.logDebug(
-        "PERF",
-        perfTableRow(
-          "misc",
+          perfTableCell("tileMs", perfValueText(perfMetricAvg("tile_update_ms"), 2))),
+        perfTableRow("misc",
           perfTableCell("bgMs", perfValueText(perfMetricAvg("bgtasks_ms"), 2)),
           perfTableCell("tileLoadMs", perfValueText(perfMetricAvg("tile_load_ms"), 2)),
-          perfTableCell("flushMs", perfValueText(perfMetricAvg("log_flush_ms"), 2))
-        ),
-        true
-      )
-      mapLibs.utils.logDebug(
-        "PERF",
-        perfTableRow(
-          "counts",
+          perfTableCell("flushMs", perfValueText(perfMetricAvg("log_flush_ms"), 2))),
+        perfTableRow("counts",
           perfTableCell("rebuilds", mapStatus.perfProfile.counters.tile_rebuild_count or 0),
           perfTableCell("tileCalls", mapStatus.perfProfile.counters.tile_update_calls or 0),
-          perfTableCell("touches", mapStatus.perfProfile.counters.touch_events or 0)
-        ),
-        true
-      )
-      mapLibs.utils.logDebug(
-        "PERF",
-        perfTableRow(
-          "sched",
+          perfTableCell("touches", mapStatus.perfProfile.counters.touch_events or 0)),
+        perfTableRow("sched",
           perfTableCell("invalidates", mapStatus.perfProfile.counters.invalidate_count or 0),
           perfTableCell("frame100ms", mapStatus.perfProfile.counters.long_frame_count_100ms or 0),
-          perfTableCell("frame200ms", mapStatus.perfProfile.counters.long_frame_count_200ms or 0)
-        ),
-        true
-      )
-      mapLibs.utils.logDebug(
-        "PERF",
-        perfTableRow(
-          "gc",
+          perfTableCell("frame200ms", mapStatus.perfProfile.counters.long_frame_count_200ms or 0)),
+        perfTableRow("gc",
           perfTableCell("gcCalls", mapStatus.perfProfile.counters.gc_count or 0),
           perfTableCell("-", "-"),
-          perfTableCell("-", "-")
-        ),
-        true
-      )
-      mapLibs.utils.logDebug(
-        "PERF",
-        "+----------+------------------+------------------+------------------+",
-        true
-      )
+          perfTableCell("-", "-")),
+        perfBorder,
+      }
+      for i = 1, #perfRows do
+        mapLibs.utils.logDebug("PERF", perfRows[i], true)
+      end
       perfResetWindow(perfNowWallMs)
     end
   end
@@ -917,6 +895,7 @@ local function wakeup(widget)
 
   -- Step B: Periodische Garbage Collection (alle 10 Wakeups)
   if frameWakeupCount % 10 == 0 then
+    collectgarbage()
     collectgarbage()
     if perfActive then
       perfInc("gc_count", 1)
@@ -1745,12 +1724,19 @@ local function configure(widget)
   line = form.addLine("GPS coordinates format")
   form.addChoiceField(line, form.getFieldSlots(line)[0], {{"DMS",1},{"Decimal",2}}, function() return mapStatus.conf.gpsFormat end, function(value) mapStatus.conf.gpsFormat = value end)
 
-  line = form.addLine("Trail length")
+  line = form.addLine("Trail resolution")
   form.addChoiceField(line, form.getFieldSlots(line)[0],
-    {{"Off", 0}, {"1 km", 1}, {"5 km", 5}, {"10 km", 10}, {"25 km", 25}, {"50 km", 50}},
-    function() return mapStatus.conf.mapTrailLength end,
-    function(value) mapStatus.conf.mapTrailLength = value end
+    {{"Off", 0}, {"20 m", 20}, {"50 m", 50}, {"100 m", 100}, {"500 m", 500}, {"1 km", 1000}},
+    function() return mapStatus.conf.mapTrailResolution end,
+    function(value) mapStatus.conf.mapTrailResolution = value end
   )
+
+  line = form.addLine("Trail bend threshold")
+  form.addNumberField(line, nil, 3, 15,
+    function() return mapStatus.conf.mapTrailHeadingThreshold end,
+    function(value) mapStatus.conf.mapTrailHeadingThreshold = value end
+  )
+  form.addStaticText(line, nil, "deg")
 
   -- ── Debug & Developer Tools ─────────────────────────────────────────────
 
@@ -1786,16 +1772,6 @@ local function configure(widget)
       if widget.enablePerfProfileField ~= nil then
         widget.enablePerfProfileField:enable(mapStatus.flagEnabled(value))
       end
-      -- Toggle telemetry source fields based on debug log state
-      local debugOn = mapStatus.flagEnabled(value)
-      if widget.telemetrySourceModeField ~= nil then
-        widget.telemetrySourceModeField:enable(debugOn)
-      end
-      local sensorsActive = debugOn and mapStatus.conf.telemetrySourceMode == 2
-      if widget.sensorGpsLatField ~= nil then widget.sensorGpsLatField:enable(sensorsActive) end
-      if widget.sensorGpsLonField ~= nil then widget.sensorGpsLonField:enable(sensorsActive) end
-      if widget.sensorHeadingField ~= nil then widget.sensorHeadingField:enable(sensorsActive) end
-      if widget.sensorSpeedField ~= nil then widget.sensorSpeedField:enable(sensorsActive) end
     end
   )
 
@@ -1825,7 +1801,7 @@ local function configure(widget)
   -- Only show perf profile option when debug logging is enabled.
   widget.enablePerfProfileField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog))
 
-  -- Telemetry source mode: only visible when debug logging is enabled.
+  -- Telemetry source mode: allows switching between ETHOS and direct sensor input.
   line = form.addLine("Telemetry source")
   widget.telemetrySourceModeField = form.addChoiceField(line, form.getFieldSlots(line)[0],
     {{"ETHOS", 1}, {"Sensors", 2}},
@@ -1840,35 +1816,34 @@ local function configure(widget)
       if widget.sensorSpeedField ~= nil then widget.sensorSpeedField:enable(sensorsActive) end
     end
   )
-  widget.telemetrySourceModeField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog))
 
   line = form.addLine("GPS Lat source")
   widget.sensorGpsLatField = form.addSourceField(line, nil,
     function() return mapStatus.conf.sensorGpsLat end,
     function(value) mapStatus.conf.sensorGpsLat = value end
   )
-  widget.sensorGpsLatField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+  widget.sensorGpsLatField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("GPS Lon source")
   widget.sensorGpsLonField = form.addSourceField(line, nil,
     function() return mapStatus.conf.sensorGpsLon end,
     function(value) mapStatus.conf.sensorGpsLon = value end
   )
-  widget.sensorGpsLonField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+  widget.sensorGpsLonField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("Heading source (optional)")
   widget.sensorHeadingField = form.addSourceField(line, nil,
     function() return mapStatus.conf.sensorHeading end,
     function(value) mapStatus.conf.sensorHeading = value end
   )
-  widget.sensorHeadingField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+  widget.sensorHeadingField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("Speed source (optional)")
   widget.sensorSpeedField = form.addSourceField(line, nil,
     function() return mapStatus.conf.sensorSpeed end,
     function(value) mapStatus.conf.sensorSpeed = value end
   )
-  widget.sensorSpeedField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog) and mapStatus.conf.telemetrySourceMode == 2)
+  widget.sensorSpeedField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("Widget version")
   form.addStaticText(line, nil, "1.0.0 beta4")
@@ -1890,7 +1865,8 @@ local function read(widget)
   mapStatus.conf.mapZoomMax = storageToConfigWithFallback("mapZoomMax", 20, {"googleZoomMax", "gmapZoomMax"})
   mapStatus.conf.enableDebugLog = storageToConfig("enableDebugLog", false)
   mapStatus.conf.enablePerfProfile = storageToConfig("enablePerfProfile", false)
-  mapStatus.conf.mapTrailLength = storageToConfig("mapTrailLength", 5)
+  mapStatus.conf.mapTrailResolution = storageToConfig("mapTrailResolution", 50)
+  mapStatus.conf.mapTrailHeadingThreshold = storageToConfig("mapTrailHeadingThreshold", 5)
   mapStatus.conf.linkQualitySource = storageToConfig("linkQualitySource", nil)
   mapStatus.conf.userSensor1 = storageToConfig("userSensor1", nil)
   mapStatus.conf.userSensor2 = storageToConfig("userSensor2", nil)
@@ -1919,7 +1895,8 @@ local function write(widget)
   storage.write("mapZoomMax", mapStatus.conf.mapZoomMax)
   storage.write("enableDebugLog", mapStatus.conf.enableDebugLog)
   storage.write("enablePerfProfile", mapStatus.conf.enablePerfProfile)
-  storage.write("mapTrailLength", mapStatus.conf.mapTrailLength)
+  storage.write("mapTrailResolution", mapStatus.conf.mapTrailResolution)
+  storage.write("mapTrailHeadingThreshold", mapStatus.conf.mapTrailHeadingThreshold)
   storage.write("linkQualitySource", mapStatus.conf.linkQualitySource)
   storage.write("userSensor1", mapStatus.conf.userSensor1)
   storage.write("userSensor2", mapStatus.conf.userSensor2)

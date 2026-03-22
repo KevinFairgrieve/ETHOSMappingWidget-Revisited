@@ -25,6 +25,8 @@ local drawLib = {}
 local bitmaps = {}
 local topBarUnifiedFont = nil
 local topBarValueCache = {}
+local topBarValueCacheCount = 0
+local TOP_BAR_CACHE_MAX = 20
 
 -- Pre-computed angle offsets for drawRArrow (constants, never change).
 local ARROW_ANG_150  = math.rad(150)
@@ -75,10 +77,15 @@ local function safeSensorValueText(sensor)
     end
   end
 
+  if topBarValueCacheCount >= TOP_BAR_CACHE_MAX then
+    topBarValueCache = {}
+    topBarValueCacheCount = 0
+  end
   topBarValueCache[cacheKey] = {
     tickSerial = barTickSerial,
     text = valueText
   }
+  topBarValueCacheCount = topBarValueCacheCount + 1
 
   return valueText
 end
@@ -339,11 +346,45 @@ function drawLib.isInside(x,y,xmin,ymin,xmax,ymax)
   return drawLib.computeOutCode(x,y,xmin,ymin,xmax,ymax) == 0
 end
 
+-- Cohen-Sutherland line clipping against a rectangular viewport.
+-- Returns clipped x1,y1,x2,y2 or nil if the segment is entirely outside.
+function drawLib.clipLine(x1, y1, x2, y2, xmin, ymin, xmax, ymax)
+  local function outCode(x, y)
+    local code = 0
+    if x < xmin then code = code | 1
+    elseif x > xmax then code = code | 2 end
+    if y < ymin then code = code | 8
+    elseif y > ymax then code = code | 4 end
+    return code
+  end
+  local code1 = outCode(x1, y1)
+  local code2 = outCode(x2, y2)
+  for _ = 1, 20 do
+    if (code1 | code2) == 0 then return x1, y1, x2, y2 end
+    if (code1 & code2) ~= 0 then return nil end
+    local codeOut = code1 ~= 0 and code1 or code2
+    local x, y
+    if (codeOut & 8) ~= 0 then
+      x = x1 + (x2 - x1) * (ymin - y1) / (y2 - y1); y = ymin
+    elseif (codeOut & 4) ~= 0 then
+      x = x1 + (x2 - x1) * (ymax - y1) / (y2 - y1); y = ymax
+    elseif (codeOut & 2) ~= 0 then
+      y = y1 + (y2 - y1) * (xmax - x1) / (x2 - x1); x = xmax
+    else
+      y = y1 + (y2 - y1) * (xmin - x1) / (x2 - x1); x = xmin
+    end
+    if codeOut == code1 then x1 = x; y1 = y; code1 = outCode(x, y)
+    else x2 = x; y2 = y; code2 = outCode(x, y) end
+  end
+  return nil
+end
+
 function drawLib.init(param_status, param_libs)
   -- Stores shared state references so drawing helpers can read status values and call sibling libraries.
   status = param_status
   libs = param_libs
   topBarValueCache = {}
+  topBarValueCacheCount = 0
   return drawLib
 end
 
