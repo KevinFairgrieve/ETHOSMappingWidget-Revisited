@@ -98,6 +98,9 @@ function panel.draw(widget)
   local h = status.widgetHeight
   local sx = status.scaleX
   local sy = status.scaleY
+  local conf = status.conf
+  local colors = status.colors
+  local telemetry = status.telemetry
 
   -- Guard: widget area too small to render meaningfully.
   if w < 200 or h < 100 then
@@ -173,7 +176,7 @@ function panel.draw(widget)
   status.mapLastZoom = status.mapZoomLevel
 
   -- Draw the map viewport for the current layout.
-  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, mapTilesX, mapTilesY, status.telemetry.yaw or status.telemetry.cog, mapNeedsUpdate)
+  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, mapTilesX, mapTilesY, telemetry.yaw or telemetry.cog, mapNeedsUpdate)
 
   -- Draw the dedicated left-side zoom buttons.
   local scaleFactor = 0.15 + 0.8 * status.scaleX
@@ -211,7 +214,7 @@ function panel.draw(widget)
     local overlayPadY = max(3, floor(4 * sy))
     local overlayMargin = max(6, floor(8 * sx))
 
-    local gpsText = status.telemetry.strLat .. " " .. status.telemetry.strLon
+    local gpsText = telemetry.strLat .. " " .. telemetry.strLon
     local gpsTw, gpsTh = lcd.getTextSize(gpsText)
     local gpsBoxW = gpsTw + 2 * overlayPadX
     local gpsBoxH = gpsTh + 2 * overlayPadY
@@ -220,7 +223,7 @@ function panel.draw(widget)
 
     lcd.color(lcd.RGB(0,0,0,0.45))
     lcd.drawFilledRectangle(gpsBoxX, gpsBoxY, gpsBoxW, gpsBoxH)
-    lcd.color(status.colors.white)
+    lcd.color(colors.white)
     lcd.drawText(gpsBoxX + floor((gpsBoxW - gpsTw) / 2), gpsBoxY + floor((gpsBoxH - gpsTh) / 2), gpsText)
 
     local zoomText = "zoom " .. tostring(status.mapZoomLevel)
@@ -232,7 +235,7 @@ function panel.draw(widget)
 
     lcd.color(lcd.RGB(0,0,0,0.45))
     lcd.drawFilledRectangle(zoomBoxX, zoomBoxY, zoomBoxW, zoomBoxH)
-    lcd.color(status.colors.white)
+    lcd.color(colors.white)
     lcd.drawText(zoomBoxX + floor((zoomBoxW - zoomTw) / 2), zoomBoxY + floor((zoomBoxH - zoomTh) / 2), zoomText)
   end
 
@@ -255,13 +258,13 @@ function panel.draw(widget)
     local homeLabel   = verticalMedium and "HD" or "HomeDist"
 
     -- Delta-check bar strings (Optimization D): only re-format when the computed value changes.
-    local gspdVal = barSnapshot.groundSpeed * status.conf.horSpeedMultiplier
+    local gspdVal = barSnapshot.groundSpeed * conf.horSpeedMultiplier
     if gspdVal ~= _lastGSpdVal then
       _lastGSpdVal = gspdVal
       _cachedGSpdStr = fmt("%.01f", gspdVal)
     end
 
-    local travVal = barSnapshot.travelDist * status.conf.distUnitLongScale
+    local travVal = barSnapshot.travelDist * conf.distUnitLongScale
     if travVal ~= _lastTravVal then
       _lastTravVal = travVal
       _cachedTravStr = fmt("%.01f", travVal)
@@ -273,7 +276,7 @@ function panel.draw(widget)
       _cachedHdgStr = fmt("%.0f", hdgVal)
     end
 
-    local hDistVal = barSnapshot.homeDist * status.conf.distUnitScale
+    local hDistVal = barSnapshot.homeDist * conf.distUnitScale
     if hDistVal ~= _lastHDistVal then
       _lastHDistVal = hDistVal
       _cachedHDistStr = fmt("%.01f", hDistVal)
@@ -282,32 +285,32 @@ function panel.draw(widget)
     if hideHomeDistAndHeading then
       drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
         _cachedGSpdStr,
-        status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
+        conf.horSpeedLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false)
 
       drawBarSensor(w - 12*sx, barTop, bottomH, "TR",
         _cachedTravStr,
-        status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
+        conf.distUnitLongLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false, RIGHT)
     else
       local offset = drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
         _cachedGSpdStr,
-        status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
+        conf.horSpeedLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false)
 
       offset = offset + drawBarSensor(12*sx + offset + spacing, barTop, bottomH, "HDG",
         _cachedHdgStr, "°",
-        barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
+        barFont, barMetaFont, barFont, colors.white, labelColor, false)
 
       local travelOffset = drawBarSensor(w, barTop, bottomH, "TR",
         _cachedTravStr,
-        status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
+        conf.distUnitLongLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false, RIGHT)
 
       drawBarSensor(w - travelOffset - spacing - 15*sx, barTop, bottomH, homeLabel,
         _cachedHDistStr,
-        status.conf.distUnitLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
+        conf.distUnitLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false, RIGHT)
     end
   end
 
   -- Draw the home-direction arrow whenever a home position is available.
-  if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil then
+  if telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
     local baseArrowSize = floor(42 * min(sx, sy))
     local arrowSize = baseArrowSize
     if ultraTiny then
@@ -319,13 +322,13 @@ function panel.draw(widget)
     local arrowX = w - arrowSize * 1.2
     local arrowY = horizontalTiny and (h - 55*sy - 20) or (h - bottomH + (bottomH / 2) - 60*sy - 20)
 
-    local homeHeading = status.telemetry.homeAngle - (status.telemetry.yaw or status.telemetry.cog or 0)
-    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize - 7, floor(homeHeading), status.colors.yellow)
-    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize, floor(homeHeading), status.colors.black)
+    local homeHeading = telemetry.homeAngle - (telemetry.yaw or telemetry.cog or 0)
+    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize - 7, floor(homeHeading), colors.yellow)
+    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize, floor(homeHeading), colors.black)
   end
 
   -- Warn the pilot when live GPS is present but no home position has been stored yet.
-  if status.telemetry.lat ~= nil and (status.telemetry.homeLat == nil or status.telemetry.homeLon == nil) then
+  if telemetry.lat ~= nil and (telemetry.homeLat == nil or telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
     local font = verticalMedium and FONT_S or FONT_L
     lcd.font(font)
@@ -345,8 +348,8 @@ function panel.draw(widget)
     lcd.color(WHITE)
     lcd.drawRectangle(boxX, boxY, boxW, boxH, 2)
 
-    lcd.color(status.colors.yellow)
-    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2, warningText, font, status.colors.yellow, CENTERED, true)
+    lcd.color(colors.yellow)
+    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2, warningText, font, colors.yellow, CENTERED, true)
   end
 
     -- Draw the map scale bar when the viewport is large enough to keep it readable.

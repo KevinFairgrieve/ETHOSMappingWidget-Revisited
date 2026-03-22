@@ -45,18 +45,35 @@ local ARROW_ANG_150  = rad(150)
 local ARROW_ANG_N150 = rad(-150)
 local ARROW_ANG_180  = rad(180)
 
+-- Per-tick cache for safeSensorName to avoid redundant pcall overhead.
+local _sensorNameCache = {}
+local _sensorNameCacheTick = -1
+
 local function safeSensorName(sensor)
   if sensor == nil then
     return nil
   end
+  local barTickSerial = (status and status.barTickSerial) or 0
+  if barTickSerial ~= _sensorNameCacheTick then
+    _sensorNameCache = {}
+    _sensorNameCacheTick = barTickSerial
+  end
+  local key = tostring(sensor)
+  local cached = _sensorNameCache[key]
+  if cached ~= nil then
+    return cached ~= false and cached or nil
+  end
   local ok, value = pcall(function() return sensor:name() end)
   if not ok or value == nil then
+    _sensorNameCache[key] = false
     return nil
   end
   value = tostring(value)
   if value == "" or value == "---" then
+    _sensorNameCache[key] = false
     return nil
   end
+  _sensorNameCache[key] = value
   return value
 end
 

@@ -471,13 +471,16 @@ local function bgtasks(widget)
   if not mapStatus.sessionLogged then
     logDebugSessionStart("bgtasks-retry")
   end
+  local conf = mapStatus.conf
+  local telemetry = mapStatus.telemetry
+  local avgSpeed = mapStatus.avgSpeed
   local gpsLat, gpsLon = nil, nil
   local sensorHeadingActive = false
   local sensorSpeedActive = false
-  if mapStatus.conf.telemetrySourceMode == 2 then
+  if conf.telemetrySourceMode == 2 then
     -- Sensors mode: read from user-assigned sources.
-    local srcLat = mapStatus.conf.sensorGpsLat
-    local srcLon = mapStatus.conf.sensorGpsLon
+    local srcLat = conf.sensorGpsLat
+    local srcLon = conf.sensorGpsLon
     if srcLat ~= nil and type(srcLat.value) == "function" then
       gpsLat = srcLat:value()
     end
@@ -485,20 +488,20 @@ local function bgtasks(widget)
       gpsLon = srcLon:value()
     end
     -- Optional heading source → telemetry.yaw (overrides calculated COG).
-    local srcHdg = mapStatus.conf.sensorHeading
+    local srcHdg = conf.sensorHeading
     if srcHdg ~= nil and type(srcHdg.value) == "function" then
       local hdg = srcHdg:value()
       if hdg ~= nil and hdg ~= 0 then
-        mapStatus.telemetry.yaw = hdg
+        telemetry.yaw = hdg
         sensorHeadingActive = true
       end
     end
     -- Optional speed source → telemetry.groundSpeed (overrides calculated speed).
-    local srcSpd = mapStatus.conf.sensorSpeed
+    local srcSpd = conf.sensorSpeed
     if srcSpd ~= nil and type(srcSpd.value) == "function" then
       local spd = srcSpd:value()
       if spd ~= nil and spd ~= 0 then
-        mapStatus.telemetry.groundSpeed = spd
+        telemetry.groundSpeed = spd
         sensorSpeedActive = true
       end
     end
@@ -514,13 +517,13 @@ local function bgtasks(widget)
     gpsLon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
   end
   if gpsLat ~= nil and gpsLon ~= nil then
-    mapStatus.telemetry.lat = gpsLat
-    mapStatus.telemetry.lon = gpsLon
+    telemetry.lat = gpsLat
+    telemetry.lon = gpsLon
 
     -- Log GPS position at most once every 15 seconds to avoid flooding the debug log.
     if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
-      local lat = mapStatus.telemetry.lat or 0
-      local lon = mapStatus.telemetry.lon or 0
+      local lat = telemetry.lat or 0
+      local lon = telemetry.lon or 0
       local gpsLogInterval = 1500 -- centiseconds (15 seconds)
       if now - (mapStatus.lastGpsLogTime or 0) >= gpsLogInterval then
         mapLibs.utils.logDebug("GPS", fmt("lat=%.6f lon=%.6f", lat, lon))
@@ -531,51 +534,51 @@ local function bgtasks(widget)
     end
   end
 
-  if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
-    if mapStatus.avgSpeed.lastLat == nil or mapStatus.avgSpeed.lastLon == nil then
-      mapStatus.avgSpeed.lastLat = mapStatus.telemetry.lat
-      mapStatus.avgSpeed.lastLon = mapStatus.telemetry.lon
-      mapStatus.avgSpeed.lastSampleTime = now
+  if telemetry.lat ~= nil and telemetry.lon ~= nil then
+    if avgSpeed.lastLat == nil or avgSpeed.lastLon == nil then
+      avgSpeed.lastLat = telemetry.lat
+      avgSpeed.lastLon = telemetry.lon
+      avgSpeed.lastSampleTime = now
     end
 
-    if now - mapStatus.avgSpeed.lastSampleTime > 100 then
-      local travelDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.avgSpeed.lastLat, mapStatus.avgSpeed.lastLon)
-      local travelTime = now - mapStatus.avgSpeed.lastSampleTime
+    if now - avgSpeed.lastSampleTime > 100 then
+      local travelDist = mapLibs.utils.haversine(telemetry.lat, telemetry.lon, avgSpeed.lastLat, avgSpeed.lastLon)
+      local travelTime = now - avgSpeed.lastSampleTime
       -- Only derive speed from GPS deltas when no external speed source provided a value.
       if not sensorSpeedActive and travelDist < 10000 then
-        mapStatus.avgSpeed.avgTravelDist = mapStatus.avgSpeed.avgTravelDist * 0.8 + travelDist*0.2
-        mapStatus.avgSpeed.avgTravelTime = mapStatus.avgSpeed.avgTravelTime * 0.8 + 0.01 * travelTime * 0.2
-        mapStatus.avgSpeed.value = mapStatus.avgSpeed.avgTravelDist/mapStatus.avgSpeed.avgTravelTime
-        mapStatus.avgSpeed.travelDist = mapStatus.avgSpeed.travelDist + mapStatus.avgSpeed.avgTravelDist
-        mapStatus.telemetry.groundSpeed = mapStatus.avgSpeed.value
+        avgSpeed.avgTravelDist = avgSpeed.avgTravelDist * 0.8 + travelDist*0.2
+        avgSpeed.avgTravelTime = avgSpeed.avgTravelTime * 0.8 + 0.01 * travelTime * 0.2
+        avgSpeed.value = avgSpeed.avgTravelDist/avgSpeed.avgTravelTime
+        avgSpeed.travelDist = avgSpeed.travelDist + avgSpeed.avgTravelDist
+        telemetry.groundSpeed = avgSpeed.value
       end
-      mapStatus.avgSpeed.lastLat = mapStatus.telemetry.lat
-      mapStatus.avgSpeed.lastLon = mapStatus.telemetry.lon
-      mapStatus.avgSpeed.lastSampleTime = now
+      avgSpeed.lastLat = telemetry.lat
+      avgSpeed.lastLon = telemetry.lon
+      avgSpeed.lastSampleTime = now
 
-      if mapStatus.telemetry.homeLat ~= nil and mapStatus.telemetry.homeLon ~= nil then
-        mapStatus.telemetry.homeDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.telemetry.homeLat, mapStatus.telemetry.homeLon)
-        mapStatus.telemetry.homeAngle = mapLibs.utils.getAngleFromLatLon(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.telemetry.homeLat, mapStatus.telemetry.homeLon)
+      if telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
+        telemetry.homeDist = mapLibs.utils.haversine(telemetry.lat, telemetry.lon, telemetry.homeLat, telemetry.homeLon)
+        telemetry.homeAngle = mapLibs.utils.getAngleFromLatLon(telemetry.lat, telemetry.lon, telemetry.homeLat, telemetry.homeLon)
       end
     end
   end
 
   if bgclock % 4 == 2 then
-    if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
-      if mapStatus.conf.gpsFormat == 1 then
-        mapStatus.telemetry.strLat = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lat)
-        mapStatus.telemetry.strLon = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lon, mapStatus.telemetry.lat)
+    if telemetry.lat ~= nil and telemetry.lon ~= nil then
+      if conf.gpsFormat == 1 then
+        telemetry.strLat = mapLibs.utils.decToDMSFull(telemetry.lat)
+        telemetry.strLon = mapLibs.utils.decToDMSFull(telemetry.lon, telemetry.lat)
       else
-        mapStatus.telemetry.strLat = fmt("%.06f", mapStatus.telemetry.lat)
-        mapStatus.telemetry.strLon = fmt("%.06f", mapStatus.telemetry.lon)
+        telemetry.strLat = fmt("%.06f", telemetry.lat)
+        telemetry.strLon = fmt("%.06f", telemetry.lon)
       end
     end
     -- Only derive COG from GPS movement when no external heading source provided a value.
     if not sensorHeadingActive then
       mapLibs.utils.updateCog()
       -- Sync yaw from cog so displays reading (yaw or cog) show the calculated heading.
-      if mapStatus.telemetry.cog then
-        mapStatus.telemetry.yaw = mapStatus.telemetry.cog
+      if telemetry.cog then
+        telemetry.yaw = telemetry.cog
       end
     end
   end

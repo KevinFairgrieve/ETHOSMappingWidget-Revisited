@@ -266,7 +266,9 @@ function tileLoader.processQueue(budget)
   -- Loads up to `budget` tiles from the queue.  Called once per wakeup() tick so
   -- SD I/O is spread across frames instead of blocking a single paint() call.
   -- High-priority tiles are always drained before low-priority ones.
-  if highHead > #highQueue and lowHead > #lowQueue then
+  local highLen = #highQueue
+  local lowLen  = #lowQueue
+  if highHead > highLen and lowHead > lowLen then
     return 0  -- Both queues empty; nothing to do.
   end
 
@@ -281,7 +283,7 @@ function tileLoader.processQueue(budget)
     pendingGCBeforeLoad = false
   end
 
-  while loaded < budget and highHead <= #highQueue do
+  while loaded < budget and highHead <= highLen do
     local path        = highQueue[highHead]
     highHead          = highHead + 1
     if path ~= nil then
@@ -294,7 +296,7 @@ function tileLoader.processQueue(budget)
     end
   end
 
-  while loaded < budget and lowHead <= #lowQueue do
+  while loaded < budget and lowHead <= lowLen do
     local path        = lowQueue[lowHead]
     lowHead           = lowHead + 1
     if path ~= nil then
@@ -308,11 +310,11 @@ function tileLoader.processQueue(budget)
   end
 
   -- Compact arrays once fully drained to prevent unbounded index growth.
-  if highHead > #highQueue then
+  if highHead > highLen then
     highQueue = {}
     highHead  = 1
   end
-  if lowHead > #lowQueue then
+  if lowHead > lowLen then
     lowQueue = {}
     lowHead  = 1
   end
