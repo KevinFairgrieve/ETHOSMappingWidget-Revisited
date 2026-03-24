@@ -104,9 +104,9 @@ function panel.draw(widget)
 
   -- Guard: widget area too small to render meaningfully.
   if w < 200 or h < 100 then
-    lcd.color(lcd.RGB(255, 220, 0))
+    lcd.color(colors.warningYellow)
     lcd.drawFilledRectangle(0, 0, w, h)
-    lcd.color(lcd.RGB(0, 0, 0))
+    lcd.color(colors.black)
     lcd.font(FONT_STD)
     local line1 = "TOO SMALL!"
     local line2 = w .. " x " .. h .. " px"
@@ -223,7 +223,7 @@ function panel.draw(widget)
     local chX = floor(w / 2)
     local chY = mapY + floor(mapH / 2)
     local chHalf = floor(10 * min(sx, sy))
-    lcd.color(lcd.RGB(255, 0, 0))
+    lcd.color(colors.red)
     lcd.pen(SOLID)
     lcd.drawLine(chX - chHalf, chY, chX + chHalf, chY)
     lcd.drawLine(chX, chY - chHalf, chX, chY + chHalf)
@@ -237,16 +237,16 @@ function panel.draw(widget)
     local ltw, lth = lcd.getTextSize(limitText)
     local lbx = floor((w - ltw) / 2) - 8
     local lby = floor(h / 2) - floor(lth / 2) - 4
-    lcd.color(lcd.RGB(0, 0, 0, 0.6))
+    lcd.color(colors.semiBlack60)
     lcd.drawFilledRectangle(lbx, lby, ltw + 16, lth + 8)
-    lcd.color(lcd.RGB(255, 206, 0))
+    lcd.color(colors.yellow)
     lcd.drawText(lbx + 8, lby + 4, limitText)
   end
 
   -- Draw the top bar and text overlays only when the layout has enough vertical space.
   if not horizontalTiny then
     -- Bar backgrounds always drawn (even during pan) for consistent UI.
-    lcd.color(lcd.RGB(0,0,0))
+    lcd.color(colors.black)
     lcd.pen(SOLID)
     lcd.drawFilledRectangle(0, 0, w, topH)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
@@ -269,7 +269,7 @@ function panel.draw(widget)
     local gpsBoxX = max(overlayMargin, w - gpsBoxW - overlayMargin)
     local gpsBoxY = mapY + overlayMargin
 
-    lcd.color(lcd.RGB(0,0,0,0.45))
+    lcd.color(colors.semiBlack45)
     lcd.drawFilledRectangle(gpsBoxX, gpsBoxY, gpsBoxW, gpsBoxH)
     lcd.color(colors.white)
     lcd.drawText(gpsBoxX + floor((gpsBoxW - gpsTw) / 2), gpsBoxY + floor((gpsBoxH - gpsTh) / 2), gpsText)
@@ -281,7 +281,7 @@ function panel.draw(widget)
     local zoomBoxX = overlayMargin
     local zoomBoxY = mapY + overlayMargin
 
-    lcd.color(lcd.RGB(0,0,0,0.45))
+    lcd.color(colors.semiBlack45)
     lcd.drawFilledRectangle(zoomBoxX, zoomBoxY, zoomBoxW, zoomBoxH)
     lcd.color(colors.white)
     lcd.drawText(zoomBoxX + floor((zoomBoxW - zoomTw) / 2), zoomBoxY + floor((zoomBoxH - zoomTh) / 2), zoomText)
@@ -292,11 +292,11 @@ function panel.draw(widget)
   if not panActive and not horizontalTiny then
     local barSnapshot = getBarSnapshot()
 
-    lcd.color(lcd.RGB(0,0,0))
+    lcd.color(colors.black)
     lcd.pen(SOLID)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
 
-    local labelColor = lcd.RGB(170,170,170)
+    local labelColor = colors.labelGray
     local barTop = h - bottomH
     local barFont = verticalMedium and FONT_S or FONT_L
     local barMetaFont = FONT_XS
@@ -391,7 +391,7 @@ function panel.draw(widget)
 
     local boxY = floor((h - boxH) / 2)
 
-    lcd.color(lcd.RGB(0, 0, 0, 0.45))
+    lcd.color(colors.semiBlack45)
     lcd.drawFilledRectangle(boxX, boxY, boxW, boxH)
 
     lcd.color(WHITE)
@@ -412,7 +412,7 @@ function panel.draw(widget)
       local scaleY_line  = mapY + mapH - 18*sy
       local scaleY_label = scaleY_line - labelH - 4*sy
 
-      lcd.color(lcd.RGB(0, 0, 0, 0.45))
+      lcd.color(colors.semiBlack45)
       lcd.drawFilledRectangle(8*sx, scaleY_label - 5*sy, scaleLen + 20*sx, labelH + 22*sy)
 
       lcd.color(WHITE)

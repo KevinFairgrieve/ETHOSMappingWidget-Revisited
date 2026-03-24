@@ -811,7 +811,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     local uavDX = myScreenX + renderOffsetX
     local uavDY = myScreenY + renderOffsetY
     -- Green line from UAV to observation marker (clipped to viewport)
-    lcd.color(lcd.RGB(0, 200, 0))
+    lcd.color(status.colors.observationGreen)
     lcd.pen(SOLID)
     local cx1, cy1, cx2, cy2 = libs.drawLib.clipLine(uavDX, uavDY, markerX, markerY, x, y, x + w, y + h)
     if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
@@ -819,7 +819,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     local markerCode = libs.drawLib.computeOutCode(markerX, markerY, x + 6, y + 6, x + w - 6, y + h - 6)
     if markerCode == 0 then
       local mr = floor(5 * min(scaleX, scaleY))
-      lcd.color(lcd.RGB(0, 200, 0))
+      lcd.color(status.colors.observationGreen)
       for r = mr, 1, -1 do lcd.drawCircle(markerX, markerY, r) end
       lcd.color(BLACK)
       lcd.drawCircle(markerX, markerY, mr)

@@ -224,6 +224,12 @@ local mapStatus = {
     green = GREEN,
     black = BLACK,
     yellow = lcd.RGB(255,206,0),
+    warningYellow = lcd.RGB(255, 220, 0),
+    labelGray = lcd.RGB(170,170,170),
+    observationGreen = lcd.RGB(0, 200, 0),
+    semiBlack45 = lcd.RGB(0, 0, 0, 0.45),
+    semiBlack60 = lcd.RGB(0, 0, 0, 0.6),
+    loadingOverlay = lcd.RGB(20, 20, 20),
     panelLabel = lcd.RGB(150,150,150),
     panelText = lcd.RGB(255,255,255),
     panelBackground = lcd.RGB(56,60,56),
@@ -495,7 +501,7 @@ end
 local function loadLayout(widget)
   -- Draws a temporary loading overlay, then loads the layout module for the current screen into mapStatus.layout.
   lcd.pen(SOLID)
-  lcd.color(lcd.RGB(20, 20, 20))
+  lcd.color(mapStatus.colors.loadingOverlay)
   lcd.drawFilledRectangle(mapStatus.widgetWidth/4, mapStatus.widgetHeight/4, mapStatus.widgetWidth/2, mapStatus.widgetHeight/4)
   lcd.color(mapStatus.colors.white)
   lcd.drawRectangle(mapStatus.widgetWidth/4, mapStatus.widgetHeight/4, mapStatus.widgetWidth/2, mapStatus.widgetHeight/4,3)

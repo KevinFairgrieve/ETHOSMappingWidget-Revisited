@@ -22,6 +22,7 @@
 local tostring = tostring
 local floor, max, min = math.floor, math.max, math.min
 local sin, cos, rad = math.sin, math.cos, math.rad
+local sub = string.sub
 local tinsert = table.insert
 
 local status = nil
@@ -134,7 +135,7 @@ local function getTopBarSensorName(sensor, label, compactNames)
   local sensorName = safeSensorName(sensor)
   local name = label or sensorName or "SRC"
   if compactNames then
-    name = string.sub(name, 1, 4)
+    name = sub(name, 1, 4)
   end
   return name
 end
