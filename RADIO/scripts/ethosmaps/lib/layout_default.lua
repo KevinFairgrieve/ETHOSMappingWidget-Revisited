@@ -131,7 +131,14 @@ function panel.draw(widget)
   local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
   local ultraTiny = verticalTiny and horizontalTiny
 
+  -- Pan mode: suppress map overlays and freeze bar updates during active drag/grace.
+  -- PENDING is excluded — overlays stay visible until drag actually starts.
+  -- Detached-idle (followLock=false, panState=0) keeps overlays visible.
+  local panState = status.panState or 0
+  local panActive = panState == 1 or panState == 2  -- DRAGGING or GRACE only
+
   -- Derive the map viewport after reserving space for the top and bottom bars.
+  -- Bars stay visible during pan (frozen content) — map only renders in its normal area.
   local topH, bottomH
   if horizontalTiny then
     topH = 0
@@ -198,13 +205,54 @@ function panel.draw(widget)
   libs.drawLib.drawBitmap(btnX, btnYPlus, "zoom_plus", btnSize, btnSize)
   libs.drawLib.drawBitmap(btnX, btnYMinus, "zoom_minus", btnSize, btnSize)
 
+  -- Follow-lock button: right side, vertically centered (only when pan/drag is enabled).
+  if status.panDragEnabled then
+    local lockBtnX = w - btnX - btnSize
+    local lockBtnY = floor((h - btnSize) / 2)
+    local lockIcon = status.followLock and "flockon" or "flockoff"
+    libs.drawLib.drawBitmap(lockBtnX, lockBtnY, lockIcon, btnSize, btnSize)
+
+    -- Pin button: right side at zoom+ height, only when unlocked
+    if not status.followLock then
+      libs.drawLib.drawBitmap(lockBtnX, btnYPlus, "pinbutton", btnSize, btnSize)
+    end
+  end
+
+  -- Crosshair: red "+" at viewport center when follow-unlocked
+  if status.panDragEnabled and not status.followLock then
+    local chX = floor(w / 2)
+    local chY = mapY + floor(mapH / 2)
+    local chHalf = floor(10 * min(sx, sy))
+    lcd.color(lcd.RGB(255, 0, 0))
+    lcd.pen(SOLID)
+    lcd.drawLine(chX - chHalf, chY, chX + chHalf, chY)
+    lcd.drawLine(chX, chY - chHalf, chX, chY + chHalf)
+  end
+
+  -- Show zoom limit message
+  if (status.zoomLimitMessageEnd or 0) > status.getTime() then
+    local limitText = "ZOOM LIMIT"
+    local limitFont = verticalMedium and FONT_S or FONT_L
+    lcd.font(limitFont)
+    local ltw, lth = lcd.getTextSize(limitText)
+    local lbx = floor((w - ltw) / 2) - 8
+    local lby = floor(h / 2) - floor(lth / 2) - 4
+    lcd.color(lcd.RGB(0, 0, 0, 0.6))
+    lcd.drawFilledRectangle(lbx, lby, ltw + 16, lth + 8)
+    lcd.color(lcd.RGB(255, 206, 0))
+    lcd.drawText(lbx + 8, lby + 4, limitText)
+  end
+
   -- Draw the top bar and text overlays only when the layout has enough vertical space.
   if not horizontalTiny then
+    -- Bar backgrounds always drawn (even during pan) for consistent UI.
     lcd.color(lcd.RGB(0,0,0))
     lcd.pen(SOLID)
     lcd.drawFilledRectangle(0, 0, w, topH)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
 
+    -- Bar content and map overlays frozen during active pan to save cycles.
+    if not panActive then
     libs.drawLib.drawTopBar(widget, 0, topH)
 
     local overlayFont = verticalMedium and FONT_XS or FONT_L
@@ -237,10 +285,11 @@ function panel.draw(widget)
     lcd.drawFilledRectangle(zoomBoxX, zoomBoxY, zoomBoxW, zoomBoxH)
     lcd.color(colors.white)
     lcd.drawText(zoomBoxX + floor((zoomBoxW - zoomTw) / 2), zoomBoxY + floor((zoomBoxH - zoomTh) / 2), zoomText)
-  end
+    end -- not panActive (top bar content + overlays)
+  end -- not horizontalTiny
 
   -- Draw the bottom flight-data bar except on the narrowest horizontal layouts.
-  if not horizontalTiny then
+  if not panActive and not horizontalTiny then
     local barSnapshot = getBarSnapshot()
 
     lcd.color(lcd.RGB(0,0,0))
@@ -310,7 +359,7 @@ function panel.draw(widget)
   end
 
   -- Draw the home-direction arrow whenever a home position is available.
-  if telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
+  if not panActive and telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
     local baseArrowSize = floor(42 * min(sx, sy))
     local arrowSize = baseArrowSize
     if ultraTiny then
@@ -328,7 +377,7 @@ function panel.draw(widget)
   end
 
   -- Warn the pilot when live GPS is present but no home position has been stored yet.
-  if telemetry.lat ~= nil and (telemetry.homeLat == nil or telemetry.homeLon == nil) then
+  if not panActive and telemetry.lat ~= nil and (telemetry.homeLat == nil or telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
     local font = verticalMedium and FONT_S or FONT_L
     lcd.font(font)
@@ -353,7 +402,7 @@ function panel.draw(widget)
   end
 
     -- Draw the map scale bar when the viewport is large enough to keep it readable.
-  if not ultraTiny then
+  if not panActive and not ultraTiny then
     local scaleLen, scaleLabel = libs.mapLib.calculateScale(status.mapZoomLevel)
     if scaleLen ~= 0 then
       local scaleFont = verticalMedium and FONT_S or FONT_STD

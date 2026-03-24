@@ -23,11 +23,13 @@ It displays your real-time GPS position on a supported map type of your choice a
 - **One mapping widget per screen** (multiple instances on the same screen are not supported)
 - Optimized tile loading and performance
 
-![As Full Screen Widget](images/screenshots/screenshot-2026-03-15-39603.jpg)
+![As Full Screen Widget](images/screenshots/screenshot-2026-03-22-82209.png)
 
-![Multi Instance Possible](images/screenshots/screenshot-2026-03-15-39795.jpg)
+![Multi Provider and Map Type Support](images/screenshots/screenshot-2026-03-22-82300.png)
 
-![Tiny Widget with others](images/screenshots/screenshot-2026-03-15-40068.jpg)
+![Multi Provider and Map Type Support](images/screenshots/screenshot-2026-03-22-82323.png)
+
+![Tiny Widget with others](images/screenshots/screenshot-2026-03-22-82899.png)
 
 ## Installation
 
