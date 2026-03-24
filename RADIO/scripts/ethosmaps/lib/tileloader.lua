@@ -176,12 +176,13 @@ local function loadTileFromDisk(tilePath)
     local base   = "/bitmaps/ethosmaps/maps/" .. folder .. "/" .. mapType .. tilePath
     if provider == 2 then
       local yaapuBase  = getGoogleFallbackBasePath(mapType, tilePath)
-      attemptedPaths   = { base .. ".jpg", base .. ".png", yaapuBase .. ".jpg", yaapuBase .. ".png" }
-      bmp, loadedPath  = loadFirstExisting(tilePath, base .. ".jpg", base .. ".png",
-                                           yaapuBase .. ".jpg", yaapuBase .. ".png")
+      attemptedPaths   = { base .. ".jpg", base .. ".png", base .. ".bmp",
+                           yaapuBase .. ".png" }
+      bmp, loadedPath  = loadFirstExisting(tilePath, base .. ".jpg", base .. ".png", base .. ".bmp",
+                                           yaapuBase .. ".png")
     else
-      attemptedPaths   = { base .. ".jpg", base .. ".png" }
-      bmp, loadedPath  = loadFirstExisting(tilePath, base .. ".jpg", base .. ".png")
+      attemptedPaths   = { base .. ".jpg", base .. ".png", base .. ".bmp" }
+      bmp, loadedPath  = loadFirstExisting(tilePath, base .. ".jpg", base .. ".png", base .. ".bmp")
     end
   end
 
