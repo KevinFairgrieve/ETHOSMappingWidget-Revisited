@@ -88,6 +88,27 @@ This is the recommended and supported way to generate tiles for this widget.
 
 The downloader handles the correct folder naming and path layout automatically. Full details remain in the downloader project itself.
 
+### Recommended Tile Format
+
+> **Important:** Always use the latest version of the [High-Resolution Map Generator](https://github.com/MartinovEm/High-Resolution-Map-Generator) to ensure the correct tile formats and folder structures are generated.
+
+The widget supports **JPG**, **PNG**, and **BMP** (24-bit) tiles. The recommended format depends on your radio hardware:
+
+| Radio Generation | Models | Recommended Format |
+|---|---|---|
+| **TANDEM / TWIN (STM32H7)** | X20, X20S, X20R, X20HD, X18, X18S, X14, X14S, Twin X Lite | **JPG** (best performance) |
+| **Horus (STM32F4)** | X10, X10S, X10S Express, X12S | **JPG** or **BMP** (see notes below) |
+
+**Details:**
+
+- **JPG (recommended for all radios):** Best overall balance of quality, speed, and storage efficiency. On H7-based radios (TANDEM/TWIN series), JPG delivers up to 33% higher FPS than PNG. JPG quality is visually indistinguishable from PNG at 100×100 px tile size.
+
+- **BMP (24-bit, alternative for older radios):** Zero CPU decode cost — the image is loaded directly into memory without decompression. On older Horus radios (STM32F4, ~2.7× slower CPU), BMP may actually perform better than JPG since the slower CPU makes software JPEG decoding more expensive, which could shift the balance in favor of BMP's zero-decode advantage. However, BMP files are ~3× larger than JPG, so **BMP is only practical for smaller map areas** due to storage requirements. User reports and dedicated F4 benchmarks are still pending.
+
+- **PNG (supported but not recommended):** Slowest decode performance across all radio hardware. Existing PNG tiles continue to work, but new tile downloads should prefer JPG.
+
+For a detailed technical analysis, see [ETHOS CPU & JPEG Analysis](Docs/development/workstreams/ETHOS-CPU-JPEG-Analysis.md) and [Tile Loading Benchmark](Docs/development/workstreams/TILE-LOADING-BENCHMARK.md).
+
 ## Usage
 
 - Touch buttons on the left side to zoom in/out
