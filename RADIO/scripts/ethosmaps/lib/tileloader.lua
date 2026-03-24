@@ -24,6 +24,17 @@
 
 local tileLoader = {}
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local type = type
+local tostring = tostring
+local tonumber = tonumber
+local pairs = pairs
+local floor, max, min = math.floor, math.max, math.min
+local fmt = string.format
+local io_open = io.open
+
+local os_clock = os.clock
+
 local status = nil
 local libs   = nil
 
@@ -73,7 +84,7 @@ local lastNoTilesLogKey      = nil
 -- ── File I/O helpers ─────────────────────────────────────────────────────────
 
 local function fileExists(path)
-  local f = io.open(path, "r")
+  local f = io_open(path, "r")
   if f ~= nil then
     io.close(f)
     return true
@@ -94,7 +105,7 @@ local function getGoogleFallbackBasePath(mapType, tilePath)
   local fallbackTilePath = tilePath
   local z, x, y = tilePath:match("^/(%d+)/(%d+)/(%d+)$")
   if z ~= nil and x ~= nil and y ~= nil then
-    fallbackTilePath = string.format("/%s/%s/s_%s", z, y, x)
+    fallbackTilePath = fmt("/%s/%s/s_%s", z, y, x)
   end
   return "/bitmaps/yaapu/maps/" .. yaapuMapType .. fallbackTilePath
 end
@@ -177,7 +188,7 @@ local function loadTileFromDisk(tilePath)
   if bmp ~= nil then
     -- Log the tile format the first time it is seen for this provider+mapType combination.
     if status.debugEnabled and libs and libs.utils and libs.utils.logDebug then
-      local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
+      local logKey = fmt("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
       if lastTileFormatLogByKey[logKey] == nil then
         local ext    = (type(loadedPath) == "string" and (loadedPath:match("%.([%a%d]+)$") or "unknown"):lower()) or "unknown"
         local source = "ethosmaps"
@@ -195,7 +206,7 @@ local function loadTileFromDisk(tilePath)
 
   -- No file found – log once per provider+mapType, then return the shared nomap sentinel.
   if status.debugEnabled and libs and libs.utils and libs.utils.logDebug then
-    local logKey = string.format("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
+    local logKey = fmt("provider:%s|mapType:%s", tostring(provider), tostring(mapType))
     if lastNoTilesLogKey ~= logKey then
       libs.utils.logDebug("TILE", "No tile files found for " .. logKey .. "; using fallback bitmap", true)
       if type(tilePath) == "string" then
@@ -253,15 +264,19 @@ function tileLoader.enqueue(tilePath, isHighPriority)
   end
 end
 
-function tileLoader.processQueue(budget)
-  -- Loads up to `budget` tiles from the queue.  Called once per wakeup() tick so
-  -- SD I/O is spread across frames instead of blocking a single paint() call.
-  -- High-priority tiles are always drained before low-priority ones.
-  if highHead > #highQueue and lowHead > #lowQueue then
+function tileLoader.processQueue(maxCount)
+  -- Loads up to maxCount tiles from the queue.
+  -- Called once per wakeup() tick so SD I/O is spread across frames instead
+  -- of blocking a single paint() call.  High-priority tiles are always
+  -- drained before low-priority ones.
+  local highLen = #highQueue
+  local lowLen  = #lowQueue
+  if highHead > highLen and lowHead > lowLen then
     return 0  -- Both queues empty; nothing to do.
   end
 
   local loaded = 0
+  local limit  = maxCount or 3
 
   -- Flush dead bitmap userdata before allocating new ones.  trimCache() sets
   -- the flag whenever it evicts entries; a single full GC cycle here ensures
@@ -272,26 +287,39 @@ function tileLoader.processQueue(budget)
     pendingGCBeforeLoad = false
   end
 
-  while loaded < budget and highHead <= #highQueue do
+  local perfActive = status and status.perfActive
+  local perfAddMs = perfActive and status.perfProfileAddMs or nil
+
+  while highHead <= highLen and loaded < limit do
     local path        = highQueue[highHead]
     highHead          = highHead + 1
     if path ~= nil then
       highQueueSet[path] = nil
       if mapBitmapByPath[path] == nil then
+        local t0 = os_clock() * 1000
         loadTileFromDisk(path)
+        local elapsed = os_clock() * 1000 - t0
+        if perfAddMs then
+          perfAddMs("tile_load_ms", elapsed)
+        end
         cacheCount = cacheCount + 1
         loaded     = loaded + 1
       end
     end
   end
 
-  while loaded < budget and lowHead <= #lowQueue do
+  while lowHead <= lowLen and loaded < limit do
     local path        = lowQueue[lowHead]
     lowHead           = lowHead + 1
     if path ~= nil then
       lowQueueSet[path] = nil
       if mapBitmapByPath[path] == nil then
+        local t0 = os_clock() * 1000
         loadTileFromDisk(path)
+        local elapsed = os_clock() * 1000 - t0
+        if perfAddMs then
+          perfAddMs("tile_load_ms", elapsed)
+        end
         cacheCount = cacheCount + 1
         loaded     = loaded + 1
       end
@@ -299,11 +327,11 @@ function tileLoader.processQueue(budget)
   end
 
   -- Compact arrays once fully drained to prevent unbounded index growth.
-  if highHead > #highQueue then
+  if highHead > highLen then
     highQueue = {}
     highHead  = 1
   end
-  if lowHead > #lowQueue then
+  if lowHead > lowLen then
     lowQueue = {}
     lowHead  = 1
   end
@@ -336,7 +364,7 @@ function tileLoader.clearCache()
   lastNoTilesLogKey      = nil
 end
 
-function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, leadX, leadY)
+function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, leadX, leadY, cacheRing)
   -- Evicts bitmap cache entries that fall outside the spatial ring around the current
   -- visible tile window, then purges the same paths from both load queues so we never
   -- waste a budget slot on a tile that is already out of view.
@@ -344,15 +372,16 @@ function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, l
     return 0
   end
 
-  local leadTileX = math.max(-1, math.min(1, tonumber(leadX) or 0))
-  local leadTileY = math.max(-1, math.min(1, tonumber(leadY) or 0))
-  local keepTilesX = math.max(1, tonumber(tilesX) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
-  local keepTilesY = math.max(1, tonumber(tilesY) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
+  local ringTiles = (cacheRing ~= nil) and cacheRing or TILE_CACHE_RING_TILES
+  local leadTileX = max(-1, min(1, tonumber(leadX) or 0))
+  local leadTileY = max(-1, min(1, tonumber(leadY) or 0))
+  local keepTilesX = max(1, tonumber(tilesX) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
+  local keepTilesY = max(1, tonumber(tilesY) or 0) + TILE_CACHE_REFERENCE_MARGIN_TILES
 
-  local keepMinX = 1 - TILE_CACHE_RING_TILES
-  local keepMaxX = keepTilesX + TILE_CACHE_RING_TILES
-  local keepMinY = 1 - TILE_CACHE_RING_TILES
-  local keepMaxY = keepTilesY + TILE_CACHE_RING_TILES
+  local keepMinX = 1 - ringTiles
+  local keepMaxX = keepTilesX + ringTiles
+  local keepMinY = 1 - ringTiles
+  local keepMaxY = keepTilesY + ringTiles
 
   if leadTileX ~= 0 then
     keepMinX = keepMinX - TILE_CACHE_DIRECTIONAL_GUARD_TILES
@@ -370,8 +399,8 @@ function tileLoader.trimCache(centerTileX, centerTileY, level, tilesX, tilesY, l
   end
 
   local keep  = {}
-  local halfX = math.floor(keepTilesX / 2 + 0.5)
-  local halfY = math.floor(keepTilesY / 2 + 0.5)
+  local halfX = floor(keepTilesX / 2 + 0.5)
+  local halfY = floor(keepTilesY / 2 + 0.5)
 
   for x = keepMinX, keepMaxX do
     for y = keepMinY, keepMaxY do

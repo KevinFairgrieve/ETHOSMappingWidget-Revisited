@@ -2,7 +2,7 @@
 
 **Target platform:** STM32H7 (ARM Cortex-M7, ~480 MHz), 8 MB extended SDRAM  
 **Lua runtime:** Lua 5.4 embedded (no LuaJIT)  
-**Status:** Planned — post-1.0 release
+**Status:** Complete — all tiers implemented on `embedded-lua-optimization` branch
 
 ---
 
@@ -194,11 +194,12 @@ local conf = mapStatus.conf
 
 ## Implementation Order
 
-1. **Module-level local caching** (#1) — mechanical, low risk, touches all files
-2. **gpsData elimination** (#2) — trivial, main.lua only
-3. **drawTopBar table reuse** (#4) — moderate, drawlib.lua only
-4. **Layout string caching** (#5) — moderate, layout_default.lua only
-5. **Nested field caching** (#6, #7) — mechanical, main.lua + layout_default.lua
-6. **Remaining items** (#3, #8–#12) — incremental
-
-Each step should be tested on hardware before proceeding to the next.
+1. ~~**Module-level local caching** (#1)~~ — ✅ Done
+2. ~~**gpsData elimination** (#2)~~ — ✅ Done
+3. ~~**drawTopBar table reuse** (#4)~~ — ✅ Done
+4. ~~**Layout string caching** (#5)~~ — ✅ Done
+5. ~~**Nested field caching** (#6, #7)~~ — ✅ Done
+6. ~~**pcall cache in safeSensorName** (#8)~~ — ✅ Done
+7. ~~**Cache queue length** (#10)~~ — ✅ Done
+8. ~~**Cache getTime() source** (#11)~~ — ✅ Done
+9. #3 covered by #1, #9 accepted as-is, #12 covered by #1

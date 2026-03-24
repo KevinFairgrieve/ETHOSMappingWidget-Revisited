@@ -20,6 +20,14 @@
 
 local mapLib = {}
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local tonumber = tonumber
+local floor, abs, max, min = math.floor, math.abs, math.max, math.min
+local sin, cos, log, exp, atan, deg, rad = math.sin, math.cos, math.log, math.exp, math.atan, math.deg, math.rad
+local pi = math.pi
+local fmt = string.format
+local os_clock = os.clock
+
 local status = nil
 local libs = nil
 
@@ -107,7 +115,7 @@ local function getDirectionalLeadFromHeading(heading)
   end
 
   local normalizedHeading = heading % 360
-  local octant = math.floor((normalizedHeading + 22.5) / 45) % 8
+  local octant = floor((normalizedHeading + 22.5) / 45) % 8
   local octantLead = {
     [0] = { 0, -1 }, -- N
     [1] = { 1, -1 }, -- NE
@@ -159,26 +167,27 @@ local function gatePrefetchByTileOffset(leadX, leadY, offsetX, offsetY)
   return gateLeadByTileOffsetThreshold(leadX, leadY, offsetX, offsetY, PREFETCH_LEAD_OFFSET_THRESHOLD)
 end
 
-local function enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY)
+local function enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY, isHighPriority)
   if libs == nil or libs.tileLoader == nil then
     return
   end
 
-  local leadX = math.max(-1, math.min(1, tonumber(prefetchLeadX) or 0))
-  local leadY = math.max(-1, math.min(1, tonumber(prefetchLeadY) or 0))
+  local leadX = max(-1, min(1, tonumber(prefetchLeadX) or 0))
+  local leadY = max(-1, min(1, tonumber(prefetchLeadY) or 0))
   if leadX == 0 and leadY == 0 then
     return
   end
 
-  local halfX = math.floor(TILES_X / 2 + 0.5)
-  local halfY = math.floor(TILES_Y / 2 + 0.5)
+  local highPrio = isHighPriority == true
+  local halfX = floor(TILES_X / 2 + 0.5)
+  local halfY = floor(TILES_Y / 2 + 0.5)
 
   if leadX ~= 0 then
     for depth = 1, PREFETCH_STRIP_DEPTH do
       local gridX = leadX > 0 and (TILES_X + depth) or (1 - depth)
       for gridY = 1 - PREFETCH_STRIP_DEPTH, TILES_Y + PREFETCH_STRIP_DEPTH do
         local tilePath = mapLib.tiles_to_path(centerTileX + gridX - halfX, centerTileY + gridY - halfY, level)
-        libs.tileLoader.enqueue(tilePath, true)
+        libs.tileLoader.enqueue(tilePath, highPrio)
       end
     end
   end
@@ -188,15 +197,15 @@ local function enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefe
       local gridY = leadY > 0 and (TILES_Y + depth) or (1 - depth)
       for gridX = 1 - PREFETCH_STRIP_DEPTH, TILES_X + PREFETCH_STRIP_DEPTH do
         local tilePath = mapLib.tiles_to_path(centerTileX + gridX - halfX, centerTileY + gridY - halfY, level)
-        libs.tileLoader.enqueue(tilePath, true)
+        libs.tileLoader.enqueue(tilePath, highPrio)
       end
     end
   end
 end
 
-function mapLib.clip(n, min, max)
+function mapLib.clip(n, lo, hi)
   -- Constrains a numeric value to a valid range before projection and tile math use it.
-  return math.min(math.max(n, min), max)
+  return min(max(n, lo), hi)
 end
 
 function mapLib.tiles_on_level(level)
@@ -228,8 +237,8 @@ function mapLib.google_coord_to_tiles(lat, lng, level)
   lng = mapLib.clip(lng, MinLongitude, MaxLongitude)
 
   local x = (lng + 180) / 360
-  local sinLatitude = math.sin(lat * math.pi / 180)
-  local y = 0.5 - math.log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * math.pi)
+  local sinLatitude = sin(lat * pi / 180)
+  local y = 0.5 - log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * pi)
 
   local mapSizeX, mapSizeY = mapLib.get_tile_matrix_size_pixel(level)
 
@@ -237,40 +246,58 @@ function mapLib.google_coord_to_tiles(lat, lng, level)
   local rx = mapLib.clip(x * mapSizeX + 0.5, 0, mapSizeX - 1)
   local ry = mapLib.clip(y * mapSizeY + 0.5, 0, mapSizeY - 1)
     -- Return tile indexes plus the pixel offset inside the resolved tile.
-  return math.floor(rx/TILES_SIZE), math.floor(ry/TILES_SIZE), math.floor(rx%TILES_SIZE), math.floor(ry%TILES_SIZE)
+  return floor(rx/TILES_SIZE), floor(ry/TILES_SIZE), floor(rx%TILES_SIZE), floor(ry%TILES_SIZE)
 end
 
 function mapLib.gmapcatcher_coord_to_tiles(lat, lon, level)
   -- Projects GPS coordinates into GMapCatcher tile indexes and pixel offsets for the current zoom level.
   local x = world_tiles / 360 * (lon + 180)
-  local e = math.sin(lat * (1/180 * math.pi))
-  local y = world_tiles / 2 + 0.5 * math.log((1+e)/(1-e)) * -1 * tiles_per_radian
-  return math.floor(x % world_tiles), math.floor(y % world_tiles), math.floor((x - math.floor(x)) * TILES_SIZE), math.floor((y - math.floor(y)) * TILES_SIZE)
+  local e = sin(lat * (1/180 * pi))
+  local y = world_tiles / 2 + 0.5 * log((1+e)/(1-e)) * -1 * tiles_per_radian
+  return floor(x % world_tiles), floor(y % world_tiles), floor((x - floor(x)) * TILES_SIZE), floor((y - floor(y)) * TILES_SIZE)
+end
+
+function mapLib.pixel_to_coord(pixelX, pixelY, level)
+  -- Inverse Web Mercator projection: absolute Mercator pixel → GPS lat/lon.
+  -- Works for all providers (Google, OSM, ESRI, GMapCatcher) because the
+  -- normalized Mercator math is identical; only the total pixel count differs.
+  local provider = (status and status.conf and status.conf.mapProvider) or 2
+  local mapSize
+  if provider == 1 then
+    mapSize = mapLib.tiles_on_level(level) * TILES_SIZE
+  else
+    mapSize = mapLib.get_tile_matrix_size_pixel(level)
+  end
+  local lng = (pixelX / mapSize) * 360 - 180
+  local n = pi * (1 - 2 * pixelY / mapSize)
+  local expN = exp(n)
+  local lat = deg(atan((expN - 1 / expN) / 2))  -- atan(sinh(n))
+  return lat, lng
 end
 
 function mapLib.google_tiles_to_path(tile_x, tile_y, level)
   -- Builds the extension-free SD-card path for native Google/OSM tiles in /z/x/y format.
-  return string.format("/%d/%.0f/%.0f", level, tile_x, tile_y)
+  return fmt("/%d/%.0f/%.0f", level, tile_x, tile_y)
 end
 
 function mapLib.esri_tiles_to_path(tile_x, tile_y, level)
   -- Builds the extension-free SD-card path for ESRI tiles in /z/y/x format.
-  return string.format("/%d/%.0f/%.0f", level, tile_y, tile_x)
+  return fmt("/%d/%.0f/%.0f", level, tile_y, tile_x)
 end
 
 function mapLib.gmapcatcher_tiles_to_path(tile_x, tile_y, level)
   -- Builds the relative SD-card path for a GMapCatcher tile from tile coordinates and zoom.
   -- Translate user-facing level (1..20) to the GMapCatcher internal level (-2..17) for the on-disk path.
   local internalLevel = 18 - level
-  return string.format("/%d/%.0f/%.0f/%.0f/s_%.0f.png", internalLevel, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
+  return fmt("/%d/%.0f/%.0f/%.0f/s_%.0f.png", internalLevel, tile_x/1024, tile_x%1024, tile_y/1024, tile_y%1024)
 end
 
-function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
+function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, level, leadX, leadY, prefetchLeadX, prefetchLeadY, cacheRing, isPanning)
   -- Rebuilds the visible tile window around the current center tile and updates tile caches when the map moves or zooms.
   local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
-    perfStartMs = os.clock() * 1000
+    perfStartMs = os_clock() * 1000
     status.perfProfileInc("tile_update_calls", 1)
   end
   local now = status.getTime()
@@ -282,8 +309,8 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   lastHeavyUpdate = now
   mapNeedsHeavyUpdate = false
 
-  local windowLeadX = math.max(-1, math.min(1, tonumber(leadX) or 0))
-  local windowLeadY = math.max(-1, math.min(1, tonumber(leadY) or 0))
+  local windowLeadX = max(-1, min(1, tonumber(leadX) or 0))
+  local windowLeadY = max(-1, min(1, tonumber(leadY) or 0))
   local centerTileX = tile_x + windowLeadX
   local centerTileY = tile_y + windowLeadY
 
@@ -292,8 +319,8 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
 
   libs.resetLib.clearTable(tiles_path_to_idx)
 
-  local halfX = math.floor(TILES_X / 2 + 0.5)
-  local halfY = math.floor(TILES_Y / 2 + 0.5)
+  local halfX = floor(TILES_X / 2 + 0.5)
+  local halfY = floor(TILES_Y / 2 + 0.5)
 
   for x=1,TILES_X do
     for y=1,TILES_Y do
@@ -311,20 +338,37 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
 
   -- Only run eviction and enqueue work when the visible window actually shifted.
   if tilesChanged then
-    removedCacheEntries = libs.tileLoader.trimCache(centerTileX, centerTileY, level, TILES_X, TILES_Y, windowLeadX, windowLeadY)
+    removedCacheEntries = libs.tileLoader.trimCache(centerTileX, centerTileY, level, TILES_X, TILES_Y, windowLeadX, windowLeadY, cacheRing)
     if removedCacheEntries > 0 then
     end
 
-    -- Enqueue all tile slots for async loading; tiles near the center get high priority
-    -- so the aircraft position renders sharply before the outer fringe fills in.
-    local halfX = math.floor(TILES_X / 2 + 0.5)
-    local halfY = math.floor(TILES_Y / 2 + 0.5)
-    for x = 1, TILES_X do
-      for y = 1, TILES_Y do
-        local tp = tiles[width * (y - 1) + x]
-        if tp ~= nil then
-          local isHighPrio = (math.abs(x - halfX) <= 1 and math.abs(y - halfY) <= 1)
-          libs.tileLoader.enqueue(tp, isHighPrio)
+    -- Pan mode: enqueue prefetch FIRST as HIGH priority so tiles ahead of
+    -- the drag direction are loaded before anything else.
+    if isPanning then
+      enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY, true)
+    end
+
+    -- Enqueue viewport tiles in spiral order (center outward).
+    -- Normal mode: ring 0-1 = HIGH, ring 2+ = LOW.
+    -- Pan mode: all viewport tiles = LOW (prefetch already has HIGH).
+    local halfX = floor(TILES_X / 2 + 0.5)
+    local halfY = floor(TILES_Y / 2 + 0.5)
+    local maxRing = max(halfX - 1, TILES_X - halfX, halfY - 1, TILES_Y - halfY)
+    local enq = libs.tileLoader.enqueue
+    for ring = 0, maxRing do
+      local isHighPrio = (not isPanning) and (ring <= 1)
+      local xLo = max(1, halfX - ring)
+      local xHi = min(TILES_X, halfX + ring)
+      local yLo = max(1, halfY - ring)
+      local yHi = min(TILES_Y, halfY + ring)
+      for x = xLo, xHi do
+        for y = yLo, yHi do
+          if abs(x - halfX) == ring or abs(y - halfY) == ring then
+            local tp = tiles[width * (y - 1) + x]
+            if tp ~= nil then
+              enq(tp, isHighPrio)
+            end
+          end
         end
       end
     end
@@ -338,14 +382,17 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
       status.perfProfileInc("gc_count", 1)
     end
     if status.debugEnabled and libs and libs.utils then
-      libs.utils.logDebug("TILE", string.format("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
+      libs.utils.logDebug("TILE", fmt("loadAndCenterTiles: window rebuilt (queue=%d)", libs.tileLoader.getQueueLength()))
     end
   end
 
-  enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY)
+  -- Normal mode: enqueue prefetch as LOW priority (pan mode already enqueued as HIGH above).
+  if not isPanning then
+    enqueueDirectionalPrefetch(centerTileX, centerTileY, level, prefetchLeadX, prefetchLeadY, false)
+  end
 
   if perfActive then
-    status.perfProfileAddMs("tile_update_ms", os.clock() * 1000 - perfStartMs)
+    status.perfProfileAddMs("tile_update_ms", os_clock() * 1000 - perfStartMs)
   end
 end
 
@@ -355,7 +402,7 @@ function mapLib.drawTiles(width, xmin, ymin)
   local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
-    perfStartMs = os.clock() * 1000
+    perfStartMs = os_clock() * 1000
   end
 
   -- Cache sentinel bitmaps and getBitmap reference outside the loop so each
@@ -411,7 +458,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   local perfActive = status.perfActive
   local perfStartMs = nil
   if perfActive then
-    perfStartMs = os.clock() * 1000
+    perfStartMs = os_clock() * 1000
   end
   lcd.setClipping(x, y, w, h)
   setupMaps(x, y, w, h, level, tiles_x, tiles_y)
@@ -449,57 +496,119 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       local cacheTiles = libs.tileLoader.getCacheCount and libs.tileLoader.getCacheCount() or 0
       local queueTiles = libs.tileLoader.getQueueLength and libs.tileLoader.getQueueLength() or 0
       local totalTiles = cacheTiles + queueTiles
-      libs.utils.logDebug("TILE", string.format("VIEWPORT_CHANGE | viewport=%dx%d | raster=%dx%d | rasterTiles=%d | cache=%d | queue=%d | total=%d", w, h, TILES_X, TILES_Y, gridTiles, cacheTiles, queueTiles, totalTiles), true)
+      libs.utils.logDebug("TILE", fmt("VIEWPORT_CHANGE | viewport=%dx%d | raster=%dx%d | rasterTiles=%d | cache=%d | queue=%d | total=%d", w, h, TILES_X, TILES_Y, gridTiles, cacheTiles, queueTiles, totalTiles), true)
     end
   end
 
-  local vehicleR = math.floor(34 * math.min(scaleX, scaleY))
+  local vehicleR = floor(34 * min(scaleX, scaleY))
 
   local doStateUpdate = allowStateUpdate ~= false
+
+  -- Pan state: read once for this frame
+  local panOffX = status.panOffsetX or 0
+  local panOffY = status.panOffsetY or 0
+  local panState = status.panState or 0
+  local isActivePan = panState == 1 or panState == 2  -- DRAGGING or GRACE
+  -- Detached mode: followLock off + idle (or pending tap before drag confirmed).
+  -- If no anchor yet, it will be set below once GPS coords are projected.
+  local isDetached = not status.followLock and (panState == 0 or panState == 3)
+  local isPanning = isActivePan or isDetached
 
   if telemetry.lat ~= nil and telemetry.lon ~= nil then
     if doStateUpdate then
       tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, level)
-      local rawLeadX, rawLeadY = getDirectionalLeadFromHeading(heading)
-      local leadX, leadY = gateLeadByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
-      local prefetchLeadX, prefetchLeadY = gatePrefetchByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
-      myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
 
-      local centerX = x + (w / 2)
-      local centerY = y + (h / 2)
-      if myScreenX == nil or myScreenY == nil or
-         math.abs(centerX - myScreenX) > RASTER_REBUILD_OFFSET_THRESHOLD or
-         math.abs(centerY - myScreenY) > RASTER_REBUILD_OFFSET_THRESHOLD then
-        mapNeedsHeavyUpdate = true
+      if isPanning then
+        -- Pan/detached mode: use fixed anchor (UAV position at pan start) + accumulated
+        -- pixel offset to compute a stable virtual center that doesn't drift
+        -- with UAV movement.
+        if status.panAnchorPixelX == nil then
+          status.panAnchorPixelX = tile_x * TILES_SIZE + offset_x
+          status.panAnchorPixelY = tile_y * TILES_SIZE + offset_y
+        end
+        local vcPixelX = status.panAnchorPixelX - panOffX
+        local vcPixelY = status.panAnchorPixelY - panOffY
+        local vcTileX = floor(vcPixelX / TILES_SIZE)
+        local vcTileY = floor(vcPixelY / TILES_SIZE)
+        local vcOffsetX = vcPixelX % TILES_SIZE
+        local vcOffsetY = vcPixelY % TILES_SIZE
+
+        if isActivePan then
+          -- Active drag: compute lead direction from offset delta
+          local prevPanX = status.lastPanOffsetX or panOffX
+          local prevPanY = status.lastPanOffsetY or panOffY
+          local dX = panOffX - prevPanX
+          local dY = panOffY - prevPanY
+          local rawPanLeadX = (dX > 0 and -1) or (dX < 0 and 1) or 0
+          local rawPanLeadY = (dY > 0 and -1) or (dY < 0 and 1) or 0
+          local panLeadX, panLeadY = gateLeadByTileOffset(rawPanLeadX, rawPanLeadY, vcOffsetX, vcOffsetY)
+          local panPrefetchX, panPrefetchY = gatePrefetchByTileOffset(rawPanLeadX, rawPanLeadY, vcOffsetX, vcOffsetY)
+          status.lastPanOffsetX = panOffX
+          status.lastPanOffsetY = panOffY
+          mapNeedsHeavyUpdate = true
+          mapLib.loadAndCenterTiles(vcTileX, vcTileY, vcOffsetX, vcOffsetY, TILES_X, level, panLeadX, panLeadY, panPrefetchX, panPrefetchY, 2, true)
+        else
+          -- Detached idle: no lead, no prefetch, compact cache
+          mapLib.loadAndCenterTiles(vcTileX, vcTileY, vcOffsetX, vcOffsetY, TILES_X, level, 0, 0, 0, 0, 0, false)
+        end
+
+        -- Center virtual viewport position on screen
+        local vcScreenX, vcScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, vcTileX, vcTileY, vcOffsetX, vcOffsetY, level)
+        local centerX = x + (w / 2)
+        local centerY = y + (h / 2)
+        widget.drawOffsetX = centerX - vcScreenX
+        widget.drawOffsetY = centerY - vcScreenY
+        -- UAV screen position: extrapolate from the virtual center's known grid
+        -- position instead of a cache lookup.  The tile grid is linear in Mercator
+        -- space so the delta is exact even when the UAV tile is outside the cache.
+        myScreenX = vcScreenX + (tile_x - vcTileX) * TILES_SIZE + (offset_x - vcOffsetX)
+        myScreenY = vcScreenY + (tile_y - vcTileY) * TILES_SIZE + (offset_y - vcOffsetY)
+      else
+        -- Normal mode: center on UAV
+        local rawLeadX, rawLeadY = getDirectionalLeadFromHeading(heading)
+        local leadX, leadY = gateLeadByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
+        local prefetchLeadX, prefetchLeadY = gatePrefetchByTileOffset(rawLeadX, rawLeadY, offset_x, offset_y)
+        myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+
+        local centerX = x + (w / 2)
+        local centerY = y + (h / 2)
+        if myScreenX == nil or myScreenY == nil or
+           abs(centerX - myScreenX) > RASTER_REBUILD_OFFSET_THRESHOLD or
+           abs(centerY - myScreenY) > RASTER_REBUILD_OFFSET_THRESHOLD then
+          mapNeedsHeavyUpdate = true
+        end
+
+        mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
+        myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
+
+        widget.drawOffsetX = centerX - myScreenX
+        widget.drawOffsetY = centerY - myScreenY
       end
-
-      mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, TILES_X, level, leadX, leadY, prefetchLeadX, prefetchLeadY)
-      myScreenX, myScreenY = mapLib.getScreenCoordinates(MAP_X, MAP_Y, tile_x, tile_y, offset_x, offset_y, level)
-
-      widget.drawOffsetX = centerX - myScreenX
-      widget.drawOffsetY = centerY - myScreenY
     end
   end
 
-  local minX = math.max(0, MAP_X)
-  local minY = math.max(0, MAP_Y)
-  local maxX = math.min(minX + w, minX + TILES_X * TILES_SIZE)
-  local maxY = math.min(minY + h, minY + TILES_Y * TILES_SIZE)
-  local renderOffsetX = widget.drawOffsetX
-  local renderOffsetY = widget.drawOffsetY
+  local minX = max(0, MAP_X)
+  local minY = max(0, MAP_Y)
+  local maxX = min(minX + w, minX + TILES_X * TILES_SIZE)
+  local maxY = min(minY + h, minY + TILES_Y * TILES_SIZE)
+  local renderOffsetX = widget.drawOffsetX or 0
+  local renderOffsetY = widget.drawOffsetY or 0
 
   -- Clamp render offset so the drawn tile grid always fully covers the viewport.
-  local minRenderOffsetX = w - TILES_X * TILES_SIZE
-  local minRenderOffsetY = h - TILES_Y * TILES_SIZE
-  if renderOffsetX > 0 then
-    renderOffsetX = 0
-  elseif renderOffsetX < minRenderOffsetX then
-    renderOffsetX = minRenderOffsetX
-  end
-  if renderOffsetY > 0 then
-    renderOffsetY = 0
-  elseif renderOffsetY < minRenderOffsetY then
-    renderOffsetY = minRenderOffsetY
+  -- Skip clamping when pan offset is active — panning can exceed the tile grid.
+  if not isPanning then
+    local minRenderOffsetX = w - TILES_X * TILES_SIZE
+    local minRenderOffsetY = h - TILES_Y * TILES_SIZE
+    if renderOffsetX > 0 then
+      renderOffsetX = 0
+    elseif renderOffsetX < minRenderOffsetX then
+      renderOffsetX = minRenderOffsetX
+    end
+    if renderOffsetY > 0 then
+      renderOffsetY = 0
+    elseif renderOffsetY < minRenderOffsetY then
+      renderOffsetY = minRenderOffsetY
+    end
   end
 
   -- Save UAV tile coords before home calculation (which temporarily overwrites them).
@@ -560,7 +669,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
         -- Angle between the two segments via atan2 of cross/dot product.
         local cross = ax * by - ay * bx
         local dot   = ax * bx + ay * by
-        local bendDeg = math.abs(math.deg(math.atan(cross, dot)))
+        local bendDeg = abs(deg(atan(cross, dot)))
         local threshold = tonumber((status.conf and status.conf.mapTrailHeadingThreshold) or 5) or 5
         bendExceeded = (bendDeg >= threshold)
       end
@@ -596,14 +705,32 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   if myScreenX ~= nil and myScreenY ~= nil then
     local drawX = myScreenX + renderOffsetX
     local drawY = myScreenY + renderOffsetY
-    if heading ~= nil then
-      libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, colors.white)
-      libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, colors.black)
-    else
-      lcd.color(WHITE)
-      lcd.drawCircle(drawX, drawY, vehicleR - 3)
-      lcd.color(BLACK)
-      lcd.drawCircle(drawX, drawY, vehicleR)
+    local uavOutCode = libs.drawLib.computeOutCode(drawX, drawY, x + vehicleR, y + vehicleR, x + w - vehicleR, y + h - vehicleR)
+    if uavOutCode == 0 then
+      -- UAV is inside the viewport: draw normal vehicle marker
+      if heading ~= nil then
+        libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, colors.white)
+        libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, colors.black)
+      else
+        lcd.color(WHITE)
+        lcd.drawCircle(drawX, drawY, vehicleR - 3)
+        lcd.color(BLACK)
+        lcd.drawCircle(drawX, drawY, vehicleR)
+      end
+    elseif isPanning then
+      -- UAV is outside viewport during pan/detached: draw edge pointer arrow
+      local cx = x + w / 2
+      local cy = y + h / 2
+      local margin = floor(12 * min(scaleX, scaleY))
+      local arrowR = floor(10 * min(scaleX, scaleY))
+      -- Clamp UAV position to viewport edge with margin
+      local edgeX = max(x + margin, min(drawX, x + w - margin))
+      local edgeY = max(y + margin, min(drawY, y + h - margin))
+      -- Compute angle from viewport center to UAV
+      local angle = deg(atan(drawX - cx, -(drawY - cy)))
+      -- Draw small direction arrow at edge
+      libs.drawLib.drawRArrow(edgeX, edgeY, arrowR - 2, angle, colors.red)
+      libs.drawLib.drawRArrow(edgeX, edgeY, arrowR, angle, colors.black)
     end
   end
 
@@ -676,10 +803,33 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
+  -- Observation marker: green line from UAV + marker circle
+  if status.observationLat ~= nil and status.observationLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
+    local mtx, mty, mox, moy = mapLib.coord_to_tiles(status.observationLat, status.observationLon, level)
+    local markerX = myScreenX + (mtx - uav_tile_x) * TILES_SIZE + (mox - uav_offset_x) + renderOffsetX
+    local markerY = myScreenY + (mty - uav_tile_y) * TILES_SIZE + (moy - uav_offset_y) + renderOffsetY
+    local uavDX = myScreenX + renderOffsetX
+    local uavDY = myScreenY + renderOffsetY
+    -- Green line from UAV to observation marker (clipped to viewport)
+    lcd.color(status.colors.observationGreen)
+    lcd.pen(SOLID)
+    local cx1, cy1, cx2, cy2 = libs.drawLib.clipLine(uavDX, uavDY, markerX, markerY, x, y, x + w, y + h)
+    if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+    -- Marker circle if within viewport
+    local markerCode = libs.drawLib.computeOutCode(markerX, markerY, x + 6, y + 6, x + w - 6, y + h - 6)
+    if markerCode == 0 then
+      local mr = floor(5 * min(scaleX, scaleY))
+      lcd.color(status.colors.observationGreen)
+      for r = mr, 1, -1 do lcd.drawCircle(markerX, markerY, r) end
+      lcd.color(BLACK)
+      lcd.drawCircle(markerX, markerY, mr)
+    end
+  end
+
   if zoomUpdate then
     lcd.color(WHITE)
     lcd.font(FONT_XL)
-    lcd.drawText(x + w/2, y + h/2 - 25*scaleY, string.format("ZOOM %d", level), CENTERED)
+    lcd.drawText(x + w/2, y + h/2 - 25*scaleY, fmt("ZOOM %d", level), CENTERED)
     if status.getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
   end
   
@@ -728,11 +878,11 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
     libs.tileLoader.clearCache()
 
     world_tiles = mapLib.tiles_on_level(level)
-    tiles_per_radian = world_tiles / (2 * math.pi)
+    tiles_per_radian = world_tiles / (2 * pi)
     configureProjectionHelpers(provider)
     tile_dim = (40075017/world_tiles) * status.conf.distUnitScale
     local scaleDistance = getScaleDistanceForLevel(level)
-    scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
+    scaleLabel = fmt("%.0f%s", scaleDistance, status.conf.distUnitLabel)
     scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
     lastZoomLevel = level
@@ -774,7 +924,7 @@ function mapLib.calculateScale(level)
   local tile_dim = (40075017 / world_tiles) * status.conf.distUnitScale
   local scaleDistance = getScaleDistanceForLevel(level)
 
-  scaleLabel = string.format("%.0f%s", scaleDistance, status.conf.distUnitLabel)
+  scaleLabel = fmt("%.0f%s", scaleDistance, status.conf.distUnitLabel)
   scaleLen = (scaleDistance/tile_dim)*TILES_SIZE
 
   return scaleLen, scaleLabel

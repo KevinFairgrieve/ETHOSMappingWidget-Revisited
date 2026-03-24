@@ -17,28 +17,62 @@
 -- You should have received a copy of the GNU General Public License
 -- along with this program; if not, see <http://www.gnu.org/licenses>.
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local type = type
+local tostring = tostring
+local tonumber = tonumber
+local pairs = pairs
+local floor, abs, max, min, ceil = math.floor, math.abs, math.max, math.min, math.ceil
+local fmt = string.format
+local tinsert, tremove, tconcat = table.insert, table.remove, table.concat
+local os_clock, os_time = os.clock, os.time
+
+
+local _getTimeImpl = nil
 
 local function getTime()
   -- Canonical time source for the entire widget, returning centiseconds.
-  -- Uses a monotonic wall-clock-like timer when available.
-  -- os.clock() tracks CPU time and can stall when the widget is not in fullscreen,
-  -- which pauses scheduler-driven redraws.
-  -- Published as status.getTime — every library must use that reference
-  -- instead of defining its own copy.
+  -- Caches the winning source on first successful call to avoid re-probing each frame.
+  if _getTimeImpl ~= nil then
+    return _getTimeImpl()
+  end
+
   if system ~= nil and type(system.getTimeCounter) == "function" then
     local ms = system.getTimeCounter()
     if type(ms) == "number" and ms >= 0 then
+      _getTimeImpl = function() return system.getTimeCounter() / 10 end
       return ms / 10
     end
   end
 
-  local wallSec = os.time()
+  local wallSec = os_time()
   if type(wallSec) == "number" and wallSec > 0 then
+    _getTimeImpl = function() return os_time() * 100 end
     return wallSec * 100
   end
 
-  return os.clock() * 100
+  _getTimeImpl = function() return os_clock() * 100 end
+  return os_clock() * 100
 end
+
+-- Pan state constants
+local PAN_IDLE     = 0
+local PAN_DRAGGING = 1
+local PAN_GRACE    = 2
+local PAN_PENDING  = 3
+
+-- Pan timing constants (centiseconds)
+local PAN_TOUCH_TIMEOUT_CS   = 20   -- 200ms: no touch events → finger up
+local PAN_GRACE_DURATION_CS  = 500  -- 5s: grace period before auto-recenter
+
+-- Fullscreen resolution whitelist — drag only enabled at these sizes
+local FULLSCREEN_RESOLUTIONS = {
+  ["800x480"] = true,
+  ["640x360"] = true,
+  ["480x320"] = true,
+  ["480x272"] = true,
+  ["320x240"] = true,
+}
 
 local logDebugSessionStart
 local configRebuildInProgress = false
@@ -140,6 +174,28 @@ local mapStatus = {
   cachedMapTypeChoices = {},  -- keyed by provider
   consumeZoomRelease = false,
 
+  -- Pan state for drag-to-pan (touch panning)
+  panState = 0,             -- PAN_IDLE
+  panLastX = 0,
+  panLastY = 0,
+  panOffsetX = 0,           -- Accumulated pixel offset from drag
+  panOffsetY = 0,
+  panAnchorPixelX = nil,    -- Absolute Mercator pixel X of UAV at pan start
+  panAnchorPixelY = nil,    -- Absolute Mercator pixel Y of UAV at pan start
+  lastPanOffsetX = nil,     -- Previous frame panOffsetX for delta-based lead
+  lastPanOffsetY = nil,     -- Previous frame panOffsetY for delta-based lead
+  panGraceEnd = 0,          -- getTime() timestamp when grace expires
+  panLastTouchTime = 0,     -- getTime() timestamp of last touch event
+  panDragEnabled = false,   -- true when at a fullscreen resolution
+  zoomLimitMessageEnd = 0,  -- getTime() timestamp when "zoom limit" message disappears
+
+  -- Follow-lock toggle: when false the map stays detached from UAV GPS
+  followLock = true,
+
+  -- Observation marker: GPS position of user-placed pin (nil = no marker)
+  observationLat = nil,
+  observationLon = nil,
+
   avgSpeed = {
     lastSampleTime = nil,
     avgTravelDist = 0,
@@ -168,6 +224,12 @@ local mapStatus = {
     green = GREEN,
     black = BLACK,
     yellow = lcd.RGB(255,206,0),
+    warningYellow = lcd.RGB(255, 220, 0),
+    labelGray = lcd.RGB(170,170,170),
+    observationGreen = lcd.RGB(0, 200, 0),
+    semiBlack45 = lcd.RGB(0, 0, 0, 0.45),
+    semiBlack60 = lcd.RGB(0, 0, 0, 0.6),
+    loadingOverlay = lcd.RGB(20, 20, 20),
     panelLabel = lcd.RGB(150,150,150),
     panelText = lcd.RGB(255,255,255),
     panelBackground = lcd.RGB(56,60,56),
@@ -205,12 +267,12 @@ local mapStatus = {
 
 -- Performance profiler helper functions (must be defined before paint/wakeup/event use them).
 local function perfNowMs()
-  return os.clock() * 1000
+  return os_clock() * 1000
 end
 
 local function perfWindowNowMs()
   -- Use wall-clock seconds for window scheduling; os.clock() is CPU-time and can stall under low load.
-  local wallSec = os.time()
+  local wallSec = os_time()
   if type(wallSec) == "number" and wallSec > 0 then
     return wallSec * 1000
   end
@@ -272,6 +334,9 @@ local function perfAddMs(metricName, elapsedMs)
   if elapsedMs > metric.max then
     metric.max = elapsedMs
   end
+  if metric.min == nil or elapsedMs < metric.min then
+    metric.min = elapsedMs
+  end
 end
 
 local function perfInc(counterName, delta)
@@ -301,15 +366,15 @@ end
 
 local function perfValueText(value, decimals)
   local scale = 10 ^ (decimals or 0)
-  return tostring(math.floor(value * scale + 0.5) / scale)
+  return tostring(floor(value * scale + 0.5) / scale)
 end
 
 local function perfTableCell(label, value)
-  return string.format("%-16s", label .. "=" .. tostring(value))
+  return fmt("%-16s", label .. "=" .. tostring(value))
 end
 
 local function perfTableRow(rowLabel, firstCell, secondCell, thirdCell)
-  return string.format("| %-8s | %-16s | %-16s | %-16s |", rowLabel, firstCell, secondCell, thirdCell)
+  return fmt("| %-8s | %-16s | %-16s | %-16s |", rowLabel, firstCell, secondCell, thirdCell)
 end
 
 -- Export performance profiler callbacks to mapStatus so libraries can access them.
@@ -346,7 +411,7 @@ local function makeSourceWakeup(sourceName)
 
     local out = telemetryValue * scale
     if decimals == 0 then
-      out = math.floor(0.5 + out)
+      out = floor(0.5 + out)
     end
     pcall(function() source:value(out) end)
   end
@@ -414,6 +479,7 @@ local function checkSize(widget)
   mapStatus.scaleX = w / 800
   mapStatus.scaleY = h / 480
   mapStatus.verticalMedium = w < (mapStatus.compactWidthThreshold or 450)
+  mapStatus.panDragEnabled = FULLSCREEN_RESOLUTIONS[w .. "x" .. h] == true
 
   return true
 end
@@ -435,7 +501,7 @@ end
 local function loadLayout(widget)
   -- Draws a temporary loading overlay, then loads the layout module for the current screen into mapStatus.layout.
   lcd.pen(SOLID)
-  lcd.color(lcd.RGB(20, 20, 20))
+  lcd.color(mapStatus.colors.loadingOverlay)
   lcd.drawFilledRectangle(mapStatus.widgetWidth/4, mapStatus.widgetHeight/4, mapStatus.widgetWidth/2, mapStatus.widgetHeight/4)
   lcd.color(mapStatus.colors.white)
   lcd.drawRectangle(mapStatus.widgetWidth/4, mapStatus.widgetHeight/4, mapStatus.widgetWidth/2, mapStatus.widgetHeight/4,3)
@@ -461,34 +527,37 @@ local function bgtasks(widget)
   if not mapStatus.sessionLogged then
     logDebugSessionStart("bgtasks-retry")
   end
-  local gpsData = {}
+  local conf = mapStatus.conf
+  local telemetry = mapStatus.telemetry
+  local avgSpeed = mapStatus.avgSpeed
+  local gpsLat, gpsLon = nil, nil
   local sensorHeadingActive = false
   local sensorSpeedActive = false
-  if mapStatus.conf.telemetrySourceMode == 2 then
+  if conf.telemetrySourceMode == 2 then
     -- Sensors mode: read from user-assigned sources.
-    local srcLat = mapStatus.conf.sensorGpsLat
-    local srcLon = mapStatus.conf.sensorGpsLon
+    local srcLat = conf.sensorGpsLat
+    local srcLon = conf.sensorGpsLon
     if srcLat ~= nil and type(srcLat.value) == "function" then
-      gpsData.lat = srcLat:value()
+      gpsLat = srcLat:value()
     end
     if srcLon ~= nil and type(srcLon.value) == "function" then
-      gpsData.lon = srcLon:value()
+      gpsLon = srcLon:value()
     end
     -- Optional heading source → telemetry.yaw (overrides calculated COG).
-    local srcHdg = mapStatus.conf.sensorHeading
+    local srcHdg = conf.sensorHeading
     if srcHdg ~= nil and type(srcHdg.value) == "function" then
       local hdg = srcHdg:value()
       if hdg ~= nil and hdg ~= 0 then
-        mapStatus.telemetry.yaw = hdg
+        telemetry.yaw = hdg
         sensorHeadingActive = true
       end
     end
     -- Optional speed source → telemetry.groundSpeed (overrides calculated speed).
-    local srcSpd = mapStatus.conf.sensorSpeed
+    local srcSpd = conf.sensorSpeed
     if srcSpd ~= nil and type(srcSpd.value) == "function" then
       local spd = srcSpd:value()
       if spd ~= nil and spd ~= 0 then
-        mapStatus.telemetry.groundSpeed = spd
+        telemetry.groundSpeed = spd
         sensorSpeedActive = true
       end
     end
@@ -500,20 +569,20 @@ local function bgtasks(widget)
     if cachedGpsSrcLon == nil then
       cachedGpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
     end
-    gpsData.lat = cachedGpsSrcLat and cachedGpsSrcLat:value() or nil
-    gpsData.lon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
+    gpsLat = cachedGpsSrcLat and cachedGpsSrcLat:value() or nil
+    gpsLon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
   end
-  if gpsData.lat ~= nil and gpsData.lon ~= nil then
-    mapStatus.telemetry.lat = gpsData.lat
-    mapStatus.telemetry.lon = gpsData.lon
+  if gpsLat ~= nil and gpsLon ~= nil then
+    telemetry.lat = gpsLat
+    telemetry.lon = gpsLon
 
     -- Log GPS position at most once every 15 seconds to avoid flooding the debug log.
     if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
-      local lat = mapStatus.telemetry.lat or 0
-      local lon = mapStatus.telemetry.lon or 0
+      local lat = telemetry.lat or 0
+      local lon = telemetry.lon or 0
       local gpsLogInterval = 1500 -- centiseconds (15 seconds)
       if now - (mapStatus.lastGpsLogTime or 0) >= gpsLogInterval then
-        mapLibs.utils.logDebug("GPS", string.format("lat=%.6f lon=%.6f", lat, lon))
+        mapLibs.utils.logDebug("GPS", fmt("lat=%.6f lon=%.6f", lat, lon))
         mapStatus.lastGpsLogTime = now
         mapStatus.lastLoggedLat = lat
         mapStatus.lastLoggedLon = lon
@@ -521,51 +590,51 @@ local function bgtasks(widget)
     end
   end
 
-  if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
-    if mapStatus.avgSpeed.lastLat == nil or mapStatus.avgSpeed.lastLon == nil then
-      mapStatus.avgSpeed.lastLat = mapStatus.telemetry.lat
-      mapStatus.avgSpeed.lastLon = mapStatus.telemetry.lon
-      mapStatus.avgSpeed.lastSampleTime = now
+  if telemetry.lat ~= nil and telemetry.lon ~= nil then
+    if avgSpeed.lastLat == nil or avgSpeed.lastLon == nil then
+      avgSpeed.lastLat = telemetry.lat
+      avgSpeed.lastLon = telemetry.lon
+      avgSpeed.lastSampleTime = now
     end
 
-    if now - mapStatus.avgSpeed.lastSampleTime > 100 then
-      local travelDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.avgSpeed.lastLat, mapStatus.avgSpeed.lastLon)
-      local travelTime = now - mapStatus.avgSpeed.lastSampleTime
+    if now - avgSpeed.lastSampleTime > 100 then
+      local travelDist = mapLibs.utils.haversine(telemetry.lat, telemetry.lon, avgSpeed.lastLat, avgSpeed.lastLon)
+      local travelTime = now - avgSpeed.lastSampleTime
       -- Only derive speed from GPS deltas when no external speed source provided a value.
       if not sensorSpeedActive and travelDist < 10000 then
-        mapStatus.avgSpeed.avgTravelDist = mapStatus.avgSpeed.avgTravelDist * 0.8 + travelDist*0.2
-        mapStatus.avgSpeed.avgTravelTime = mapStatus.avgSpeed.avgTravelTime * 0.8 + 0.01 * travelTime * 0.2
-        mapStatus.avgSpeed.value = mapStatus.avgSpeed.avgTravelDist/mapStatus.avgSpeed.avgTravelTime
-        mapStatus.avgSpeed.travelDist = mapStatus.avgSpeed.travelDist + mapStatus.avgSpeed.avgTravelDist
-        mapStatus.telemetry.groundSpeed = mapStatus.avgSpeed.value
+        avgSpeed.avgTravelDist = avgSpeed.avgTravelDist * 0.8 + travelDist*0.2
+        avgSpeed.avgTravelTime = avgSpeed.avgTravelTime * 0.8 + 0.01 * travelTime * 0.2
+        avgSpeed.value = avgSpeed.avgTravelDist/avgSpeed.avgTravelTime
+        avgSpeed.travelDist = avgSpeed.travelDist + avgSpeed.avgTravelDist
+        telemetry.groundSpeed = avgSpeed.value
       end
-      mapStatus.avgSpeed.lastLat = mapStatus.telemetry.lat
-      mapStatus.avgSpeed.lastLon = mapStatus.telemetry.lon
-      mapStatus.avgSpeed.lastSampleTime = now
+      avgSpeed.lastLat = telemetry.lat
+      avgSpeed.lastLon = telemetry.lon
+      avgSpeed.lastSampleTime = now
 
-      if mapStatus.telemetry.homeLat ~= nil and mapStatus.telemetry.homeLon ~= nil then
-        mapStatus.telemetry.homeDist = mapLibs.utils.haversine(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.telemetry.homeLat, mapStatus.telemetry.homeLon)
-        mapStatus.telemetry.homeAngle = mapLibs.utils.getAngleFromLatLon(mapStatus.telemetry.lat, mapStatus.telemetry.lon, mapStatus.telemetry.homeLat, mapStatus.telemetry.homeLon)
+      if telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
+        telemetry.homeDist = mapLibs.utils.haversine(telemetry.lat, telemetry.lon, telemetry.homeLat, telemetry.homeLon)
+        telemetry.homeAngle = mapLibs.utils.getAngleFromLatLon(telemetry.lat, telemetry.lon, telemetry.homeLat, telemetry.homeLon)
       end
     end
   end
 
   if bgclock % 4 == 2 then
-    if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
-      if mapStatus.conf.gpsFormat == 1 then
-        mapStatus.telemetry.strLat = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lat)
-        mapStatus.telemetry.strLon = mapLibs.utils.decToDMSFull(mapStatus.telemetry.lon, mapStatus.telemetry.lat)
+    if telemetry.lat ~= nil and telemetry.lon ~= nil then
+      if conf.gpsFormat == 1 then
+        telemetry.strLat = mapLibs.utils.decToDMSFull(telemetry.lat)
+        telemetry.strLon = mapLibs.utils.decToDMSFull(telemetry.lon, telemetry.lat)
       else
-        mapStatus.telemetry.strLat = string.format("%.06f", mapStatus.telemetry.lat)
-        mapStatus.telemetry.strLon = string.format("%.06f", mapStatus.telemetry.lon)
+        telemetry.strLat = fmt("%.06f", telemetry.lat)
+        telemetry.strLon = fmt("%.06f", telemetry.lon)
       end
     end
     -- Only derive COG from GPS movement when no external heading source provided a value.
     if not sensorHeadingActive then
       mapLibs.utils.updateCog()
       -- Sync yaw from cog so displays reading (yaw or cog) show the calculated heading.
-      if mapStatus.telemetry.cog then
-        mapStatus.telemetry.yaw = mapStatus.telemetry.cog
+      if telemetry.cog then
+        telemetry.yaw = telemetry.cog
       end
     end
   end
@@ -635,14 +704,13 @@ local function paint(widget)
 end
 
 local function event(widget, category, value, x, y)
-  -- Handles touch input from Ethos, updates zoom state, and consumes handled events before they reach other UI code.
+  -- Handles touch input: zoom buttons and drag-to-pan state machine.
   local perfActive = mapStatus.perfActive
   local perfStartMs = nil
   if perfActive then
     perfStartMs = perfNowMs()
   end
   widget = resolveWidget(widget)
-  local kill = false
 
   if category == EVT_TOUCH and x ~= nil and y ~= nil then
     if perfActive then
@@ -657,11 +725,12 @@ local function event(widget, category, value, x, y)
     end
 
     if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
-      mapLibs.utils.logDebug("TOUCH", string.format("value=%s x=%s y=%s", tostring(value), tostring(x), tostring(y)))
+      mapLibs.utils.logDebug("TOUCH", fmt("value=%s x=%s y=%s pan=%d", tostring(value), tostring(x), tostring(y), mapStatus.panState))
     end
 
+    -- Button geometry (same as layout_default.lua)
     local scaleFactor = 0.15 + 0.8 * mapStatus.scaleX
-    local btnSize = math.floor(52 * scaleFactor)
+    local btnSize = floor(52 * scaleFactor)
     local btnX = 12 * mapStatus.scaleX
     local ultraTiny =
       (mapStatus.widgetWidth < (mapStatus.tinyWidthThreshold or 350)) and
@@ -679,26 +748,88 @@ local function event(widget, category, value, x, y)
 
     local touchPadding
     if ultraTiny then
-      local maxUltraPadding = math.floor((mapStatus.widgetHeight - 2 * (btnSize + btnX)) / 2) - 1
-      if maxUltraPadding < 0 then
-        maxUltraPadding = 0
-      end
-      touchPadding = math.min(12, maxUltraPadding)
+      local maxUltraPadding = floor((mapStatus.widgetHeight - 2 * (btnSize + btnX)) / 2) - 1
+      if maxUltraPadding < 0 then maxUltraPadding = 0 end
+      touchPadding = min(12, maxUltraPadding)
     else
       touchPadding = 20
     end
 
     local touchSize = btnSize + 2 * touchPadding
     local plusLeft = btnX - touchPadding
-    local plusTop = btnYPlus - touchPadding
+    local plusTop  = btnYPlus - touchPadding
     local minusLeft = btnX - touchPadding
-    local minusTop = btnYMinus - touchPadding
+    local minusTop  = btnYMinus - touchPadding
 
-    local hitPlus = mapLibs.drawLib.isInside(x, y, plusLeft, plusTop, plusLeft + touchSize, plusTop + touchSize)
+    local hitPlus  = mapLibs.drawLib.isInside(x, y, plusLeft, plusTop, plusLeft + touchSize, plusTop + touchSize)
     local hitMinus = mapLibs.drawLib.isInside(x, y, minusLeft, minusTop, minusLeft + touchSize, minusTop + touchSize)
 
+    -- Follow-lock button: right side, vertically centered
+    local lockBtnX = mapStatus.widgetWidth - btnX - btnSize
+    local lockBtnY = floor((mapStatus.widgetHeight - btnSize) / 2)
+    local lockLeft = lockBtnX - touchPadding
+    local lockTop  = lockBtnY - touchPadding
+    local hitLock  = mapStatus.panDragEnabled
+      and mapLibs.drawLib.isInside(x, y, lockLeft, lockTop, lockLeft + touchSize, lockTop + touchSize)
+
+    -- Pin button: right side at zoom+ height (only active when unlocked)
+    local pinBtnX = lockBtnX
+    local pinBtnY = btnYPlus
+    local pinLeft = pinBtnX - touchPadding
+    local pinTop  = pinBtnY - touchPadding
+    local hitPin  = mapStatus.panDragEnabled and not mapStatus.followLock
+      and mapLibs.drawLib.isInside(x, y, pinLeft, pinTop, pinLeft + touchSize, pinTop + touchSize)
+
+    -- Drag zone: full width minus the left button column.
+    -- Right edge reserved for future follow button (same width as zoom column).
+    -- Top/bottom 10% excluded so menu/swipe gestures are not intercepted.
+    local btnColumnW = btnX + btnSize + touchPadding
+    local dragMarginY = floor(mapStatus.widgetHeight * 0.15)
+    local inDragZone = mapStatus.panDragEnabled
+      and x > btnColumnW
+      and x < (mapStatus.widgetWidth - btnColumnW)
+      and y > dragMarginY
+      and y < (mapStatus.widgetHeight - dragMarginY)
+
+    local panState = mapStatus.panState
+
+    -- ═══════════════════════════════════════════════════════════
+    -- PAN STATE MACHINE
+    -- ═══════════════════════════════════════════════════════════
+
+    -- TOUCH_END (16641)
     if value == 16641 then
-      if mapStatus.consumeZoomRelease or hitPlus or hitMinus then
+      if panState == PAN_PENDING then
+        -- END without SLIDE = tap. Let ETHOS handle it (widget menu).
+        mapStatus.panState = PAN_IDLE
+        if mapStatus.followLock then
+          -- Locked mode: full reset
+          mapStatus.panOffsetX = 0
+          mapStatus.panOffsetY = 0
+          mapStatus.panAnchorPixelX = nil
+          mapStatus.panAnchorPixelY = nil
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+        end
+        -- Detached mode: keep panOffset/panAnchor so viewport stays put
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          mapLibs.utils.logDebug("PAN", "TAP_DETECTED -> IDLE", true)
+        end
+        return false  -- pass to ETHOS
+
+      elseif panState == PAN_DRAGGING then
+        -- Finger up during drag -> GRACE
+        mapStatus.panState = PAN_GRACE
+        mapStatus.panGraceEnd = getTime() + PAN_GRACE_DURATION_CS
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          mapLibs.utils.logDebug("PAN", "TOUCH_END -> GRACE", true)
+        end
+        system.killEvents(value)
+        return true
+      end
+
+      -- IDLE/GRACE: consume if it was a zoom/lock/pin release, otherwise pass through
+      if mapStatus.consumeZoomRelease or hitPlus or hitMinus or hitLock or hitPin then
         mapStatus.consumeZoomRelease = false
         system.killEvents(value)
         return true
@@ -706,42 +837,258 @@ local function event(widget, category, value, x, y)
       return false
     end
 
-    if value ~= 16640 then
-      return false -- Process zoom only on press events; release events must not trigger zoom.
+    -- TOUCH_SLIDE (16642)
+    if value == 16642 then
+      mapStatus.panLastTouchTime = getTime()
+
+      if panState == PAN_PENDING then
+        -- First SLIDE after FIRST → drag confirmed
+        mapStatus.panState = PAN_DRAGGING
+        local dx = x - mapStatus.panLastX
+        local dy = y - mapStatus.panLastY
+        mapStatus.panOffsetX = mapStatus.panOffsetX + dx
+        mapStatus.panOffsetY = mapStatus.panOffsetY + dy
+        mapStatus.panLastX = x
+        mapStatus.panLastY = y
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          mapLibs.utils.logDebug("PAN", fmt("DRAG_START dx=%d dy=%d", dx, dy), true)
+        end
+        system.killEvents(value)
+        return true
+
+      elseif panState == PAN_DRAGGING then
+        -- Continue drag
+        local dx = x - mapStatus.panLastX
+        local dy = y - mapStatus.panLastY
+        mapStatus.panOffsetX = mapStatus.panOffsetX + dx
+        mapStatus.panOffsetY = mapStatus.panOffsetY + dy
+        mapStatus.panLastX = x
+        mapStatus.panLastY = y
+        system.killEvents(value)
+        return true
+
+      elseif panState == PAN_GRACE then
+        -- SLIDE during grace → resume drag directly
+        mapStatus.panState = PAN_DRAGGING
+        mapStatus.panLastX = x
+        mapStatus.panLastY = y
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          mapLibs.utils.logDebug("PAN", "GRACE_SLIDE -> DRAGGING", true)
+        end
+        system.killEvents(value)
+        return true
+      end
+
+      -- IDLE + SLIDE: not our concern
+      return false
     end
-    kill = true
 
-    -- Evaluate minus first so lower-zone taps win in edge overlap scenarios.
-    if hitMinus then
-      mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel - 1)
-      mapStatus.consumeZoomRelease = true
-      markMapDirty()
-      if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
-        mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
+    -- TOUCH_FIRST (16640)
+    if value == 16640 then
+      mapStatus.panLastTouchTime = getTime()
+
+      -- Follow-lock toggle button
+      if hitLock then
+        if mapStatus.followLock then
+          -- Unlock: switch to detached mode
+          mapStatus.followLock = false
+        else
+          -- Re-lock: snap back to UAV GPS position
+          mapStatus.followLock = true
+          mapStatus.panState = PAN_IDLE
+          mapStatus.panOffsetX = 0
+          mapStatus.panOffsetY = 0
+          mapStatus.panAnchorPixelX = nil
+          mapStatus.panAnchorPixelY = nil
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+          markMapDirty()
+        end
+        mapStatus.consumeZoomRelease = true
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          mapLibs.utils.logDebug("TOUCH", ">>> FOLLOW LOCK " .. (mapStatus.followLock and "ON" or "OFF") .. " <<<", true)
+        end
+        system.killEvents(value)
+        if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+        return true
       end
 
-    elseif hitPlus then
-      mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel + 1)
-      mapStatus.consumeZoomRelease = true
-      markMapDirty()
-      if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
-        mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
+      -- Observation marker pin button (only when unlocked)
+      if hitPin then
+        if mapStatus.observationLat ~= nil then
+          -- Remove existing marker
+          mapStatus.observationLat = nil
+          mapStatus.observationLon = nil
+        else
+          -- Place marker at current viewport center
+          local anchorX = mapStatus.panAnchorPixelX
+          local anchorY = mapStatus.panAnchorPixelY
+          if anchorX ~= nil and anchorY ~= nil and mapLibs.mapLib.pixel_to_coord then
+            local vcPixelX = anchorX - (mapStatus.panOffsetX or 0)
+            local vcPixelY = anchorY - (mapStatus.panOffsetY or 0)
+            local lat, lon = mapLibs.mapLib.pixel_to_coord(vcPixelX, vcPixelY, mapStatus.mapZoomLevel)
+            mapStatus.observationLat = lat
+            mapStatus.observationLon = lon
+          end
+        end
+        -- Persist immediately
+        storage.write("observationLat", mapStatus.observationLat)
+        storage.write("observationLon", mapStatus.observationLon)
+        mapStatus.consumeZoomRelease = true
+        markMapDirty()
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          if mapStatus.observationLat then
+            mapLibs.utils.logDebug("TOUCH", fmt(">>> OBSERVATION MARKER SET lat=%.6f lon=%.6f <<<", mapStatus.observationLat, mapStatus.observationLon), true)
+          else
+            mapLibs.utils.logDebug("TOUCH", ">>> OBSERVATION MARKER CLEARED <<<", true)
+          end
+        end
+        system.killEvents(value)
+        if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+        return true
       end
 
-    else
+      -- Zoom buttons always take priority
+      if hitMinus then
+        if mapStatus.mapZoomLevel <= mapStatus.conf.mapZoomMin then
+          -- Already at min zoom — consume event, show message, don't recenter
+          mapStatus.zoomLimitMessageEnd = getTime() + 200  -- 2 seconds
+          if panState == PAN_GRACE then
+            mapStatus.panGraceEnd = getTime() + PAN_GRACE_DURATION_CS
+          end
+          mapStatus.consumeZoomRelease = true
+          system.killEvents(value)
+          if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+          return true
+        end
+        mapStatus.mapZoomLevel = mapStatus.mapZoomLevel - 1
+        mapStatus.consumeZoomRelease = true
+        if panState == PAN_GRACE then
+          -- Zoom during grace: keep pan position, restart grace timer
+          -- Zoom out halves Mercator pixels → scale offset by 0.5
+          mapStatus.panOffsetX = floor(mapStatus.panOffsetX / 2)
+          mapStatus.panOffsetY = floor(mapStatus.panOffsetY / 2)
+          mapStatus.panGraceEnd = getTime() + PAN_GRACE_DURATION_CS
+          mapStatus.panAnchorPixelX = nil  -- recalculate anchor at new zoom
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+        elseif panState == PAN_IDLE and not mapStatus.followLock then
+          -- Detached idle: scale offset like grace, nil anchor for recalc
+          mapStatus.panOffsetX = floor(mapStatus.panOffsetX / 2)
+          mapStatus.panOffsetY = floor(mapStatus.panOffsetY / 2)
+          mapStatus.panAnchorPixelX = nil
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+        elseif panState ~= PAN_IDLE then
+          mapStatus.panState = PAN_IDLE
+          mapStatus.panOffsetX = 0
+          mapStatus.panOffsetY = 0
+          mapStatus.panAnchorPixelX = nil
+          mapStatus.panAnchorPixelY = nil
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+        end
+        markMapDirty()
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          mapLibs.utils.logDebug("TOUCH", ">>> ZOOM - PRESSED <<<", true)
+        end
+        system.killEvents(value)
+        if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+        return true
+
+      elseif hitPlus then
+        if mapStatus.mapZoomLevel >= mapStatus.conf.mapZoomMax then
+          -- Already at max zoom — consume event, show message, don't recenter
+          mapStatus.zoomLimitMessageEnd = getTime() + 200  -- 2 seconds
+          if panState == PAN_GRACE then
+            mapStatus.panGraceEnd = getTime() + PAN_GRACE_DURATION_CS
+          end
+          mapStatus.consumeZoomRelease = true
+          system.killEvents(value)
+          if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+          return true
+        end
+        mapStatus.mapZoomLevel = mapStatus.mapZoomLevel + 1
+        mapStatus.consumeZoomRelease = true
+        if panState == PAN_GRACE then
+          -- Zoom during grace: keep pan position, restart grace timer
+          -- Zoom in doubles Mercator pixels → scale offset by 2
+          mapStatus.panOffsetX = mapStatus.panOffsetX * 2
+          mapStatus.panOffsetY = mapStatus.panOffsetY * 2
+          mapStatus.panGraceEnd = getTime() + PAN_GRACE_DURATION_CS
+          mapStatus.panAnchorPixelX = nil  -- recalculate anchor at new zoom
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+        elseif panState == PAN_IDLE and not mapStatus.followLock then
+          -- Detached idle: scale offset like grace, nil anchor for recalc
+          mapStatus.panOffsetX = mapStatus.panOffsetX * 2
+          mapStatus.panOffsetY = mapStatus.panOffsetY * 2
+          mapStatus.panAnchorPixelX = nil
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+        elseif panState ~= PAN_IDLE then
+          mapStatus.panState = PAN_IDLE
+          mapStatus.panOffsetX = 0
+          mapStatus.panOffsetY = 0
+          mapStatus.panAnchorPixelX = nil
+          mapStatus.panAnchorPixelY = nil
+          mapStatus.lastPanOffsetX = nil
+          mapStatus.lastPanOffsetY = nil
+        end
+        markMapDirty()
+        if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+          mapLibs.utils.logDebug("TOUCH", ">>> ZOOM + PRESSED <<<", true)
+        end
+        system.killEvents(value)
+        if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+        return true
+      end
+
       mapStatus.consumeZoomRelease = false
-      kill = false
+
+      -- Drag zone: enter PENDING (don't consume — ETHOS needs FIRST for tap)
+      if inDragZone then
+        if panState == PAN_GRACE then
+          -- Re-engage during grace: skip PENDING to avoid 1-frame overlay flash
+          mapStatus.panState = PAN_DRAGGING
+          mapStatus.panLastX = x
+          mapStatus.panLastY = y
+          if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+            mapLibs.utils.logDebug("PAN", "GRACE_FIRST -> DRAGGING (consumed)", true)
+          end
+          system.killEvents(value)
+          if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+          return true
+
+        elseif panState == PAN_IDLE then
+          mapStatus.panState = PAN_PENDING
+          mapStatus.panLastX = x
+          mapStatus.panLastY = y
+          if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+            mapLibs.utils.logDebug("PAN", "FIRST -> PENDING (not consumed)", true)
+          end
+          if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+          return false  -- LET ETHOS HAVE IT
+
+        elseif panState == PAN_DRAGGING then
+          -- New finger sequence while dragging
+          mapStatus.panLastX = x
+          mapStatus.panLastY = y
+          system.killEvents(value)
+          if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+          return true
+        end
+      end
+
+      -- Outside drag zone and not a button → pass through
+      if perfActive then perfAddMs("event_total_ms", perfNowMs() - perfStartMs) end
+      return false
     end
+
+    -- Unknown touch values (e.g. 16643): don't consume
+    return false
   end
 
-  
-  if kill then
-    system.killEvents(value)
-    if perfActive then
-      perfAddMs("event_total_ms", perfNowMs() - perfStartMs)
-    end
-    return true
-  end
   if perfActive then
     perfAddMs("event_total_ms", perfNowMs() - perfStartMs)
   end
@@ -761,8 +1108,8 @@ local function menu(widget)
     return {
       { "Maps: Reset", function() reset(widget) end },
       { "Maps: Set Home", function() setHome(widget) end },
-      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = math.min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1); markMapDirty() end},
-      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = math.max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1); markMapDirty() end},
+      { "Maps: Zoom in", function() mapStatus.mapZoomLevel = min(mapStatus.conf.mapZoomMax, mapStatus.mapZoomLevel+1); markMapDirty() end},
+      { "Maps: Zoom out", function() mapStatus.mapZoomLevel = max(mapStatus.conf.mapZoomMin, mapStatus.mapZoomLevel-1); markMapDirty() end},
     }
   end
   return { { "Maps: Reset", function() reset(widget) end } }
@@ -785,6 +1132,39 @@ local function wakeup(widget)
     mapStatus.initPending = false
   end
 
+  -- Pan state machine: timeout-based release and grace expiry
+  local panState = mapStatus.panState
+  if panState == PAN_DRAGGING then
+    if mapStatus.panLastTouchTime > 0 and (now - mapStatus.panLastTouchTime) > PAN_TOUCH_TIMEOUT_CS then
+      mapStatus.panState = PAN_GRACE
+      mapStatus.panGraceEnd = now + PAN_GRACE_DURATION_CS
+      if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+        mapLibs.utils.logDebug("PAN", "TIMEOUT -> GRACE", true)
+      end
+    end
+  elseif panState == PAN_GRACE then
+    if now >= mapStatus.panGraceEnd then
+      mapStatus.panState = PAN_IDLE
+      if mapStatus.followLock then
+        -- Locked mode: snap back to GPS position
+        mapStatus.panOffsetX = 0
+        mapStatus.panOffsetY = 0
+        mapStatus.panAnchorPixelX = nil
+        mapStatus.panAnchorPixelY = nil
+        mapStatus.lastPanOffsetX = nil
+        mapStatus.lastPanOffsetY = nil
+      else
+        -- Detached mode: freeze current viewport position as new anchor
+        -- The detached anchor is computed from panAnchor - panOffset in drawMap.
+        -- We keep panOffset/panAnchor intact so the next drag starts from here.
+      end
+      markMapDirty()
+      if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+        mapLibs.utils.logDebug("PAN", "GRACE_EXPIRED -> IDLE" .. (mapStatus.followLock and "" or " (DETACHED)"), true)
+      end
+    end
+  end
+
   if widget.runBgTasks then
     local bgStartMs = nil
     if perfActive then
@@ -797,15 +1177,11 @@ local function wakeup(widget)
   end
 
   if mapLibs and mapLibs.tileLoader then
-    local tileLoadStartMs = nil
-    if perfActive then
-      tileLoadStartMs = perfNowMs()
-    end
     if mapLibs.tileLoader.getQueueLength() > 0 then
-      mapLibs.tileLoader.processQueue(2)
-    end
-    if perfActive then
-      perfAddMs("tile_load_ms", perfNowMs() - tileLoadStartMs)
+      local tilesLoaded = mapLibs.tileLoader.processQueue(3)
+      if perfActive and tilesLoaded > 0 then
+        perfInc("tiles_loaded", tilesLoaded)
+      end
     end
   end
 
@@ -860,13 +1236,17 @@ local function wakeup(widget)
           perfTableCell("bgMs", perfValueText(perfMetricAvg("bgtasks_ms"), 2)),
           perfTableCell("tileLoadMs", perfValueText(perfMetricAvg("tile_load_ms"), 2)),
           perfTableCell("flushMs", perfValueText(perfMetricAvg("log_flush_ms"), 2))),
+        perfTableRow("tileIO",
+          perfTableCell("min", perfValueText((mapStatus.perfProfile.metrics.tile_load_ms or {}).min or 0, 2)),
+          perfTableCell("max", perfValueText((mapStatus.perfProfile.metrics.tile_load_ms or {}).max or 0, 2)),
+          perfTableCell("count", (mapStatus.perfProfile.metrics.tile_load_ms or {}).count or 0)),
         perfTableRow("counts",
           perfTableCell("rebuilds", mapStatus.perfProfile.counters.tile_rebuild_count or 0),
           perfTableCell("tileCalls", mapStatus.perfProfile.counters.tile_update_calls or 0),
-          perfTableCell("touches", mapStatus.perfProfile.counters.touch_events or 0)),
+          perfTableCell("tilesLoaded", mapStatus.perfProfile.counters.tiles_loaded or 0)),
         perfTableRow("sched",
           perfTableCell("invalidates", mapStatus.perfProfile.counters.invalidate_count or 0),
-          perfTableCell("frame100ms", mapStatus.perfProfile.counters.long_frame_count_100ms or 0),
+          perfTableCell("touches", mapStatus.perfProfile.counters.touch_events or 0),
           perfTableCell("frame200ms", mapStatus.perfProfile.counters.long_frame_count_200ms or 0)),
         perfTableRow("gc",
           perfTableCell("gcCalls", mapStatus.perfProfile.counters.gc_count or 0),
@@ -1031,11 +1411,11 @@ end
 local function getProviderRootCandidates(provider)
   local roots = {}
   if provider == 1 then
-    table.insert(roots, "/bitmaps/yaapu/maps")
+    tinsert(roots, "/bitmaps/yaapu/maps")
     return roots
   end
   local folderName = PROVIDER_FOLDER_NAMES[provider] or ("PROVIDER" .. tostring(provider or ""))
-  table.insert(roots, "/bitmaps/ethosmaps/maps/" .. folderName)
+  tinsert(roots, "/bitmaps/ethosmaps/maps/" .. folderName)
   return roots
 end
 
@@ -1126,12 +1506,12 @@ local function getAvailableProviderChoices(forceRefresh)
       end
     end
     if available then
-      table.insert(choices, {MAP_PROVIDER_LABELS[provider], provider})
+      tinsert(choices, {MAP_PROVIDER_LABELS[provider], provider})
     end
   end
 
   if #choices == 0 then
-    table.insert(choices, {"NONE", 0})
+    tinsert(choices, {"NONE", 0})
   end
   return choices
 end
@@ -1145,12 +1525,12 @@ local function getAvailableMapTypeChoices(provider, forceRefresh)
   for typeId=1,5 do
     local folder = getMapTypeFolder(provider, typeId)
     if folder ~= nil and mapTypeFolderExists(provider, typeId) then
-      table.insert(choices, {MAP_TYPE_LABELS[typeId], typeId})
+      tinsert(choices, {MAP_TYPE_LABELS[typeId], typeId})
     end
   end
 
   if #choices == 0 then
-    table.insert(choices, {"NONE", 0})
+    tinsert(choices, {"NONE", 0})
   end
   return choices
 end
@@ -1165,17 +1545,17 @@ local function getAvailableZoomBounds(provider, mapTypeId)
 
   local searchRoots = {}
   if provider == 2 then
-    table.insert(searchRoots, "/bitmaps/ethosmaps/maps/GOOGLE/" .. folder)
+    tinsert(searchRoots, "/bitmaps/ethosmaps/maps/GOOGLE/" .. folder)
     local yaapuFolder = getGoogleMapTypeYaapuName(mapTypeId)
     if yaapuFolder ~= nil then
-      table.insert(searchRoots, "/bitmaps/yaapu/maps/" .. yaapuFolder)
+      tinsert(searchRoots, "/bitmaps/yaapu/maps/" .. yaapuFolder)
     end
   elseif provider == 1 then
-    table.insert(searchRoots, "/bitmaps/yaapu/maps/" .. folder)
+    tinsert(searchRoots, "/bitmaps/yaapu/maps/" .. folder)
   else
     local roots = getProviderRootCandidates(provider)
     for i = 1, #roots do
-      table.insert(searchRoots, roots[i] .. "/" .. folder)
+      tinsert(searchRoots, roots[i] .. "/" .. folder)
     end
   end
 
@@ -1187,7 +1567,7 @@ local function getAvailableZoomBounds(provider, mapTypeId)
     if type(dirs) == "table" then
       for j = 1, #dirs do
         local zoom = tonumber(dirs[j])
-        if zoom ~= nil and zoom >= 1 and zoom <= 20 and math.floor(zoom) == zoom then
+        if zoom ~= nil and zoom >= 1 and zoom <= 20 and floor(zoom) == zoom then
           if minZoom == nil or zoom < minZoom then
             minZoom = zoom
           end
@@ -1288,7 +1668,7 @@ getSortedDirectories = function(path)
       local name = rawName:gsub("/+$", "")
       if not seen[name] then
         seen[name] = true
-        table.insert(result, name)
+        tinsert(result, name)
       end
     end
   end
@@ -1303,7 +1683,7 @@ local function getRootPathCandidates(rootPath)
   local function addCandidate(path)
     if path ~= nil and path ~= "" and not seen[path] then
       seen[path] = true
-      table.insert(candidates, path)
+      tinsert(candidates, path)
     end
   end
 
@@ -1393,7 +1773,7 @@ local function logSettingsSnapshot()
 
   local keys = {}
   for key in pairs(mapStatus.conf) do
-    table.insert(keys, key)
+    tinsert(keys, key)
   end
   table.sort(keys)
 
@@ -1472,7 +1852,7 @@ local function ensureAvailableMapSelections()
   end
 
   if oldProvider ~= mapStatus.conf.mapProvider or oldMapTypeId ~= mapStatus.conf.mapTypeId then
-    local key = string.format("provider:%s->%s|mapType:%s->%s", tostring(oldProvider), tostring(mapStatus.conf.mapProvider), tostring(oldMapTypeId), tostring(mapStatus.conf.mapTypeId))
+    local key = fmt("provider:%s->%s|mapType:%s->%s", tostring(oldProvider), tostring(mapStatus.conf.mapProvider), tostring(oldMapTypeId), tostring(mapStatus.conf.mapTypeId))
     if mapStatus.lastSelectionAutoFixKey ~= key then
       logMapSelectionAutofix("Auto-adjusted map selection because configured provider/map type folders are not available (" .. key .. ")")
       mapStatus.lastSelectionAutoFixKey = key
@@ -1503,32 +1883,32 @@ local function applyConfig()
   end
 
   if mapStatus.conf.mapProvider == 0 then
-    mapStatus.mapZoomLevel = math.max(1, mapStatus.conf.mapZoomMin or 1)
+    mapStatus.mapZoomLevel = max(1, mapStatus.conf.mapZoomMin or 1)
   else
-    local min = mapStatus.conf.mapZoomMin or 1
-    local max = mapStatus.conf.mapZoomMax or 20
+    local zMin = mapStatus.conf.mapZoomMin or 1
+    local zMax = mapStatus.conf.mapZoomMax or 20
     local def = mapStatus.conf.mapZoomDefault or 18
 
     local availableMin, availableMax = getAvailableZoomBounds(mapStatus.conf.mapProvider, mapStatus.conf.mapTypeId)
     if availableMin ~= nil and availableMax ~= nil then
-      min = math.max(min, availableMin)
-      max = math.min(max, availableMax)
-      if max < min then
-        min = availableMin
-        max = availableMax
+      zMin = max(zMin, availableMin)
+      zMax = min(zMax, availableMax)
+      if zMax < zMin then
+        zMin = availableMin
+        zMax = availableMax
       end
-      mapStatus.conf.mapZoomMin = min
-      mapStatus.conf.mapZoomMax = max
+      mapStatus.conf.mapZoomMin = zMin
+      mapStatus.conf.mapZoomMax = zMax
     end
 
-    if max < min then
-      max = min
-      mapStatus.conf.mapZoomMax = max
+    if zMax < zMin then
+      zMax = zMin
+      mapStatus.conf.mapZoomMax = zMax
     end
-    if def < min then
-      def = min
-    elseif def > max then
-      def = max
+    if def < zMin then
+      def = zMin
+    elseif def > zMax then
+      def = zMax
     end
 
     mapStatus.conf.mapZoomDefault = def
@@ -1846,7 +2226,7 @@ local function configure(widget)
   widget.sensorSpeedField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.0.0")
+  form.addStaticText(line, nil, "1.1.0")
 
 end
 
@@ -1877,6 +2257,10 @@ local function read(widget)
   mapStatus.conf.sensorHeading = storageToConfig("sensorHeading", nil)
   mapStatus.conf.sensorSpeed = storageToConfig("sensorSpeed", nil)
 
+  -- Observation marker persistence
+  mapStatus.observationLat = storageToConfig("observationLat", nil)
+  mapStatus.observationLon = storageToConfig("observationLon", nil)
+
   applyConfig()
 end
 
@@ -1906,6 +2290,10 @@ local function write(widget)
   storage.write("sensorGpsLon", mapStatus.conf.sensorGpsLon)
   storage.write("sensorHeading", mapStatus.conf.sensorHeading)
   storage.write("sensorSpeed", mapStatus.conf.sensorSpeed)
+
+  -- Observation marker persistence
+  storage.write("observationLat", mapStatus.observationLat)
+  storage.write("observationLon", mapStatus.observationLon)
 
   applyConfig()
   mapLibs.resetLib.resetLayout(widget)

@@ -18,8 +18,9 @@ RADIO/bitmaps/yaapu/
 # Local debug/runtime artifacts
 RADIO/scripts/ethosmaps/debug.log
 
-# Local-only debug widget (not part of distribution)
+# Local-only debug/test widgets (not part of distribution)
 RADIO/scripts/TelemetryReplay/
+RADIO/scripts/TouchTest/
 
 # Workspace-local VS Code settings
 .vscode/settings.json

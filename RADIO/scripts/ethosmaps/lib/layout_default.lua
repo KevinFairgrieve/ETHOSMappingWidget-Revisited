@@ -20,6 +20,11 @@
 
 -- getTime() removed — use status.getTime() (published by main.lua)
 
+-- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
+local tostring = tostring
+local floor, max, min, ceil = math.floor, math.max, math.min, math.ceil
+local fmt = string.format
+
 local panel = {}
 
 local status = nil
@@ -29,6 +34,12 @@ local MAP_TILE_BUFFER_X = 1
 local MAP_TILE_BUFFER_Y = 1
 local MAP_MIN_TILES_X = 3
 local MAP_MIN_TILES_Y = 3
+
+-- Bar string cache (Optimization D): only re-format when the computed value changes.
+local _lastGSpdVal, _cachedGSpdStr = nil, ""
+local _lastHdgVal, _cachedHdgStr = nil, ""
+local _lastTravVal, _cachedTravStr = nil, ""
+local _lastHDistVal, _cachedHDistStr = nil, ""
 
 local function getBarSnapshot()
   local barTickSerial = status.barTickSerial or 0
@@ -64,7 +75,7 @@ local function drawBarSensor(x, barTop, barHeight, label, value, unit, font, lab
   lcd.font(font)
   local vw, vh = lcd.getTextSize(value)
 
-  local valueY = barTop + math.floor((barHeight - vh) / 2)
+  local valueY = barTop + floor((barHeight - vh) / 2)
   local valueBottomY = valueY + vh
   local labelY = valueBottomY - lh
   local unitY = valueBottomY - uh
@@ -87,12 +98,15 @@ function panel.draw(widget)
   local h = status.widgetHeight
   local sx = status.scaleX
   local sy = status.scaleY
+  local conf = status.conf
+  local colors = status.colors
+  local telemetry = status.telemetry
 
   -- Guard: widget area too small to render meaningfully.
   if w < 200 or h < 100 then
-    lcd.color(lcd.RGB(255, 220, 0))
+    lcd.color(colors.warningYellow)
     lcd.drawFilledRectangle(0, 0, w, h)
-    lcd.color(lcd.RGB(0, 0, 0))
+    lcd.color(colors.black)
     lcd.font(FONT_STD)
     local line1 = "TOO SMALL!"
     local line2 = w .. " x " .. h .. " px"
@@ -102,12 +116,12 @@ function panel.draw(widget)
     lcd.font(FONT_XS)
     local tw3, th3 = lcd.getTextSize(line3)
     local totalH = th1 + 4 + th2 + 2 + th3
-    local startY = math.floor((h - totalH) / 2)
+    local startY = floor((h - totalH) / 2)
     lcd.font(FONT_STD)
-    lcd.drawText(math.floor((w - tw1) / 2), startY, line1)
-    lcd.drawText(math.floor((w - tw2) / 2), startY + th1 + 4, line2)
+    lcd.drawText(floor((w - tw1) / 2), startY, line1)
+    lcd.drawText(floor((w - tw2) / 2), startY + th1 + 4, line2)
     lcd.font(FONT_XS)
-    lcd.drawText(math.floor((w - tw3) / 2), startY + th1 + 4 + th2 + 2, line3)
+    lcd.drawText(floor((w - tw3) / 2), startY + th1 + 4 + th2 + 2, line3)
     return
   end
 
@@ -117,7 +131,14 @@ function panel.draw(widget)
   local verticalMedium = status.verticalMedium == true or (w < (status.compactWidthThreshold or 450))
   local ultraTiny = verticalTiny and horizontalTiny
 
+  -- Pan mode: suppress map overlays and freeze bar updates during active drag/grace.
+  -- PENDING is excluded — overlays stay visible until drag actually starts.
+  -- Detached-idle (followLock=false, panState=0) keeps overlays visible.
+  local panState = status.panState or 0
+  local panActive = panState == 1 or panState == 2  -- DRAGGING or GRACE only
+
   -- Derive the map viewport after reserving space for the top and bottom bars.
+  -- Bars stay visible during pan (frozen content) — map only renders in its normal area.
   local topH, bottomH
   if horizontalTiny then
     topH = 0
@@ -129,8 +150,8 @@ function panel.draw(widget)
     local _, topValueH = lcd.getTextSize("TX 99.9V")
     lcd.font(topLabelFont)
     local _, topLabelH = lcd.getTextSize("SRC")
-    local topContentH = math.max(topValueH, topLabelH)
-    topH = math.max(math.floor(26 * sy), topContentH + math.floor(8 * sy))
+    local topContentH = max(topValueH, topLabelH)
+    topH = max(floor(26 * sy), topContentH + floor(8 * sy))
 
     local bottomValueFont = verticalMedium and FONT_S or FONT_L
     local bottomMetaFont = FONT_XS
@@ -138,13 +159,13 @@ function panel.draw(widget)
     local _, bottomValueH = lcd.getTextSize("999.9")
     lcd.font(bottomMetaFont)
     local _, bottomMetaH = lcd.getTextSize("km/h")
-    local bottomContentH = math.max(bottomValueH, bottomMetaH)
-    bottomH = math.max(math.floor(46 * sy), bottomContentH + math.floor(12 * sy))
+    local bottomContentH = max(bottomValueH, bottomMetaH)
+    bottomH = max(floor(46 * sy), bottomContentH + floor(12 * sy))
   end
   local mapY    = topH
   local mapH    = h - topH - bottomH
-  local mapTilesX = math.max(MAP_MIN_TILES_X, math.ceil(w / MAP_TILE_SIZE) + MAP_TILE_BUFFER_X)
-  local mapTilesY = math.max(MAP_MIN_TILES_Y, math.ceil(h / MAP_TILE_SIZE) + MAP_TILE_BUFFER_Y)
+  local mapTilesX = max(MAP_MIN_TILES_X, ceil(w / MAP_TILE_SIZE) + MAP_TILE_BUFFER_X)
+  local mapTilesY = max(MAP_MIN_TILES_Y, ceil(h / MAP_TILE_SIZE) + MAP_TILE_BUFFER_Y)
 
   local mapTickSerial = status.mapTickSerial or 0
   local zoomChanged = status.mapZoomLevel ~= (status.mapLastZoom or 0)
@@ -162,11 +183,11 @@ function panel.draw(widget)
   status.mapLastZoom = status.mapZoomLevel
 
   -- Draw the map viewport for the current layout.
-  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, mapTilesX, mapTilesY, status.telemetry.yaw or status.telemetry.cog, mapNeedsUpdate)
+  libs.mapLib.drawMap(widget, 0, mapY, w, mapH, status.mapZoomLevel, mapTilesX, mapTilesY, telemetry.yaw or telemetry.cog, mapNeedsUpdate)
 
   -- Draw the dedicated left-side zoom buttons.
   local scaleFactor = 0.15 + 0.8 * status.scaleX
-  local btnSize     = math.floor(52 * scaleFactor)
+  local btnSize     = floor(52 * scaleFactor)
   local btnX        = 12 * status.scaleX
 
   -- In ultra-tiny mode, anchor buttons to top and bottom edges with symmetric margins.
@@ -184,33 +205,74 @@ function panel.draw(widget)
   libs.drawLib.drawBitmap(btnX, btnYPlus, "zoom_plus", btnSize, btnSize)
   libs.drawLib.drawBitmap(btnX, btnYMinus, "zoom_minus", btnSize, btnSize)
 
+  -- Follow-lock button: right side, vertically centered (only when pan/drag is enabled).
+  if status.panDragEnabled then
+    local lockBtnX = w - btnX - btnSize
+    local lockBtnY = floor((h - btnSize) / 2)
+    local lockIcon = status.followLock and "flockon" or "flockoff"
+    libs.drawLib.drawBitmap(lockBtnX, lockBtnY, lockIcon, btnSize, btnSize)
+
+    -- Pin button: right side at zoom+ height, only when unlocked
+    if not status.followLock then
+      libs.drawLib.drawBitmap(lockBtnX, btnYPlus, "pinbutton", btnSize, btnSize)
+    end
+  end
+
+  -- Crosshair: red "+" at viewport center when follow-unlocked
+  if status.panDragEnabled and not status.followLock then
+    local chX = floor(w / 2)
+    local chY = mapY + floor(mapH / 2)
+    local chHalf = floor(10 * min(sx, sy))
+    lcd.color(colors.red)
+    lcd.pen(SOLID)
+    lcd.drawLine(chX - chHalf, chY, chX + chHalf, chY)
+    lcd.drawLine(chX, chY - chHalf, chX, chY + chHalf)
+  end
+
+  -- Show zoom limit message
+  if (status.zoomLimitMessageEnd or 0) > status.getTime() then
+    local limitText = "ZOOM LIMIT"
+    local limitFont = verticalMedium and FONT_S or FONT_L
+    lcd.font(limitFont)
+    local ltw, lth = lcd.getTextSize(limitText)
+    local lbx = floor((w - ltw) / 2) - 8
+    local lby = floor(h / 2) - floor(lth / 2) - 4
+    lcd.color(colors.semiBlack60)
+    lcd.drawFilledRectangle(lbx, lby, ltw + 16, lth + 8)
+    lcd.color(colors.yellow)
+    lcd.drawText(lbx + 8, lby + 4, limitText)
+  end
+
   -- Draw the top bar and text overlays only when the layout has enough vertical space.
   if not horizontalTiny then
-    lcd.color(lcd.RGB(0,0,0))
+    -- Bar backgrounds always drawn (even during pan) for consistent UI.
+    lcd.color(colors.black)
     lcd.pen(SOLID)
     lcd.drawFilledRectangle(0, 0, w, topH)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
 
+    -- Bar content and map overlays frozen during active pan to save cycles.
+    if not panActive then
     libs.drawLib.drawTopBar(widget, 0, topH)
 
     local overlayFont = verticalMedium and FONT_XS or FONT_L
     lcd.font(overlayFont)
 
-    local overlayPadX = math.max(6, math.floor(8 * sx))
-    local overlayPadY = math.max(3, math.floor(4 * sy))
-    local overlayMargin = math.max(6, math.floor(8 * sx))
+    local overlayPadX = max(6, floor(8 * sx))
+    local overlayPadY = max(3, floor(4 * sy))
+    local overlayMargin = max(6, floor(8 * sx))
 
-    local gpsText = status.telemetry.strLat .. " " .. status.telemetry.strLon
+    local gpsText = telemetry.strLat .. " " .. telemetry.strLon
     local gpsTw, gpsTh = lcd.getTextSize(gpsText)
     local gpsBoxW = gpsTw + 2 * overlayPadX
     local gpsBoxH = gpsTh + 2 * overlayPadY
-    local gpsBoxX = math.max(overlayMargin, w - gpsBoxW - overlayMargin)
+    local gpsBoxX = max(overlayMargin, w - gpsBoxW - overlayMargin)
     local gpsBoxY = mapY + overlayMargin
 
-    lcd.color(lcd.RGB(0,0,0,0.45))
+    lcd.color(colors.semiBlack45)
     lcd.drawFilledRectangle(gpsBoxX, gpsBoxY, gpsBoxW, gpsBoxH)
-    lcd.color(status.colors.white)
-    lcd.drawText(gpsBoxX + math.floor((gpsBoxW - gpsTw) / 2), gpsBoxY + math.floor((gpsBoxH - gpsTh) / 2), gpsText)
+    lcd.color(colors.white)
+    lcd.drawText(gpsBoxX + floor((gpsBoxW - gpsTw) / 2), gpsBoxY + floor((gpsBoxH - gpsTh) / 2), gpsText)
 
     local zoomText = "zoom " .. tostring(status.mapZoomLevel)
     local zoomTw, zoomTh = lcd.getTextSize(zoomText)
@@ -219,21 +281,22 @@ function panel.draw(widget)
     local zoomBoxX = overlayMargin
     local zoomBoxY = mapY + overlayMargin
 
-    lcd.color(lcd.RGB(0,0,0,0.45))
+    lcd.color(colors.semiBlack45)
     lcd.drawFilledRectangle(zoomBoxX, zoomBoxY, zoomBoxW, zoomBoxH)
-    lcd.color(status.colors.white)
-    lcd.drawText(zoomBoxX + math.floor((zoomBoxW - zoomTw) / 2), zoomBoxY + math.floor((zoomBoxH - zoomTh) / 2), zoomText)
-  end
+    lcd.color(colors.white)
+    lcd.drawText(zoomBoxX + floor((zoomBoxW - zoomTw) / 2), zoomBoxY + floor((zoomBoxH - zoomTh) / 2), zoomText)
+    end -- not panActive (top bar content + overlays)
+  end -- not horizontalTiny
 
   -- Draw the bottom flight-data bar except on the narrowest horizontal layouts.
-  if not horizontalTiny then
+  if not panActive and not horizontalTiny then
     local barSnapshot = getBarSnapshot()
 
-    lcd.color(lcd.RGB(0,0,0))
+    lcd.color(colors.black)
     lcd.pen(SOLID)
     lcd.drawFilledRectangle(0, h - bottomH, w, bottomH)
 
-    local labelColor = lcd.RGB(170,170,170)
+    local labelColor = colors.labelGray
     local barTop = h - bottomH
     local barFont = verticalMedium and FONT_S or FONT_L
     local barMetaFont = FONT_XS
@@ -243,78 +306,103 @@ function panel.draw(widget)
     local gspdLabel   = verticalMedium and "GS" or "GSpd"
     local homeLabel   = verticalMedium and "HD" or "HomeDist"
 
+    -- Delta-check bar strings (Optimization D): only re-format when the computed value changes.
+    local gspdVal = barSnapshot.groundSpeed * conf.horSpeedMultiplier
+    if gspdVal ~= _lastGSpdVal then
+      _lastGSpdVal = gspdVal
+      _cachedGSpdStr = fmt("%.01f", gspdVal)
+    end
+
+    local travVal = barSnapshot.travelDist * conf.distUnitLongScale
+    if travVal ~= _lastTravVal then
+      _lastTravVal = travVal
+      _cachedTravStr = fmt("%.01f", travVal)
+    end
+
+    local hdgVal = barSnapshot.heading or 0
+    if hdgVal ~= _lastHdgVal then
+      _lastHdgVal = hdgVal
+      _cachedHdgStr = fmt("%.0f", hdgVal)
+    end
+
+    local hDistVal = barSnapshot.homeDist * conf.distUnitScale
+    if hDistVal ~= _lastHDistVal then
+      _lastHDistVal = hDistVal
+      _cachedHDistStr = fmt("%.01f", hDistVal)
+    end
+
     if hideHomeDistAndHeading then
       drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
-        string.format("%.01f", barSnapshot.groundSpeed * status.conf.horSpeedMultiplier),
-        status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
+        _cachedGSpdStr,
+        conf.horSpeedLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false)
 
       drawBarSensor(w - 12*sx, barTop, bottomH, "TR",
-        string.format("%.01f", barSnapshot.travelDist * status.conf.distUnitLongScale),
-        status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
+        _cachedTravStr,
+        conf.distUnitLongLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false, RIGHT)
     else
       local offset = drawBarSensor(12*sx, barTop, bottomH, gspdLabel,
-        string.format("%.01f", barSnapshot.groundSpeed * status.conf.horSpeedMultiplier),
-        status.conf.horSpeedLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
+        _cachedGSpdStr,
+        conf.horSpeedLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false)
 
       offset = offset + drawBarSensor(12*sx + offset + spacing, barTop, bottomH, "HDG",
-        string.format("%.0f", barSnapshot.heading or 0), "°",
-        barFont, barMetaFont, barFont, status.colors.white, labelColor, false)
+        _cachedHdgStr, "°",
+        barFont, barMetaFont, barFont, colors.white, labelColor, false)
 
       local travelOffset = drawBarSensor(w, barTop, bottomH, "TR",
-        string.format("%.01f", barSnapshot.travelDist * status.conf.distUnitLongScale),
-        status.conf.distUnitLongLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
+        _cachedTravStr,
+        conf.distUnitLongLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false, RIGHT)
 
       drawBarSensor(w - travelOffset - spacing - 15*sx, barTop, bottomH, homeLabel,
-        string.format("%.01f", barSnapshot.homeDist * status.conf.distUnitScale),
-        status.conf.distUnitLabel, barFont, barMetaFont, barFont, status.colors.white, labelColor, false, RIGHT)
+        _cachedHDistStr,
+        conf.distUnitLabel, barFont, barMetaFont, barFont, colors.white, labelColor, false, RIGHT)
     end
   end
 
   -- Draw the home-direction arrow whenever a home position is available.
-  if status.telemetry.homeLat ~= nil and status.telemetry.homeLon ~= nil then
-    local baseArrowSize = math.floor(42 * math.min(sx, sy))
+  if not panActive and telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
+    local baseArrowSize = floor(42 * min(sx, sy))
     local arrowSize = baseArrowSize
     if ultraTiny then
-      arrowSize = math.min(math.max(math.floor(baseArrowSize * 1.2), baseArrowSize + 4), baseArrowSize + 10)
+      arrowSize = min(max(floor(baseArrowSize * 1.2), baseArrowSize + 4), baseArrowSize + 10)
     elseif horizontalTiny or verticalTiny then
-      arrowSize = math.min(math.max(math.floor(baseArrowSize * 1.15), baseArrowSize + 2), baseArrowSize + 8)
+      arrowSize = min(max(floor(baseArrowSize * 1.15), baseArrowSize + 2), baseArrowSize + 8)
     end
 
     local arrowX = w - arrowSize * 1.2
     local arrowY = horizontalTiny and (h - 55*sy - 20) or (h - bottomH + (bottomH / 2) - 60*sy - 20)
 
-    local homeHeading = status.telemetry.homeAngle - (status.telemetry.yaw or status.telemetry.cog or 0)
-    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize - 7, math.floor(homeHeading), status.colors.yellow)
-    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize, math.floor(homeHeading), status.colors.black)
+    local homeHeading = telemetry.homeAngle - (telemetry.yaw or telemetry.cog or 0)
+    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize - 7, floor(homeHeading), colors.yellow)
+    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize, floor(homeHeading), colors.black)
   end
 
   -- Warn the pilot when live GPS is present but no home position has been stored yet.
-  if status.telemetry.lat ~= nil and (status.telemetry.homeLat == nil or status.telemetry.homeLon == nil) then
+  if not panActive and telemetry.lat ~= nil and (telemetry.homeLat == nil or telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
     local font = verticalMedium and FONT_S or FONT_L
     lcd.font(font)
     local tw, th = lcd.getTextSize(warningText)
 
-    local padX = math.max(8, math.floor(14 * sx))
-    local padY = math.max(4, math.floor(8 * sy))
+    local padX = max(8, floor(14 * sx))
+    local padY = max(4, floor(8 * sy))
     local boxW = tw + 2 * padX
     local boxH = th + 2 * padY
-    local boxX = math.floor((w - boxW) / 2)
+    local boxX = floor((w - boxW) / 2)
 
-    local boxY = math.floor((h - boxH) / 2)
+    local boxY = floor((h - boxH) / 2)
 
-    lcd.color(lcd.RGB(0, 0, 0, 0.45))
+    lcd.color(colors.semiBlack45)
     lcd.drawFilledRectangle(boxX, boxY, boxW, boxH)
 
     lcd.color(WHITE)
     lcd.drawRectangle(boxX, boxY, boxW, boxH, 2)
 
-    lcd.color(status.colors.yellow)
-    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2, warningText, font, status.colors.yellow, CENTERED, true)
+    lcd.color(colors.yellow)
+    libs.drawLib.drawText(boxX + boxW/2, boxY + (boxH - th) / 2, warningText, font, colors.yellow, CENTERED, true)
   end
 
     -- Draw the map scale bar when the viewport is large enough to keep it readable.
-  if not ultraTiny then
+  if not panActive and not ultraTiny then
     local scaleLen, scaleLabel = libs.mapLib.calculateScale(status.mapZoomLevel)
     if scaleLen ~= 0 then
       local scaleFont = verticalMedium and FONT_S or FONT_STD
@@ -324,7 +412,7 @@ function panel.draw(widget)
       local scaleY_line  = mapY + mapH - 18*sy
       local scaleY_label = scaleY_line - labelH - 4*sy
 
-      lcd.color(lcd.RGB(0, 0, 0, 0.45))
+      lcd.color(colors.semiBlack45)
       lcd.drawFilledRectangle(8*sx, scaleY_label - 5*sy, scaleLen + 20*sx, labelH + 22*sy)
 
       lcd.color(WHITE)
