@@ -46,6 +46,13 @@ local ARROW_ANG_150  = rad(150)
 local ARROW_ANG_N150 = rad(-150)
 local ARROW_ANG_180  = rad(180)
 
+-- Pre-computed angle offsets for drawRMultirotor.
+local ROTOR_ARM_45  = rad(45)
+local ROTOR_ARM_135 = rad(135)
+local ROTOR_ARM_225 = rad(225)
+local ROTOR_ARM_315 = rad(315)
+local HALF_PI = math.pi / 2
+
 -- Per-tick cache for safeSensorName to avoid redundant pcall overhead.
 local _sensorNameCache = {}
 local _sensorNameCacheTick = -1
@@ -371,6 +378,163 @@ function drawLib.drawRArrow(x,y,r,angle,color)
   lcd.drawLine(x1,y1,x3,y3)
   lcd.drawLine(x2,y2,x4,y4)
   lcd.drawLine(x3,y3,x4,y4)
+end
+
+function drawLib.drawRAirplane(x, y, r, angle, color)
+  -- Draws a rotated flying-wing silhouette with rear propeller stub.
+  -- Coordinates as (forward, lateral) offsets, positive = forward / left.
+  local baseRad = rad(angle - 90)
+  local cb, sb = cos(baseRad), sin(baseRad)
+
+  -- Nose tip (shorter fuselage — wingspan wider than length)
+  local nx = x + r * 0.70 * cb
+  local ny = y + r * 0.70 * sb
+
+  -- Wing leading edge tips (wide out, barely swept back)
+  local wlfx = x + r * (-0.05*cb + 0.95*sb)                 -- left front (-0.05, -0.95)
+  local wlfy = y + r * (-0.05*sb - 0.95*cb)
+  local wrfx = x + r * (-0.05*cb - 0.95*sb)                 -- right front (-0.05, +0.95)
+  local wrfy = y + r * (-0.05*sb + 0.95*cb)
+
+  -- Wing trailing edge tips (clipped: behind leading tips, slightly inward)
+  local wlbx = x + r * (-0.25*cb + 0.85*sb)                 -- left back (-0.25, -0.85)
+  local wlby = y + r * (-0.25*sb - 0.85*cb)
+  local wrbx = x + r * (-0.25*cb - 0.85*sb)                 -- right back (-0.25, +0.85)
+  local wrby = y + r * (-0.25*sb + 0.85*cb)
+
+  -- Trailing edge inner (forward of tips — V notch)
+  local tlx = x + r * ( 0.05*cb + 0.15*sb)                  -- left inner (0.05, -0.15)
+  local tly = y + r * ( 0.05*sb - 0.15*cb)
+  local trx = x + r * ( 0.05*cb - 0.15*sb)                  -- right inner (0.05, +0.15)
+  local try_ = y + r * ( 0.05*sb + 0.15*cb)
+
+  -- Propeller stub (small line just behind body center)
+  local plx = x + r * (-0.10*cb + 0.10*sb)                  -- prop left (-0.10, -0.10)
+  local ply = y + r * (-0.10*sb - 0.10*cb)
+  local prx = x + r * (-0.10*cb - 0.10*sb)                  -- prop right (-0.10, +0.10)
+  local pry = y + r * (-0.10*sb + 0.10*cb)
+
+  lcd.pen(SOLID)
+  lcd.color(color)
+  -- Leading edges (nose to wing front tips)
+  lcd.drawLine(nx, ny, wlfx, wlfy)
+  lcd.drawLine(nx, ny, wrfx, wrfy)
+  -- Clipped wing tips
+  lcd.drawLine(wlfx, wlfy, wlbx, wlby)
+  lcd.drawLine(wrfx, wrfy, wrbx, wrby)
+  -- Trailing edges (wing back tips to inner body)
+  lcd.drawLine(wlbx, wlby, tlx, tly)
+  lcd.drawLine(wrbx, wrby, trx, try_)
+  -- Rear closing (inner trailing edges)
+  lcd.drawLine(tlx, tly, trx, try_)
+  -- Propeller stub
+  lcd.drawLine(plx, ply, prx, pry)
+end
+
+function drawLib.drawRMultirotor(x,y,r,angle)
+  -- Draws a rotated multirotor symbol with self-contained coloring:
+  -- Black 2px X-frame arms, concentric black/white rotor circles,
+  -- heading triangle (black outline, white fill) with black neck.
+  local baseRad = rad(angle - 90)
+  local armR = r * 0.75
+  local rotorR = r * 0.28
+
+  -- Arm endpoints (4 diagonal arms in X configuration)
+  local c1, s1 = cos(baseRad + ROTOR_ARM_45), sin(baseRad + ROTOR_ARM_45)
+  local c2, s2 = cos(baseRad + ROTOR_ARM_135), sin(baseRad + ROTOR_ARM_135)
+  local c3, s3 = cos(baseRad + ROTOR_ARM_225), sin(baseRad + ROTOR_ARM_225)
+  local c4, s4 = cos(baseRad + ROTOR_ARM_315), sin(baseRad + ROTOR_ARM_315)
+
+  local ax1 = x + armR * c1
+  local ay1 = y + armR * s1
+  local ax2 = x + armR * c2
+  local ay2 = y + armR * s2
+  local ax3 = x + armR * c3
+  local ay3 = y + armR * s3
+  local ax4 = x + armR * c4
+  local ay4 = y + armR * s4
+
+  -- Perpendicular offsets for 2px arm thickness
+  local p1x, p1y = cos(baseRad + ROTOR_ARM_135), sin(baseRad + ROTOR_ARM_135)
+  local p2x, p2y = cos(baseRad + ROTOR_ARM_225), sin(baseRad + ROTOR_ARM_225)
+
+  lcd.pen(SOLID)
+
+  -- X-frame arms: 2px thick, black only
+  lcd.color(BLACK)
+  lcd.drawLine(ax1, ay1, ax3, ay3)
+  lcd.drawLine(ax1 + p1x, ay1 + p1y, ax3 + p1x, ay3 + p1y)
+  lcd.drawLine(ax2, ay2, ax4, ay4)
+  lcd.drawLine(ax2 + p2x, ay2 + p2y, ax4 + p2x, ay4 + p2y)
+
+  -- Rotor circles: black outline + white inner (concentric)
+  lcd.color(BLACK)
+  lcd.drawCircle(ax1, ay1, rotorR)
+  lcd.drawCircle(ax2, ay2, rotorR)
+  lcd.drawCircle(ax3, ay3, rotorR)
+  lcd.drawCircle(ax4, ay4, rotorR)
+  lcd.color(WHITE)
+  lcd.drawCircle(ax1, ay1, rotorR - 1)
+  lcd.drawCircle(ax2, ay2, rotorR - 1)
+  lcd.drawCircle(ax3, ay3, rotorR - 1)
+  lcd.drawCircle(ax4, ay4, rotorR - 1)
+
+  -- Heading triangle tip
+  local noseR = r * 0.55
+  local cb, sb = cos(baseRad), sin(baseRad)
+  local tipX = x + noseR * cb
+  local tipY = y + noseR * sb
+
+  -- Triangle base center + perpendicular for base width
+  local triBaseR = r * 0.30
+  local triHalfW = r * 0.15
+  local bcx = x + triBaseR * cb
+  local bcy = y + triBaseR * sb
+  local cp, sp = cos(baseRad + HALF_PI), sin(baseRad + HALF_PI)
+  local b1x = bcx + triHalfW * cp
+  local b1y = bcy + triHalfW * sp
+  local b2x = bcx - triHalfW * cp
+  local b2y = bcy - triHalfW * sp
+
+  -- Neck: black line from center to triangle base
+  lcd.color(BLACK)
+  lcd.drawLine(x, y, bcx, bcy)
+
+  -- Triangle outline (black)
+  lcd.drawLine(tipX, tipY, b1x, b1y)
+  lcd.drawLine(tipX, tipY, b2x, b2y)
+  lcd.drawLine(b1x, b1y, b2x, b2y)
+
+  -- Triangle inner fill (white, inset toward centroid)
+  local cx3 = (tipX + b1x + b2x) / 3
+  local cy3 = (tipY + b1y + b2y) / 3
+  local s = 0.70
+  local itx  = cx3 + (tipX - cx3) * s
+  local ity  = cy3 + (tipY - cy3) * s
+  local ib1x = cx3 + (b1x - cx3) * s
+  local ib1y = cy3 + (b1y - cy3) * s
+  local ib2x = cx3 + (b2x - cx3) * s
+  local ib2y = cy3 + (b2y - cy3) * s
+
+  lcd.color(WHITE)
+  lcd.drawLine(itx, ity, ib1x, ib1y)
+  lcd.drawLine(itx, ity, ib2x, ib2y)
+  lcd.drawLine(ib1x, ib1y, ib2x, ib2y)
+end
+
+function drawLib.drawVehicle(x, y, r, heading, symbolType)
+  -- Dispatches to the correct vehicle symbol drawer based on user config.
+  -- All symbols are drawn with inner fill color + outer outline, like the original arrow.
+  if symbolType == 2 then
+    local hr = rad(heading - 90)
+    drawLib.drawRAirplane(x + cos(hr), y + sin(hr), r - 3, heading, WHITE)
+    drawLib.drawRAirplane(x, y, r, heading, BLACK)
+  elseif symbolType == 3 then
+    drawLib.drawRMultirotor(x, y, r, heading)
+  else
+    drawLib.drawRArrow(x, y, r - 5, heading, WHITE)
+    drawLib.drawRArrow(x, y, r, heading, BLACK)
+  end
 end
 
 function drawLib.drawBitmap(x, y, bitmap, w, h)
