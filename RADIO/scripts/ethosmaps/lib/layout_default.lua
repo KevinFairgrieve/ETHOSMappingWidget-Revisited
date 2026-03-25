@@ -29,6 +29,10 @@ local panel = {}
 
 local status = nil
 local libs = nil
+
+-- Cached stdlib references for edge arrow angle computation.
+local _atan2 = math.atan2 or math.atan
+local _deg = math.deg
 local MAP_TILE_SIZE = 100
 local MAP_TILE_BUFFER_X = 1
 local MAP_TILE_BUFFER_Y = 1
@@ -201,9 +205,11 @@ function panel.draw(widget)
     btnYMinus = status.widgetHeight - 0.27 * status.widgetHeight - btnSize
   end
 
-  -- Draw the actual zoom buttons.
-  libs.drawLib.drawBitmap(btnX, btnYPlus, "zoom_plus", btnSize, btnSize)
-  libs.drawLib.drawBitmap(btnX, btnYMinus, "zoom_minus", btnSize, btnSize)
+  -- Draw the actual zoom buttons (hidden when zoom is controlled via RC channel).
+  if (status.conf.zoomControl or 0) == 0 then
+    libs.drawLib.drawBitmap(btnX, btnYPlus, "zoom_plus", btnSize, btnSize)
+    libs.drawLib.drawBitmap(btnX, btnYMinus, "zoom_minus", btnSize, btnSize)
+  end
 
   -- Follow-lock button: right side, vertically centered (only when pan/drag is enabled).
   if status.panDragEnabled then
@@ -358,24 +364,6 @@ function panel.draw(widget)
     end
   end
 
-  -- Draw the home-direction arrow whenever a home position is available.
-  if not panActive and telemetry.homeLat ~= nil and telemetry.homeLon ~= nil then
-    local baseArrowSize = floor(42 * min(sx, sy))
-    local arrowSize = baseArrowSize
-    if ultraTiny then
-      arrowSize = min(max(floor(baseArrowSize * 1.2), baseArrowSize + 4), baseArrowSize + 10)
-    elseif horizontalTiny or verticalTiny then
-      arrowSize = min(max(floor(baseArrowSize * 1.15), baseArrowSize + 2), baseArrowSize + 8)
-    end
-
-    local arrowX = w - arrowSize * 1.2
-    local arrowY = horizontalTiny and (h - 55*sy - 20) or (h - bottomH + (bottomH / 2) - 60*sy - 20)
-
-    local homeHeading = telemetry.homeAngle - (telemetry.yaw or telemetry.cog or 0)
-    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize - 7, floor(homeHeading), colors.yellow)
-    libs.drawLib.drawRArrow(arrowX, arrowY, arrowSize, floor(homeHeading), colors.black)
-  end
-
   -- Warn the pilot when live GPS is present but no home position has been stored yet.
   if not panActive and telemetry.lat ~= nil and (telemetry.homeLat == nil or telemetry.homeLon == nil) then
     local warningText = "WARNING: HOME NOT SET!"
@@ -419,6 +407,30 @@ function panel.draw(widget)
       lcd.drawLine(12*sx, scaleY_line, 12*sx + scaleLen, scaleY_line)
       lcd.drawText(12*sx, scaleY_label, scaleLabel)
     end
+  end
+
+  -- Edge arrows: drawn after all overlays so they are always on top
+  local edgeMargin = floor(33 * min(sx, sy))
+  local edgeArrowR = floor(30 * min(sx, sy))
+  local vcx = floor(w / 2)
+  local vcy = mapY + floor(mapH / 2)
+
+  -- UAV out-of-view edge arrow (red/black)
+  if status.uavEdgeDrawX ~= nil then
+    local eX = max(edgeMargin, min(status.uavEdgeDrawX, w - edgeMargin))
+    local eY = max(mapY + edgeMargin, min(status.uavEdgeDrawY, mapY + mapH - edgeMargin))
+    local angle = _deg(_atan2(status.uavEdgeDrawX - vcx, -(status.uavEdgeDrawY - vcy)))
+    libs.drawLib.drawRArrow(eX, eY, edgeArrowR - 2, angle, colors.red)
+    libs.drawLib.drawRArrow(eX, eY, edgeArrowR, angle, colors.black)
+  end
+
+  -- Home out-of-view edge arrow (yellow/black)
+  if status.homeEdgeDrawX ~= nil then
+    local eX = max(edgeMargin, min(status.homeEdgeDrawX, w - edgeMargin))
+    local eY = max(mapY + edgeMargin, min(status.homeEdgeDrawY, mapY + mapH - edgeMargin))
+    local angle = _deg(_atan2(status.homeEdgeDrawX - vcx, -(status.homeEdgeDrawY - vcy)))
+    libs.drawLib.drawRArrow(eX, eY, edgeArrowR - 2, angle, colors.yellow)
+    libs.drawLib.drawRArrow(eX, eY, edgeArrowR, angle, colors.black)
   end
 
 end

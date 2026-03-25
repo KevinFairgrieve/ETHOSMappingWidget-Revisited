@@ -90,9 +90,6 @@ local TILES_DIM = 76.5
 local TILES_IDX_BMP = 1
 local TILES_IDX_PATH = 2
 
-local zoomUpdateTimer = 0    -- Initialised to 0; first zoom label always shows briefly.
-local zoomUpdate = false
-
 local lastHeavyUpdate = 0    -- Initialised to 0; first loadAndCenterTiles always runs.
 local HEAVY_UPDATE_INTERVAL = 25
 local mapNeedsHeavyUpdate = true
@@ -469,9 +466,20 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   local debugEnabled = status.debugEnabled
   local colors = status.colors
 
+  -- Effective rendering position: fall back to saved default position when GPS is unavailable.
+  local renderLat = telemetry.lat
+  local renderLon = telemetry.lon
+  if (renderLat == nil or renderLat == 0) and (renderLon == nil or renderLon == 0) then
+    local conf = status.conf
+    if conf and conf.defaultLat ~= nil and conf.defaultLon ~= nil then
+      renderLat = conf.defaultLat
+      renderLon = conf.defaultLon
+    end
+  end
+
   if #tiles == 0 or tiles[1] == nil then
-    if telemetry.lat ~= nil and telemetry.lon ~= nil then
-      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, level)
+    if renderLat ~= nil and renderLon ~= nil then
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(renderLat, renderLon, level)
     else
       tile_x, tile_y, offset_x, offset_y = 0, 0, 0, 0
     end
@@ -514,9 +522,9 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   local isDetached = not status.followLock and (panState == 0 or panState == 3)
   local isPanning = isActivePan or isDetached
 
-  if telemetry.lat ~= nil and telemetry.lon ~= nil then
+  if renderLat ~= nil and renderLon ~= nil then
     if doStateUpdate then
-      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(telemetry.lat, telemetry.lon, level)
+      tile_x, tile_y, offset_x, offset_y = mapLib.coord_to_tiles(renderLat, renderLon, level)
 
       if isPanning then
         -- Pan/detached mode: use fixed anchor (UAV position at pan start) + accumulated
@@ -702,6 +710,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
 
   mapLib.drawTiles(TILES_X, minX + renderOffsetX, minY + renderOffsetY)
 
+  local uavEdgeDrawX, uavEdgeDrawY
   if myScreenX ~= nil and myScreenY ~= nil then
     local drawX = myScreenX + renderOffsetX
     local drawY = myScreenY + renderOffsetY
@@ -709,8 +718,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     if uavOutCode == 0 then
       -- UAV is inside the viewport: draw normal vehicle marker
       if heading ~= nil then
-        libs.drawLib.drawRArrow(drawX, drawY, vehicleR - 5, heading, colors.white)
-        libs.drawLib.drawRArrow(drawX, drawY, vehicleR, heading, colors.black)
+        libs.drawLib.drawVehicle(drawX, drawY, vehicleR, heading, status.conf.uavSymbol)
       else
         lcd.color(WHITE)
         lcd.drawCircle(drawX, drawY, vehicleR - 3)
@@ -718,29 +726,24 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
         lcd.drawCircle(drawX, drawY, vehicleR)
       end
     elseif isPanning then
-      -- UAV is outside viewport during pan/detached: draw edge pointer arrow
-      local cx = x + w / 2
-      local cy = y + h / 2
-      local margin = floor(12 * min(scaleX, scaleY))
-      local arrowR = floor(10 * min(scaleX, scaleY))
-      -- Clamp UAV position to viewport edge with margin
-      local edgeX = max(x + margin, min(drawX, x + w - margin))
-      local edgeY = max(y + margin, min(drawY, y + h - margin))
-      -- Compute angle from viewport center to UAV
-      local angle = deg(atan(drawX - cx, -(drawY - cy)))
-      -- Draw small direction arrow at edge
-      libs.drawLib.drawRArrow(edgeX, edgeY, arrowR - 2, angle, colors.red)
-      libs.drawLib.drawRArrow(edgeX, edgeY, arrowR, angle, colors.black)
+      -- UAV is outside viewport during pan: store data for deferred edge arrow drawing
+      uavEdgeDrawX = drawX
+      uavEdgeDrawY = drawY
     end
   end
 
+  local homeDrawX, homeDrawY
   if telemetry.homeLat ~= nil and telemetry.homeLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
     local htx, hty, hox, hoy = mapLib.coord_to_tiles(telemetry.homeLat, telemetry.homeLon, level)
-    local homeDrawX = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
-    local homeDrawY = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
-    local homeCode = libs.drawLib.computeOutCode(homeDrawX, homeDrawY, x + 11, y + 10, x + w - 11, y + h - 10)
+    local hx = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
+    local hy = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
+    local homeCode = libs.drawLib.computeOutCode(hx, hy, x + 14, y + 12, x + w - 14, y + h - 12)
     if homeCode == 0 then
-      libs.drawLib.drawBitmap(homeDrawX - 11, homeDrawY - 10, "homeorange")
+      libs.drawLib.drawBitmap(hx - 14, hy - 12, "minihomeorange")
+    else
+      -- Home is outside viewport: pass to layout for edge arrow drawing
+      homeDrawX = hx
+      homeDrawY = hy
     end
   end
 
@@ -826,13 +829,28 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  if zoomUpdate then
-    lcd.color(WHITE)
+  -- Show pending zoom target from channel control
+  if status.zoomControlTarget ~= nil and status.zoomControlTarget ~= level then
     lcd.font(FONT_XL)
-    lcd.drawText(x + w/2, y + h/2 - 25*scaleY, fmt("ZOOM %d", level), CENTERED)
-    if status.getTime() - zoomUpdateTimer > 100 then zoomUpdate = false end
+    local zoomTargetText = fmt("ZOOM > %d", status.zoomControlTarget)
+    local ztW, ztH = lcd.getTextSize(zoomTargetText)
+    local ztPadX, ztPadY = floor(10 * scaleX), floor(6 * scaleY)
+    local ztBoxW = ztW + 2 * ztPadX
+    local ztBoxH = ztH + 2 * ztPadY
+    local ztBoxX = x + floor((w - ztBoxW) / 2)
+    local ztBoxY = y + floor(h / 2) - floor(25 * scaleY) - ztPadY
+    lcd.color(status.colors.semiBlack45)
+    lcd.drawFilledRectangle(ztBoxX, ztBoxY, ztBoxW, ztBoxH)
+    lcd.color(WHITE)
+    lcd.drawText(x + w/2, ztBoxY + ztPadY, zoomTargetText, CENTERED)
   end
-  
+
+  -- Store edge arrow data in status for layout to draw on top of all overlays
+  status.uavEdgeDrawX = uavEdgeDrawX
+  status.uavEdgeDrawY = uavEdgeDrawY
+  status.homeEdgeDrawX = homeDrawX
+  status.homeEdgeDrawY = homeDrawY
+
   lcd.setClipping()
 end
 
@@ -871,9 +889,6 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   local provider = (status and status.conf and status.conf.mapProvider) or 2
   local mapType = (status and status.conf and status.conf.mapType) or ""
   if level ~= lastZoomLevel or provider ~= lastMapProvider or mapType ~= lastMapType or lastZoomLevel == -99 then
-    zoomUpdateTimer = status.getTime()
-    zoomUpdate = true
-
     libs.resetLib.clearTable(tiles)
     libs.tileLoader.clearCache()
 
