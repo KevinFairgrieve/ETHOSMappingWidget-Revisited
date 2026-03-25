@@ -21,6 +21,7 @@ RADIO/scripts/ethosmaps/debug.log
 # Local-only debug/test widgets (not part of distribution)
 RADIO/scripts/TelemetryReplay/
 RADIO/scripts/TouchTest/
+RADIO/scripts/msptest/
 
 # Workspace-local VS Code settings
 .vscode/settings.json
