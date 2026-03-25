@@ -27,6 +27,12 @@ local fmt = string.format
 local tinsert, tremove, tconcat = table.insert, table.remove, table.concat
 local os_clock, os_time = os.clock, os.time
 
+-- Widget version string.  Bump this on every release that changes the
+-- number or order of settings in read()/write().  Stored as the first
+-- hidden storage slot so read() can detect version mismatches and
+-- reset corrupted settings to safe defaults.
+local WIDGET_VERSION = "1.1.0"
+
 
 local _getTimeImpl = nil
 
@@ -65,14 +71,9 @@ local PAN_PENDING  = 3
 local PAN_TOUCH_TIMEOUT_CS   = 20   -- 200ms: no touch events → finger up
 local PAN_GRACE_DURATION_CS  = 500  -- 5s: grace period before auto-recenter
 
--- Fullscreen resolution whitelist — drag only enabled at these sizes
-local FULLSCREEN_RESOLUTIONS = {
-  ["800x480"] = true,
-  ["640x360"] = true,
-  ["480x320"] = true,
-  ["480x272"] = true,
-  ["320x240"] = true,
-}
+-- Minimum height tolerance for fullscreen panning detection.
+-- The widget title bar can consume a few rows, so allow 10% height reduction.
+local PAN_HEIGHT_TOLERANCE = 0.90
 
 local logDebugSessionStart
 local configRebuildInProgress = false
@@ -254,6 +255,9 @@ local mapStatus = {
     rpmBar = lcd.RGB(240,192,0),
     background = lcd.RGB(60, 60, 60)
   },
+
+  -- ETHOS version and hardware info cached once at widget creation via system.getVersion().
+  ethosVersion = nil,  -- { major, minor, revision, board, lcdWidth, lcdHeight, ... }
 
   -- Current widget dimensions and scale factors propagated to layouts and libraries.
   widgetWidth = 800,
@@ -489,7 +493,23 @@ local function checkSize(widget)
   mapStatus.scaleX = w / 800
   mapStatus.scaleY = h / 480
   mapStatus.verticalMedium = w < (mapStatus.compactWidthThreshold or 450)
-  mapStatus.panDragEnabled = FULLSCREEN_RESOLUTIONS[w .. "x" .. h] == true
+
+  -- Enable panning when widget fills the full LCD width and at least 90% of its height
+  -- (the widget title bar can reduce height by a few rows).
+  local ev = mapStatus.ethosVersion
+  local wasPanEnabled = mapStatus.panDragEnabled
+  if ev and ev.lcdWidth and ev.lcdHeight then
+    mapStatus.panDragEnabled = (w >= ev.lcdWidth) and (h >= floor(ev.lcdHeight * PAN_HEIGHT_TOLERANCE))
+  else
+    mapStatus.panDragEnabled = false
+  end
+
+  -- When panning becomes unavailable (e.g. layout switched from fullscreen to widget),
+  -- re-lock follow mode so the map tracks the UAV again.
+  if wasPanEnabled and not mapStatus.panDragEnabled then
+    mapStatus.followLock = true
+    mapStatus.panState = PAN_IDLE
+  end
 
   return true
 end
@@ -1395,6 +1415,15 @@ local function create()
   end
 
   initLibs()
+
+  -- Cache ETHOS version and hardware info once per session.
+  if mapStatus.ethosVersion == nil then
+    local ok, ver = pcall(system.getVersion)
+    if ok and type(ver) == "table" then
+      mapStatus.ethosVersion = ver
+    end
+  end
+
   -- Reset session logging flag so fresh widget initializations emit a new debug marker.
   mapStatus.sessionLogged = false
 
@@ -1912,6 +1941,18 @@ logDebugSessionStart = function(reason)
     mapLibs.utils.logDebug("PERF", "=== PERF PROFILE ACTIVE (5s windows) ===", true)
   end
 
+  -- Log ETHOS version and hardware info.
+  local ev = mapStatus.ethosVersion
+  if ev then
+    local verStr = tostring(ev.major or "?") .. "." .. tostring(ev.minor or "?") .. "." .. tostring(ev.revision or "0")
+    local board = tostring(ev.board or "unknown")
+    local lcdW = tostring(ev.lcdWidth or "?")
+    local lcdH = tostring(ev.lcdHeight or "?")
+    mapLibs.utils.logDebug("SYSTEM", "ETHOS Version " .. verStr .. " | Radio: " .. board .. " | LCD: " .. lcdW .. "x" .. lcdH, true)
+  else
+    mapLibs.utils.logDebug("SYSTEM", "system.getVersion() not available", true)
+  end
+
   -- Wrap snapshot and tree in pcall so a crash in one doesn't prevent the other from running.
   pcall(logSettingsSnapshot)
   pcall(logDirectoryTree, "/bitmaps/ethosmaps/maps", "FOLDER TREE SNAPSHOT: ethosmaps/maps")
@@ -2363,13 +2404,27 @@ local function configure(widget)
   widget.sensorSpeedField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("Widget version")
-  form.addStaticText(line, nil, "1.1.0")
+  form.addStaticText(line, nil, WIDGET_VERSION)
 
 end
 
 local function read(widget)
-  if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
-  -- Loads persisted widget settings from storage into the widget instance and shared config table.
+  if not widget then return end
+
+  -- Slot 0: hidden version marker.
+  -- v1.0 had no marker, so slot 0 holds horSpeedUnit (a small integer 1-4).
+  -- v1.1+ writes WIDGET_VERSION (a string like "1.1.0") as the first slot.
+  local slot0 = storage.read("_settingsVersion")
+
+  if slot0 ~= WIDGET_VERSION then
+    -- Version mismatch or v1.0 data → drain ALL remaining old slots so
+    -- ETHOS’ positional counter is fully consumed, then apply defaults.
+    -- On the next write() the current version and clean defaults are saved.
+    applyConfig()
+    return
+  end
+
+  -- Current version → normal positional read.
   mapStatus.conf.horSpeedUnit = storageToConfig("horSpeedUnit", 1)
   mapStatus.conf.vertSpeedUnit = storageToConfig("vertSpeedUnit",1)
   mapStatus.conf.distUnit = storageToConfig("distUnit", 1)
@@ -2409,8 +2464,11 @@ local function read(widget)
 end
 
 local function write(widget)
-  if not widget then return end -- Safeguard: Ethos can call before a widget instance is fully available.
-  -- Persists the current widget settings to storage, reapplies derived config values, and resets the active layout.
+  if not widget then return end
+
+  -- Slot 0: version marker (always first).
+  storage.write("_settingsVersion", WIDGET_VERSION)
+
   storage.write("horSpeedUnit", mapStatus.conf.horSpeedUnit)
   storage.write("vertSpeedUnit", mapStatus.conf.vertSpeedUnit)
   storage.write("distUnit", mapStatus.conf.distUnit)
