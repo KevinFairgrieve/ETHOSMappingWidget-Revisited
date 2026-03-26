@@ -589,7 +589,7 @@ local wpDbgLastLog = 0  -- throttle for drawWaypoints debug logging
 
 --- Draw all waypoints from the currently selected mission onto the map.
 --- Called from drawMap() after trail, before observation marker.
-local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY)
+local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY, isPanning)
   local dbg = status.debugEnabled and libs and libs.utils
   local dbgThrottle = false
   if dbg then
@@ -672,9 +672,15 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
   for i, wp in ipairs(mission) do
     if wpIsNavigable(wp.action) and screenPos[i] then
       if prevNav and screenPos[prevNav] then
-        local lx1, ly1, lx2, ly2 = shortenLine(
-          screenPos[prevNav][1], screenPos[prevNav][2],
-          screenPos[i][1], screenPos[i][2], wpR)
+        local lx1, ly1, lx2, ly2
+        if dense then
+          lx1, ly1 = screenPos[prevNav][1], screenPos[prevNav][2]
+          lx2, ly2 = screenPos[i][1], screenPos[i][2]
+        else
+          lx1, ly1, lx2, ly2 = shortenLine(
+            screenPos[prevNav][1], screenPos[prevNav][2],
+            screenPos[i][1], screenPos[i][2], wpR)
+        end
         if lx1 then
           local cx1, cy1, cx2, cy2 = clipLine(lx1, ly1, lx2, ly2, x, y, x + w, y + h)
           if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
@@ -697,10 +703,16 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
         end
       end
       if sourceNav and targetIdx >= 1 and targetIdx <= #mission and screenPos[targetIdx] then
-        -- Shorten line to stop at circle edges
-        local lx1, ly1, lx2, ly2 = shortenLine(
-          screenPos[sourceNav][1], screenPos[sourceNav][2],
-          screenPos[targetIdx][1], screenPos[targetIdx][2], wpR)
+        local lx1, ly1, lx2, ly2
+        if dense then
+          lx1, ly1 = screenPos[sourceNav][1], screenPos[sourceNav][2]
+          lx2, ly2 = screenPos[targetIdx][1], screenPos[targetIdx][2]
+        else
+          -- Shorten line to stop at circle edges
+          lx1, ly1, lx2, ly2 = shortenLine(
+            screenPos[sourceNav][1], screenPos[sourceNav][2],
+            screenPos[targetIdx][1], screenPos[targetIdx][2], wpR)
+        end
         if lx1 then
           lcd.color(wpColorJump)
           lcd.pen(DOTTED)
@@ -721,7 +733,7 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
         end
 
         -- Show iteration count on the source navigable WP
-        if not dense and screenPos[sourceNav] then
+        if not isPanning and not dense and screenPos[sourceNav] then
           local ssx, ssy = screenPos[sourceNav][1], screenPos[sourceNav][2]
           local iterCode = computeOutCode(ssx, ssy, x - margin, y - margin, x + w + margin, y + h + margin)
           if iterCode == 0 then
@@ -742,6 +754,9 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
       end
     end
   end
+
+  -- When panning, skip heavy passes (circles, numbers, markers) for performance
+  if isPanning then return end
 
   -- Pass 2: Draw WP markers (on top of lines)
   local navNum = 0  -- sequential number for navigable WPs
@@ -1196,7 +1211,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
   end
 
   -- Waypoint mission overlay
-  drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY)
+  drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY, isPanning)
 
   -- Observation marker: green line from UAV + marker circle
   if status.observationLat ~= nil and status.observationLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then

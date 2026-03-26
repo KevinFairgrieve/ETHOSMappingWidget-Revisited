@@ -828,10 +828,12 @@ function msp.poll()
         if sensor and (now - errorTime) >= RETRY_DELAY then
             log("MSP", "Auto-retry after error...")
             local savedSensor = sensor
+            local savedArmingOnly = armingOnly
             resetState()
-            sensor    = savedSensor
-            state     = STATE_CONNECTING
-            startTime = now
+            sensor     = savedSensor
+            armingOnly = savedArmingOnly
+            state      = STATE_CONNECTING
+            startTime  = now
         end
         return
     end
@@ -912,8 +914,8 @@ end
 
 --- Return current state snapshot for external consumers.
 --- @return table { state, fcVariant, connected, wpCount, wpValid, wpList, wpNextIdx }
+local TRANSPORT_NAMES = { [0]="NONE", "SPORT", "CRSF" }
 function msp.getState()
-    local TRANSPORT_NAMES = { [0]="NONE", "SPORT", "CRSF" }
     return {
         state      = state,
         fcVariant  = fcVariant,

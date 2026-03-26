@@ -31,7 +31,7 @@ local os_clock, os_time = os.clock, os.time
 -- number or order of settings in read()/write().  Stored as the first
 -- hidden storage slot so read() can detect version mismatches and
 -- reset corrupted settings to safe defaults.
-local WIDGET_VERSION = "1.2.0-dev2"
+local WIDGET_VERSION = "1.2.0-dev3"
 
 
 local _getTimeImpl = nil
@@ -1344,30 +1344,27 @@ local function wakeup(widget)
 
   -- MSP status logging and mission publish (polling done at top of wakeup)
   if mapLibs and mapLibs.msp then
+    local mspState = mapLibs.msp.getState()
 
     -- Periodic MSP status log (throttled to once per second)
     if mapStatus.debugEnabled and mapLibs.utils then
       local now = getTime()
       if not mapStatus._mspLastStatusLog or (now - mapStatus._mspLastStatusLog) > 100 then
         mapStatus._mspLastStatusLog = now
-        local ms = mapLibs.msp.getState()
         local stateNames = { [0]="OFF", "CONNECTING", "GET_WP_INFO", "DOWNLOADING", "DONE", "ERROR" }
         mapLibs.utils.logDebug("MSP_DBG", fmt("state=%s fc=%s transport=%s wpCount=%d done=%s active=%s missions=%d published=%s",
-            stateNames[ms.state] or tostring(ms.state),
-            tostring(ms.fcVariant),
-            ms.transport or "?",
-            ms.wpCount or 0,
+            stateNames[mspState.state] or tostring(mspState.state),
+            tostring(mspState.fcVariant),
+            mspState.transport or "?",
+            mspState.wpCount or 0,
             tostring(mapLibs.msp.isDone()),
             tostring(mapLibs.msp.isActive()),
-            ms.missions and #ms.missions or 0,
+            mspState.missions and #mspState.missions or 0,
             tostring(mapStatus.mspDownloadDone)), true)
       end
     end
-  end
 
-  -- Publish mission data: progressively during download, final on completion
-  if mapLibs and mapLibs.msp then
-    local mspState = mapLibs.msp.getState()
+    -- Publish mission data: progressively during download, final on completion
 
     if mapLibs.msp.isDone() then
       -- Final publish with parsed missions (split at multi-mission boundaries)
@@ -1385,14 +1382,19 @@ local function wakeup(widget)
         mapStatus.mspDownloadDone = true
       end
     elseif mspState.state == mapLibs.msp.STATE_DOWNLOADING and mspState.wpList and #mspState.wpList > 0 then
-      -- Progressive publish: show WPs as they arrive
-      mapStatus.mspMissions = { mspState.wpList }
-      mapStatus.mspMissionIdx = 1
-      markMapDirty()
+      -- Progressive publish: show WPs as they arrive (only when count changes)
+      local newCount = #mspState.wpList
+      if newCount ~= (mapStatus._mspLastWpCount or 0) then
+        mapStatus._mspLastWpCount = newCount
+        mapStatus.mspMissions = { mspState.wpList }
+        mapStatus.mspMissionIdx = 1
+        markMapDirty()
+      end
     else
       -- MSP not done (retrying / reconnecting) — allow re-publish on next success
       if mapStatus.mspDownloadDone then
         mapStatus.mspDownloadDone = false
+        mapStatus._mspLastWpCount = 0
       end
     end
 
