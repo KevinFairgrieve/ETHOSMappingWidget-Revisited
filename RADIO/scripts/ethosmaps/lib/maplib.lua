@@ -473,6 +473,8 @@ local wpColorRingIn  = nil  -- white inner ring
 local wpColorPoi     = nil  -- red for SET_POI bullseye
 local wpColorJump    = nil  -- light yellow for JUMP dashed lines
 local wpColorRth     = nil  -- green dashed line for RTH
+local wpColorActive  = nil  -- green ring for active WP
+local wpColorUavRth  = nil  -- orange for UAV in RTH mode
 local wpColorsReady  = false
 
 local function ensureWpColors()
@@ -484,6 +486,8 @@ local function ensureWpColors()
   wpColorPoi     = RED
   wpColorJump    = lcd.RGB(255, 220, 50)  -- light yellow-orange
   wpColorRth     = lcd.RGB(0, 255, 43)    -- neon green (same as path)
+  wpColorActive  = lcd.RGB(0, 255, 43)    -- neon green for active WP ring
+  wpColorUavRth  = lcd.RGB(255, 165, 0)   -- orange for UAV in RTH mode
   wpColorsReady  = true
 end
 
@@ -530,7 +534,7 @@ end
 --- @param wpNum   number sequential navigable waypoint number for label
 --- @param r       number base circle radius
 --- @param dense   boolean true = dense mode (dot only, no text)
-local function drawWpMarker(wp, sx, sy, wpNum, r, dense)
+local function drawWpMarker(wp, sx, sy, wpNum, r, dense, isActive)
   local action = wp.action
 
   if action == WP_ACT_SET_POI then
@@ -549,11 +553,11 @@ local function drawWpMarker(wp, sx, sy, wpNum, r, dense)
     return
   end
 
-  -- Dual-contrast ring: black outer + white inner
+  -- Dual-contrast ring: black outer + inner (white or green if active)
   lcd.color(wpColorRingOut)
   lcd.drawCircle(sx, sy, r)
   lcd.drawCircle(sx, sy, r - 1)
-  lcd.color(wpColorRingIn)
+  lcd.color(isActive and wpColorActive or wpColorRingIn)
   lcd.drawCircle(sx, sy, r - 2)
   lcd.drawCircle(sx, sy, r - 3)
 
@@ -741,16 +745,18 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
 
   -- Pass 2: Draw WP markers (on top of lines)
   local navNum = 0  -- sequential number for navigable WPs
+  local curActiveWp = status.mspActiveWp or 0
   for i, wp in ipairs(mission) do
     if wpHasPosition(wp.action) and screenPos[i] then
       local sx, sy = screenPos[i][1], screenPos[i][2]
       local code = computeOutCode(sx, sy, x - margin, y - margin, x + w + margin, y + h + margin)
       if code == 0 then
+        local isActive = curActiveWp > 0 and wp.idx == curActiveWp
         if wpIsNavigable(wp.action) then
           navNum = navNum + 1
-          drawWpMarker(wp, sx, sy, navNum, wpR, dense)
+          drawWpMarker(wp, sx, sy, navNum, wpR, dense, isActive)
         else
-          drawWpMarker(wp, sx, sy, 0, wpR, dense)
+          drawWpMarker(wp, sx, sy, 0, wpR, dense, isActive)
         end
       end
     elseif wpIsNavigable(wp.action) then
@@ -1090,8 +1096,18 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     local uavOutCode = libs.drawLib.computeOutCode(drawX, drawY, x + vehicleR, y + vehicleR, x + w - vehicleR, y + h - vehicleR)
     if uavOutCode == 0 then
       -- UAV is inside the viewport: draw normal vehicle marker
+      -- Nav-aware coloring: green for NAV/HOLD, orange for RTH, white default
+      local uavFillColor = nil
+      local nm = status.mspNavMode or 0
+      if nm == 3 or nm == 1 then
+        ensureWpColors()
+        uavFillColor = wpColorActive   -- neon green
+      elseif nm == 2 then
+        ensureWpColors()
+        uavFillColor = wpColorUavRth   -- orange
+      end
       if heading ~= nil then
-        libs.drawLib.drawVehicle(drawX, drawY, vehicleR, heading, status.conf.uavSymbol)
+        libs.drawLib.drawVehicle(drawX, drawY, vehicleR, heading, status.conf.uavSymbol, uavFillColor)
       else
         lcd.color(WHITE)
         lcd.drawCircle(drawX, drawY, vehicleR - 3)

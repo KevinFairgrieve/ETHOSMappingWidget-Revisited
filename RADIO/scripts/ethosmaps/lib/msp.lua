@@ -68,6 +68,7 @@ local MSP_FC_VARIANT  = 2       -- 4-char FC identifier ("INAV")
 local MSP_STATUS      = 101     -- cycleTime + i2cErr + sensors + flightModeFlags + profile
 local MSP_WP_GETINFO  = 20      -- reserved(1)+maxWP(1)+valid(1)+count(1)
 local MSP_WP          = 118     -- get single WP by index
+local MSP_NAV_STATUS  = 121     -- navMode(1)+navState(1)+activeWpAction(1)+activeWpNumber(1)+navError(1)+targetHeading(2)
 
 -- Waypoint action names (INAV)
 local WP_ACTION_NAMES = {
@@ -126,6 +127,7 @@ local MAX_RETRIES      = 10
 local FC_DETECT_TIMEOUT = 10.0    -- seconds to wait for FC before giving up
 local RETRY_DELAY      = 5.0     -- seconds to wait before auto-retry after ERROR
 local ARM_POLL_INTERVAL = 5.0    -- seconds between arming state queries
+local NAV_STATUS_POLL_INTERVAL = 2.0  -- seconds between MSP_NAV_STATUS queries
 
 -- ============================================================================
 -- State machine constants
@@ -203,6 +205,13 @@ local errorTime    = 0       -- os.clock() when ERROR state was entered
 local isArmed        = false   -- true once FC reports armed
 local lastArmPollTime = 0      -- os.clock() of last MSP_STATUS request
 local armingOnly     = false   -- true = skip WP download, only poll arming state
+
+-- Nav status (MSP_NAV_STATUS, polled after armed)
+local navMode          = 0     -- navSystemStatus_Mode_e: 0=NONE 1=HOLD 2=RTH 3=NAV 15=EMERG
+local navState         = 0     -- navSystemStatus_State_e
+local activeWpNumber   = 0     -- FC's current WP index (1-based)
+local navError         = 0     -- navSystemStatus_Error_e
+local lastNavPollTime  = 0     -- os.clock() of last MSP_NAV_STATUS request
 
 -- ============================================================================
 -- Debug logging helper (uses widget debug log if available)
@@ -558,7 +567,26 @@ local function handleStatus(buf)
         if armed and not isArmed then
             isArmed = true
             log("MSP", "FC ARMED detected")
+        elseif not armed and isArmed then
+            isArmed = false
+            navMode = 0
+            activeWpNumber = 0
+            navError = 0
+            log("MSP", "FC DISARMED detected")
         end
+    end
+end
+
+local function handleNavStatus(buf)
+    -- MSP_NAV_STATUS response: uint8 navMode, uint8 navState, uint8 activeWpAction,
+    --                          uint8 activeWpNumber, uint8 navError, int16 targetHeading (7 bytes)
+    if #buf >= 5 then
+        navMode        = buf[1]
+        navState       = buf[2]
+        activeWpNumber = buf[4]
+        navError       = buf[5]
+        log("MSP", fmt("NAV_STATUS: mode=%d state=%d activeWP=%d err=%d",
+                        navMode, navState, activeWpNumber, navError))
     end
 end
 
@@ -672,6 +700,11 @@ local function resetState()
     isArmed        = false
     lastArmPollTime = 0
     armingOnly     = false
+    navMode          = 0
+    navState         = 0
+    activeWpNumber   = 0
+    navError         = 0
+    lastNavPollTime  = 0
 end
 
 -- ============================================================================
@@ -753,9 +786,8 @@ function msp.poll()
         return
     end
 
-    -- STATE_DONE: periodic arming poll until armed
+    -- STATE_DONE: poll arming + nav status
     if state == STATE_DONE then
-        if isArmed then return end
         local now = clock()
         if #mspTxBuf > 0 then mspProcessTxQ() end
         local cmd, buf, err = mspPollReply()
@@ -763,18 +795,26 @@ function msp.poll()
             lastRspTime = now
             if cmd == MSP_STATUS and not err then
                 handleStatus(buf)
+            elseif cmd == MSP_NAV_STATUS and not err then
+                handleNavStatus(buf)
             end
             currentCmd = nil
         end
         local readyToSend = currentCmd == nil
             and (now - lastRspTime) >= POST_REPLY_DELAY
             and (now - lastReqTime) >= POST_REPLY_DELAY
-            and (now - lastArmPollTime) >= ARM_POLL_INTERVAL
         if readyToSend then
-            mspSendRequest(MSP_STATUS, {})
-            currentCmd      = MSP_STATUS
-            lastReqTime     = now
-            lastArmPollTime = now
+            if isArmed and (now - lastNavPollTime) >= NAV_STATUS_POLL_INTERVAL then
+                mspSendRequest(MSP_NAV_STATUS, {})
+                currentCmd      = MSP_NAV_STATUS
+                lastReqTime     = now
+                lastNavPollTime = now
+            elseif (now - lastArmPollTime) >= ARM_POLL_INTERVAL then
+                mspSendRequest(MSP_STATUS, {})
+                currentCmd      = MSP_STATUS
+                lastReqTime     = now
+                lastArmPollTime = now
+            end
         end
         if currentCmd and (now - lastReqTime) > REQUEST_TIMEOUT then
             currentCmd = nil
@@ -886,6 +926,8 @@ function msp.getState()
         missions   = missions,
         isArmed    = isArmed,
         transport  = TRANSPORT_NAMES[transportType] or "UNKNOWN",
+        navMode        = navMode,
+        activeWpNumber = activeWpNumber,
     }
 end
 

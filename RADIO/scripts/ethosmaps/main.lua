@@ -137,7 +137,7 @@ local mapStatus = {
     sensorGpsLon = nil,    -- Source for GPS longitude (Sensors mode)
     sensorHeading = nil,   -- Source for heading/yaw (optional, nil = calculated from GPS)
     sensorSpeed = nil,     -- Source for ground speed (optional, nil = calculated from GPS)
-    gpsFormat = 0, -- 0 = decimal, 1 = DMS
+    gpsFormat = 2, -- 2 = decimal, 1 = DMS
     uavSymbol = 1, -- 1 = Arrow, 2 = Airplane, 3 = Multirotor
     zoomControl = 0,  -- 0 = OFF (touch buttons), 1 = 3-POS switch, 2 = Proportional
     zoomChannel = 0,  -- RC channel number (1-64) for zoom input
@@ -213,6 +213,8 @@ local mapStatus = {
   mspMissionIdx = 1,      -- 1-based index of the currently displayed mission
   mspDownloadDone = false, -- true once mission data has been copied from msp lib
   mspArmedHomeSet = false, -- true once home was auto-set from arming detection
+  mspNavMode = 0,         -- navSystemStatus_Mode_e: 0=NONE 1=HOLD 2=RTH 3=NAV
+  mspActiveWp = 0,        -- FC's currently active WP index (1-based)
 
   avgSpeed = {
     lastSampleTime = nil,
@@ -539,6 +541,8 @@ local function reset(widget)
     mapStatus.mspMissionIdx = 1
     mapStatus.mspDownloadDone = false
     mapStatus.mspArmedHomeSet = false
+    mapStatus.mspNavMode = 0
+    mapStatus.mspActiveWp = 0
     local armOnly = not mapStatus.conf.wpDownload
     mapLibs.msp.open({ armingOnly = armOnly })
   end
@@ -1404,6 +1408,10 @@ local function wakeup(widget)
     elseif not mspState.isArmed and mapStatus.mspArmedHomeSet then
       mapStatus.mspArmedHomeSet = false
     end
+
+    -- Publish nav status for map rendering (active WP highlight, UAV color)
+    mapStatus.mspNavMode  = mspState.navMode or 0
+    mapStatus.mspActiveWp = mspState.activeWpNumber or 0
   end
 
   if mapLibs and mapLibs.tileLoader then

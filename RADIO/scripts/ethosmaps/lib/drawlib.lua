@@ -431,10 +431,11 @@ function drawLib.drawRAirplane(x, y, r, angle, color)
   lcd.drawLine(plx, ply, prx, pry)
 end
 
-function drawLib.drawRMultirotor(x,y,r,angle)
+function drawLib.drawRMultirotor(x,y,r,angle,fillColor)
   -- Draws a rotated multirotor symbol with self-contained coloring:
-  -- Black 2px X-frame arms, concentric black/white rotor circles,
-  -- heading triangle (black outline, white fill) with black neck.
+  -- Black 2px X-frame arms, concentric black/fillColor rotor circles,
+  -- heading triangle (black outline, fillColor fill) with black neck.
+  fillColor = fillColor or WHITE
   local baseRad = rad(angle - 90)
   local armR = r * 0.75
   local rotorR = r * 0.28
@@ -467,13 +468,13 @@ function drawLib.drawRMultirotor(x,y,r,angle)
   lcd.drawLine(ax2, ay2, ax4, ay4)
   lcd.drawLine(ax2 + p2x, ay2 + p2y, ax4 + p2x, ay4 + p2y)
 
-  -- Rotor circles: black outline + white inner (concentric)
+  -- Rotor circles: black outline + fillColor inner (concentric)
   lcd.color(BLACK)
   lcd.drawCircle(ax1, ay1, rotorR)
   lcd.drawCircle(ax2, ay2, rotorR)
   lcd.drawCircle(ax3, ay3, rotorR)
   lcd.drawCircle(ax4, ay4, rotorR)
-  lcd.color(WHITE)
+  lcd.color(fillColor)
   lcd.drawCircle(ax1, ay1, rotorR - 1)
   lcd.drawCircle(ax2, ay2, rotorR - 1)
   lcd.drawCircle(ax3, ay3, rotorR - 1)
@@ -505,7 +506,7 @@ function drawLib.drawRMultirotor(x,y,r,angle)
   lcd.drawLine(tipX, tipY, b2x, b2y)
   lcd.drawLine(b1x, b1y, b2x, b2y)
 
-  -- Triangle inner fill (white, inset toward centroid)
+  -- Triangle inner fill (fillColor, inset toward centroid)
   local cx3 = (tipX + b1x + b2x) / 3
   local cy3 = (tipY + b1y + b2y) / 3
   local s = 0.70
@@ -516,23 +517,25 @@ function drawLib.drawRMultirotor(x,y,r,angle)
   local ib2x = cx3 + (b2x - cx3) * s
   local ib2y = cy3 + (b2y - cy3) * s
 
-  lcd.color(WHITE)
+  lcd.color(fillColor)
   lcd.drawLine(itx, ity, ib1x, ib1y)
   lcd.drawLine(itx, ity, ib2x, ib2y)
   lcd.drawLine(ib1x, ib1y, ib2x, ib2y)
 end
 
-function drawLib.drawVehicle(x, y, r, heading, symbolType)
+function drawLib.drawVehicle(x, y, r, heading, symbolType, fillColor)
   -- Dispatches to the correct vehicle symbol drawer based on user config.
   -- All symbols are drawn with inner fill color + outer outline, like the original arrow.
+  -- fillColor overrides the inner (white) color when provided (e.g. green for NAV, orange for RTH).
+  fillColor = fillColor or WHITE
   if symbolType == 2 then
     local hr = rad(heading - 90)
-    drawLib.drawRAirplane(x + cos(hr), y + sin(hr), r - 3, heading, WHITE)
+    drawLib.drawRAirplane(x + cos(hr), y + sin(hr), r - 3, heading, fillColor)
     drawLib.drawRAirplane(x, y, r, heading, BLACK)
   elseif symbolType == 3 then
-    drawLib.drawRMultirotor(x, y, r, heading)
+    drawLib.drawRMultirotor(x, y, r, heading, fillColor)
   else
-    drawLib.drawRArrow(x, y, r - 5, heading, WHITE)
+    drawLib.drawRArrow(x, y, r - 5, heading, fillColor)
     drawLib.drawRArrow(x, y, r, heading, BLACK)
   end
 end
