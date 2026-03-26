@@ -553,10 +553,9 @@ local function drawWpMarker(wp, sx, sy, wpNum, r, dense, isActive)
     return
   end
 
-  -- Dual-contrast ring: black outer + inner (white or green if active)
-  lcd.color(wpColorRingOut)
-  lcd.drawCircle(sx, sy, r)
-  lcd.drawCircle(sx, sy, r - 1)
+  -- Shadow fill (alpha 0.4) first, then contrast ring on top
+  lcd.color(lcd.RGB(0, 0, 0, 0.4))
+  lcd.drawFilledCircle(sx, sy, r - 2)
   lcd.color(isActive and wpColorActive or wpColorRingIn)
   lcd.drawCircle(sx, sy, r - 2)
   lcd.drawCircle(sx, sy, r - 3)
@@ -1124,10 +1123,10 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       if heading ~= nil then
         libs.drawLib.drawVehicle(drawX, drawY, vehicleR, heading, status.conf.uavSymbol, uavFillColor)
       else
-        lcd.color(WHITE)
+        lcd.color(lcd.RGB(0, 0, 0, 0.4))
+        lcd.drawFilledCircle(drawX, drawY, vehicleR - 3)
+        lcd.color(uavFillColor or WHITE)
         lcd.drawCircle(drawX, drawY, vehicleR - 3)
-        lcd.color(BLACK)
-        lcd.drawCircle(drawX, drawY, vehicleR)
       end
     elseif isPanning then
       -- UAV is outside viewport during pan: store data for deferred edge arrow drawing
@@ -1229,8 +1228,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     local markerCode = libs.drawLib.computeOutCode(markerX, markerY, x + 6, y + 6, x + w - 6, y + h - 6)
     if markerCode == 0 then
       local mr = floor(5 * min(scaleX, scaleY))
-      lcd.color(status.colors.observationGreen)
-      for r = mr, 1, -1 do lcd.drawCircle(markerX, markerY, r) end
+      lcd.color(lcd.RGB(0, 200, 0, 0.6))
+      lcd.drawFilledCircle(markerX, markerY, mr)
       lcd.color(BLACK)
       lcd.drawCircle(markerX, markerY, mr)
     end
