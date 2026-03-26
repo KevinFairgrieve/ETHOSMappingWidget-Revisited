@@ -24,6 +24,7 @@ local mapLib = {}
 local tonumber = tonumber
 local tostring = tostring
 local floor, abs, max, min = math.floor, math.abs, math.max, math.min
+local sqrt = math.sqrt
 local sin, cos, log, exp, atan, deg, rad = math.sin, math.cos, math.log, math.exp, math.atan, math.deg, math.rad
 local pi = math.pi
 local fmt = string.format
@@ -471,6 +472,7 @@ local wpColorRingOut = nil  -- black outer ring
 local wpColorRingIn  = nil  -- white inner ring
 local wpColorPoi     = nil  -- red for SET_POI bullseye
 local wpColorJump    = nil  -- light yellow for JUMP dashed lines
+local wpColorRth     = nil  -- green dashed line for RTH
 local wpColorsReady  = false
 
 local function ensureWpColors()
@@ -481,7 +483,29 @@ local function ensureWpColors()
   wpColorRingIn  = WHITE
   wpColorPoi     = RED
   wpColorJump    = lcd.RGB(255, 220, 50)  -- light yellow-orange
+  wpColorRth     = lcd.RGB(0, 255, 43)    -- neon green (same as path)
   wpColorsReady  = true
+end
+
+--- Shorten a line segment by radius r at both ends (so lines stop at circle edges).
+--- Returns adjusted x1,y1,x2,y2 or nil if segment is too short.
+local function shortenLine(x1, y1, x2, y2, r)
+  local dx = x2 - x1
+  local dy = y2 - y1
+  local len = sqrt(dx * dx + dy * dy)
+  if len < 2 * r + 1 then return nil end
+  local nx, ny = dx / len, dy / len
+  return x1 + nx * r, y1 + ny * r, x2 - nx * r, y2 - ny * r
+end
+
+--- Draw a chevron ("Dach") arrow tip pointing in direction (nx, ny) at (tipX, tipY).
+--- size controls the chevron arm length.
+local function drawChevron(tipX, tipY, nx, ny, size)
+  local px, py = -ny, nx  -- perpendicular
+  local backX = tipX - nx * size
+  local backY = tipY - ny * size
+  lcd.drawLine(backX + px * size * 0.5, backY + py * size * 0.5, tipX, tipY)
+  lcd.drawLine(backX - px * size * 0.5, backY - py * size * 0.5, tipX, tipY)
 end
 
 --- Returns true if this WP action has a meaningful lat/lon position on the map.
@@ -628,7 +652,7 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
       if prevNav then
         local dx = screenPos[i][1] - screenPos[prevNav][1]
         local dy = screenPos[i][2] - screenPos[prevNav][2]
-        if (dx * dx + dy * dy) < (100 * 100) then
+        if (dx * dx + dy * dy) < (50 * 50) then
           dense = true
           break
         end
@@ -637,24 +661,26 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
     end
   end
 
-  -- Pass 1: Draw path lines between navigable WPs
+  -- Pass 1: Draw path lines between navigable WPs (shortened to stop at circle edges)
   lcd.color(wpColorPath)
   lcd.pen(SOLID)
   prevNav = nil
   for i, wp in ipairs(mission) do
     if wpIsNavigable(wp.action) and screenPos[i] then
       if prevNav and screenPos[prevNav] then
-        local cx1, cy1, cx2, cy2 = clipLine(
+        local lx1, ly1, lx2, ly2 = shortenLine(
           screenPos[prevNav][1], screenPos[prevNav][2],
-          screenPos[i][1], screenPos[i][2],
-          x, y, x + w, y + h)
-        if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+          screenPos[i][1], screenPos[i][2], wpR)
+        if lx1 then
+          local cx1, cy1, cx2, cy2 = clipLine(lx1, ly1, lx2, ly2, x, y, x + w, y + h)
+          if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+        end
       end
       prevNav = i
     end
   end
 
-  -- Pass 1b: Draw JUMP connections (dashed orange line from source to target WP)
+  -- Pass 1b: Draw JUMP connections (dashed yellow line from source to target WP)
   for i, wp in ipairs(mission) do
     if wp.action == WP_ACT_JUMP then
       local targetIdx = wp.p1  -- 1-based WP index within this mission
@@ -667,14 +693,28 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
         end
       end
       if sourceNav and targetIdx >= 1 and targetIdx <= #mission and screenPos[targetIdx] then
-        lcd.color(wpColorJump)
-        lcd.pen(DOTTED)
-        local cx1, cy1, cx2, cy2 = clipLine(
+        -- Shorten line to stop at circle edges
+        local lx1, ly1, lx2, ly2 = shortenLine(
           screenPos[sourceNav][1], screenPos[sourceNav][2],
-          screenPos[targetIdx][1], screenPos[targetIdx][2],
-          x, y, x + w, y + h)
-        if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
-        lcd.pen(SOLID)
+          screenPos[targetIdx][1], screenPos[targetIdx][2], wpR)
+        if lx1 then
+          lcd.color(wpColorJump)
+          lcd.pen(DOTTED)
+          local cx1, cy1, cx2, cy2 = clipLine(lx1, ly1, lx2, ly2, x, y, x + w, y + h)
+          if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+          lcd.pen(SOLID)
+
+          -- Chevron arrow at midpoint showing jump direction (source → target)
+          local mx = (lx1 + lx2) * 0.5
+          local my = (ly1 + ly2) * 0.5
+          local dx = lx2 - lx1
+          local dy = ly2 - ly1
+          local len = sqrt(dx * dx + dy * dy)
+          if len > 1 then
+            lcd.color(wpColorJump)
+            drawChevron(mx + dx / len * 5, my + dy / len * 5, dx / len, dy / len, 8)
+          end
+        end
 
         -- Show iteration count on the source navigable WP
         if not dense and screenPos[sourceNav] then
@@ -715,6 +755,69 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
       end
     elseif wpIsNavigable(wp.action) then
       navNum = navNum + 1  -- count even if off-screen for consistent numbering
+    end
+  end
+
+  -- Pass 3: Draw SET_HEAD heading chevrons on the preceding navigable WP circle
+  if not dense then
+    for i, wp in ipairs(mission) do
+      if wp.action == WP_ACT_SET_HEAD and wp.p1 >= 0 then
+        -- Find preceding navigable WP
+        local navIdx = nil
+        for j = i - 1, 1, -1 do
+          if wpIsNavigable(mission[j].action) and screenPos[j] then
+            navIdx = j
+            break
+          end
+        end
+        if navIdx then
+          local sx, sy = screenPos[navIdx][1], screenPos[navIdx][2]
+          local code = computeOutCode(sx, sy, x - margin, y - margin, x + w + margin, y + h + margin)
+          if code == 0 then
+            local headRad = rad(wp.p1)  -- p1 = heading in degrees (0=N, 90=E)
+            local hx = sin(headRad)     -- screen X component (east = right)
+            local hy = -cos(headRad)    -- screen Y component (north = up)
+            -- Place chevron tip just outside the circle
+            local tipX = sx + hx * (wpR + 8)
+            local tipY = sy + hy * (wpR + 8)
+            lcd.color(wpColorLabel)
+            drawChevron(tipX, tipY, hx, hy, 6)
+          end
+        end
+      end
+    end
+  end
+
+  -- Pass 4: Draw RTH dashed line from preceding navigable WP to home point
+  local telemetry = status.telemetry
+  if telemetry and telemetry.homeLat and telemetry.homeLon then
+    for i, wp in ipairs(mission) do
+      if wp.action == WP_ACT_RTH then
+        -- Find preceding navigable WP
+        local navIdx = nil
+        for j = i - 1, 1, -1 do
+          if wpIsNavigable(mission[j].action) and screenPos[j] then
+            navIdx = j
+            break
+          end
+        end
+        if navIdx then
+          local sx, sy = screenPos[navIdx][1], screenPos[navIdx][2]
+          -- Compute home screen position
+          local htx, hty, hox, hoy = coordToTiles(telemetry.homeLat, telemetry.homeLon, level)
+          local homeSx = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
+          local homeSy = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
+          -- Shorten to stop at circle edge on source side
+          local lx1, ly1, lx2, ly2 = shortenLine(sx, sy, homeSx, homeSy, wpR)
+          if lx1 then
+            lcd.color(wpColorRth)
+            lcd.pen(DOTTED)
+            local cx1, cy1, cx2, cy2 = clipLine(lx1, ly1, lx2, ly2, x, y, x + w, y + h)
+            if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+            lcd.pen(SOLID)
+          end
+        end
+      end
     end
   end
 
