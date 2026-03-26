@@ -31,7 +31,7 @@ local os_clock, os_time = os.clock, os.time
 -- number or order of settings in read()/write().  Stored as the first
 -- hidden storage slot so read() can detect version mismatches and
 -- reset corrupted settings to safe defaults.
-local WIDGET_VERSION = "1.1.0"
+local WIDGET_VERSION = "1.1.0-dev1"
 
 
 local _getTimeImpl = nil
@@ -206,6 +206,12 @@ local mapStatus = {
   -- Observation marker: GPS position of user-placed pin (nil = no marker)
   observationLat = nil,
   observationLon = nil,
+
+  -- MSP waypoint mission state (populated from msp.lua after download completes)
+  mspMissions = {},       -- array of mission tables, each containing an ordered WP list
+  mspMissionIdx = 1,      -- 1-based index of the currently displayed mission
+  mspDownloadDone = false, -- true once mission data has been copied from msp lib
+  mspArmedHomeSet = false, -- true once home was auto-set from arming detection
 
   avgSpeed = {
     lastSampleTime = nil,
@@ -464,6 +470,7 @@ local mapLibs = {
   tileLoader = nil,
   mapLib     = nil,
   utils      = nil,
+  msp        = nil,
 }
 
 function loadLib(name)
@@ -483,6 +490,7 @@ local function initLibs()
   if mapLibs.resetLib == nil then mapLibs.resetLib = loadLib("resetLib") end
   if mapLibs.tileLoader == nil then mapLibs.tileLoader = loadLib("tileloader") end
   if mapLibs.mapLib == nil then mapLibs.mapLib = loadLib("maplib") end
+  if mapLibs.msp == nil then mapLibs.msp = loadLib("msp") end
 end
 
 local function checkSize(widget)
@@ -523,6 +531,14 @@ local function reset(widget)
   -- Delegates a user-triggered reset to resetLib so layouts and cached map data are rebuilt.
   if mapLibs and mapLibs.mapLib and mapLibs.mapLib.clearTrail then
     mapLibs.mapLib.clearTrail()
+  end
+  -- Clear cached missions and re-download from FC
+  if mapLibs and mapLibs.msp then
+    mapStatus.mspMissions = {}
+    mapStatus.mspMissionIdx = 1
+    mapStatus.mspDownloadDone = false
+    mapStatus.mspArmedHomeSet = false
+    mapLibs.msp.open()
   end
   mapLibs.resetLib.reset(widget)
   markMapDirty()
@@ -602,6 +618,17 @@ local function bgtasks(widget)
     gpsLat = cachedGpsSrcLat and cachedGpsSrcLat:value() or nil
     gpsLon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
   end
+
+  -- GPS source diagnostics (throttled to once per 10s)
+  if mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+    if not mapStatus._gpsDbgTime or (now - mapStatus._gpsDbgTime) > 1000 then
+      mapStatus._gpsDbgTime = now
+      mapLibs.utils.logDebug("GPS_SRC", fmt("mode=%d gpsLat=%s gpsLon=%s",
+          conf.telemetrySourceMode or 0,
+          tostring(gpsLat), tostring(gpsLon)), true)
+    end
+  end
+
   if gpsLat ~= nil and gpsLon ~= nil then
     telemetry.lat = gpsLat
     telemetry.lon = gpsLon
@@ -865,7 +892,7 @@ local function event(widget, category, value, x, y)
       end
 
       -- IDLE/GRACE: consume if it was a zoom/lock/pin release, otherwise pass through
-      if mapStatus.consumeZoomRelease or hitPlus or hitMinus or hitLock or hitPin then
+      if mapStatus.consumeZoomRelease or hitPlus or hitMinus or hitLock or hitPin or hitMission then
         mapStatus.consumeZoomRelease = false
         system.killEvents(value)
         return true
@@ -1192,6 +1219,14 @@ local function wakeup(widget)
     mapStatus.initPending = false
   end
 
+  -- Drive MSP state machine FIRST to avoid SmartPort buffer overflow.
+  -- Multiple poll() calls per cycle drain queued frames (each processes one chunk).
+  if mapLibs and mapLibs.msp then
+    for _ = 1, 10 do
+      mapLibs.msp.poll()
+    end
+  end
+
   -- Pan state machine: timeout-based release and grace expiry
   local panState = mapStatus.panState
   if panState == PAN_DRAGGING then
@@ -1298,6 +1333,73 @@ local function wakeup(widget)
     bgtasks(widget)
     if perfActive then
       perfAddMs("bgtasks_ms", perfNowMs() - bgStartMs)
+    end
+  end
+
+  -- MSP status logging and mission publish (polling done at top of wakeup)
+  if mapLibs and mapLibs.msp then
+
+    -- Periodic MSP status log (throttled to once per second)
+    if mapStatus.debugEnabled and mapLibs.utils then
+      local now = getTime()
+      if not mapStatus._mspLastStatusLog or (now - mapStatus._mspLastStatusLog) > 100 then
+        mapStatus._mspLastStatusLog = now
+        local ms = mapLibs.msp.getState()
+        local stateNames = { [0]="OFF", "CONNECTING", "GET_WP_INFO", "DOWNLOADING", "DONE", "ERROR" }
+        mapLibs.utils.logDebug("MSP_DBG", fmt("state=%s fc=%s wpCount=%d done=%s active=%s missions=%d published=%s",
+            stateNames[ms.state] or tostring(ms.state),
+            tostring(ms.fcVariant),
+            ms.wpCount or 0,
+            tostring(mapLibs.msp.isDone()),
+            tostring(mapLibs.msp.isActive()),
+            ms.missions and #ms.missions or 0,
+            tostring(mapStatus.mspDownloadDone)), true)
+      end
+    end
+  end
+
+  -- Publish mission data: progressively during download, final on completion
+  if mapLibs and mapLibs.msp then
+    local mspState = mapLibs.msp.getState()
+
+    if mapLibs.msp.isDone() then
+      -- Final publish with parsed missions (split at multi-mission boundaries)
+      if not mapStatus.mspDownloadDone then
+        if mapStatus.debugEnabled and mapLibs.utils then
+          mapLibs.utils.logDebug("MSP_DBG", fmt(">>> PUBLISH: %d missions, %d total WPs <<<",
+              mspState.missions and #mspState.missions or 0,
+              mspState.wpCount or 0), true)
+        end
+        if mspState.missions and #mspState.missions > 0 then
+          mapStatus.mspMissions = mspState.missions
+          mapStatus.mspMissionIdx = 1
+          markMapDirty()
+        end
+        mapStatus.mspDownloadDone = true
+      end
+    elseif mspState.state == mapLibs.msp.STATE_DOWNLOADING and mspState.wpList and #mspState.wpList > 0 then
+      -- Progressive publish: show WPs as they arrive
+      mapStatus.mspMissions = { mspState.wpList }
+      mapStatus.mspMissionIdx = 1
+      markMapDirty()
+    else
+      -- MSP not done (retrying / reconnecting) — allow re-publish on next success
+      if mapStatus.mspDownloadDone then
+        mapStatus.mspDownloadDone = false
+      end
+    end
+
+    -- Auto set-home when FC reports armed (once per arming cycle)
+    if mspState.isArmed and not mapStatus.mspArmedHomeSet then
+      if mapStatus.telemetry.lat ~= nil and mapStatus.telemetry.lon ~= nil then
+        setHome(widget)
+        mapStatus.mspArmedHomeSet = true
+        if mapStatus.debugEnabled and mapLibs.utils then
+          mapLibs.utils.logDebug("MSP_DBG", "ARMED detected — home set automatically", true)
+        end
+      end
+    elseif not mspState.isArmed and mapStatus.mspArmedHomeSet then
+      mapStatus.mspArmedHomeSet = false
     end
   end
 
@@ -1433,6 +1535,11 @@ local function create()
 
   -- Emit a visible session marker once so each debug log session has a clear start record.
   logDebugSessionStart("widget create")
+
+  -- Start MSP waypoint download if SmartPort transport is available
+  if mapLibs.msp then
+    mapLibs.msp.open()
+  end
 
   return {
     conf = mapStatus.conf,
@@ -2532,7 +2639,13 @@ end
 
 local function init()
   -- Registers the widget lifecycle callbacks and exported sources with Ethos during radio startup.
-  system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, configure=configure, menu=menu, read=read, write=write })
+  local function close(widget)
+    if mapLibs and mapLibs.msp then
+      mapLibs.msp.close()
+    end
+  end
+
+  system.registerWidget({key="ethosmw", name="ETHOS Mapping Widget", paint=paint, event=event, wakeup=wakeup, create=create, close=close, configure=configure, menu=menu, read=read, write=write })
   registerSources()
 end
 

@@ -22,6 +22,7 @@ local mapLib = {}
 
 -- Cached stdlib references for embedded Lua performance (avoid _ENV hash lookups).
 local tonumber = tonumber
+local tostring = tostring
 local floor, abs, max, min = math.floor, math.abs, math.max, math.min
 local sin, cos, log, exp, atan, deg, rad = math.sin, math.cos, math.log, math.exp, math.atan, math.deg, math.rad
 local pi = math.pi
@@ -450,6 +451,275 @@ function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offse
   return status.widgetWidth / 2, -10
 end
 
+-- ============================================================================
+-- Waypoint mission rendering
+-- ============================================================================
+
+-- WP action constants (must match msp.lua WP_ACTION_NAMES)
+local WP_ACT_WAYPOINT      = 1
+local WP_ACT_POSHOLD_TIME  = 3
+local WP_ACT_RTH           = 4
+local WP_ACT_SET_POI       = 5
+local WP_ACT_JUMP          = 6
+local WP_ACT_SET_HEAD      = 7
+local WP_ACT_LAND          = 8
+
+-- Cached colors created once to avoid repeated lcd.RGB() calls per frame.
+local wpColorPath    = nil  -- neon green path lines
+local wpColorLabel   = nil  -- neon green text/symbols
+local wpColorRingOut = nil  -- black outer ring
+local wpColorRingIn  = nil  -- white inner ring
+local wpColorPoi     = nil  -- red for SET_POI bullseye
+local wpColorJump    = nil  -- light yellow for JUMP dashed lines
+local wpColorsReady  = false
+
+local function ensureWpColors()
+  if wpColorsReady then return end
+  wpColorPath    = lcd.RGB(0, 255, 43)    -- neon green #00FF2B
+  wpColorLabel   = lcd.RGB(0, 255, 43)    -- neon green #00FF2B
+  wpColorRingOut = BLACK
+  wpColorRingIn  = WHITE
+  wpColorPoi     = RED
+  wpColorJump    = lcd.RGB(255, 220, 50)  -- light yellow-orange
+  wpColorsReady  = true
+end
+
+--- Returns true if this WP action has a meaningful lat/lon position on the map.
+local function wpHasPosition(action)
+  return action == WP_ACT_WAYPOINT
+      or action == WP_ACT_POSHOLD_TIME
+      or action == WP_ACT_LAND
+      or action == WP_ACT_SET_POI
+end
+
+--- Returns true if this WP action is part of the flight path (connects with lines).
+local function wpIsNavigable(action)
+  return action == WP_ACT_WAYPOINT
+      or action == WP_ACT_POSHOLD_TIME
+      or action == WP_ACT_LAND
+end
+
+--- Draw a single waypoint marker at screen (sx, sy) based on its action type.
+--- @param wp      table  waypoint data {action, p1, p2, ...}
+--- @param sx      number screen X
+--- @param sy      number screen Y
+--- @param wpNum   number sequential navigable waypoint number for label
+--- @param r       number base circle radius
+--- @param dense   boolean true = dense mode (dot only, no text)
+local function drawWpMarker(wp, sx, sy, wpNum, r, dense)
+  local action = wp.action
+
+  if action == WP_ACT_SET_POI then
+    -- Red bullseye: outer ring, inner ring, center dot
+    lcd.color(wpColorPoi)
+    lcd.drawCircle(sx, sy, r)
+    lcd.drawCircle(sx, sy, max(floor(r * 0.55), 2))
+    lcd.drawFilledRectangle(sx - 1, sy - 1, 3, 3)
+    return
+  end
+
+  if dense then
+    -- Dense mode: small filled dot only
+    lcd.color(wpColorPath)
+    lcd.drawFilledRectangle(sx - 2, sy - 2, 5, 5)
+    return
+  end
+
+  -- Dual-contrast ring: black outer + white inner
+  lcd.color(wpColorRingOut)
+  lcd.drawCircle(sx, sy, r)
+  lcd.drawCircle(sx, sy, r - 1)
+  lcd.color(wpColorRingIn)
+  lcd.drawCircle(sx, sy, r - 2)
+  lcd.drawCircle(sx, sy, r - 3)
+
+  -- WP type-specific decoration
+  lcd.font(FONT_STD)
+  lcd.color(wpColorLabel)
+  if action == WP_ACT_POSHOLD_TIME then
+    -- Seconds from p1 above the circle
+    local secText = tostring(wp.p1) .. "s"
+    local tw, th = lcd.getTextSize(secText)
+    lcd.drawText(sx - floor(tw / 2), sy - r - th - 2, secText)
+    -- WP number centered in circle
+    local numText = tostring(wpNum)
+    tw, th = lcd.getTextSize(numText)
+    lcd.drawText(sx - floor(tw / 2), sy - floor(th / 2), numText)
+  elseif action == WP_ACT_LAND then
+    -- "L" centered in the circle
+    local tw, th = lcd.getTextSize("L")
+    lcd.drawText(sx - floor(tw / 2), sy - floor(th / 2), "L")
+  else
+    -- WAYPOINT: number centered in circle
+    local numText = tostring(wpNum)
+    local tw, th = lcd.getTextSize(numText)
+    lcd.drawText(sx - floor(tw / 2), sy - floor(th / 2), numText)
+  end
+end
+
+local wpDbgLastLog = 0  -- throttle for drawWaypoints debug logging
+
+--- Draw all waypoints from the currently selected mission onto the map.
+--- Called from drawMap() after trail, before observation marker.
+local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY)
+  local dbg = status.debugEnabled and libs and libs.utils
+  local dbgThrottle = false
+  if dbg then
+    local now = status.getTime()
+    if (now - wpDbgLastLog) > 200 then  -- max once per 2s
+      wpDbgLastLog = now
+      dbgThrottle = true
+    end
+  end
+
+  local missionList = status.mspMissions
+  if not missionList or #missionList == 0 then
+    if dbgThrottle then
+      libs.utils.logDebug("WP_DRAW", "SKIP: no missions (mspMissions empty)", true)
+    end
+    return
+  end
+  local mIdx = status.mspMissionIdx or 1
+  local mission = missionList[mIdx]
+  if not mission or #mission == 0 then
+    if dbgThrottle then
+      libs.utils.logDebug("WP_DRAW", fmt("SKIP: mission[%d] empty or nil", mIdx), true)
+    end
+    return
+  end
+  if myScreenX == nil or uav_tile_x == nil then
+    if dbgThrottle then
+      libs.utils.logDebug("WP_DRAW", fmt("SKIP: myScreenX=%s uav_tile_x=%s", tostring(myScreenX), tostring(uav_tile_x)), true)
+    end
+    return
+  end
+
+  if dbgThrottle then
+    libs.utils.logDebug("WP_DRAW", fmt("DRAW M%d: %d WPs, wpR=%d, screenX=%.0f", mIdx, #mission, max(floor(20 * min(status.scaleX or 1, status.scaleY or 1)), 10), myScreenX), true)
+  end
+
+  ensureWpColors()
+
+  local scaleX = status.scaleX or 1
+  local scaleY = status.scaleY or 1
+  local wpR = max(floor(20 * min(scaleX, scaleY)), 10)  -- 40px diameter
+
+  local coordToTiles = mapLib.coord_to_tiles
+  local clipLine = libs.drawLib.clipLine
+  local computeOutCode = libs.drawLib.computeOutCode
+  local margin = wpR + 20  -- viewport margin for clipping
+
+  -- Pre-compute screen positions for all positioned WPs
+  local screenPos = {}   -- indexed by mission WP index
+  for i, wp in ipairs(mission) do
+    if wpHasPosition(wp.action) then
+      local tx, ty, ox, oy = coordToTiles(wp.lat, wp.lon, level)
+      local sx = myScreenX + (tx - uav_tile_x) * TILES_SIZE + (ox - uav_offset_x) + renderOffsetX
+      local sy = myScreenY + (ty - uav_tile_y) * TILES_SIZE + (oy - uav_offset_y) + renderOffsetY
+      screenPos[i] = { sx, sy }
+    end
+  end
+
+  -- Determine density: check min spacing between consecutive navigable WPs
+  local dense = false
+  local prevNav = nil
+  for i, wp in ipairs(mission) do
+    if wpIsNavigable(wp.action) and screenPos[i] then
+      if prevNav then
+        local dx = screenPos[i][1] - screenPos[prevNav][1]
+        local dy = screenPos[i][2] - screenPos[prevNav][2]
+        if (dx * dx + dy * dy) < (100 * 100) then
+          dense = true
+          break
+        end
+      end
+      prevNav = i
+    end
+  end
+
+  -- Pass 1: Draw path lines between navigable WPs
+  lcd.color(wpColorPath)
+  lcd.pen(SOLID)
+  prevNav = nil
+  for i, wp in ipairs(mission) do
+    if wpIsNavigable(wp.action) and screenPos[i] then
+      if prevNav and screenPos[prevNav] then
+        local cx1, cy1, cx2, cy2 = clipLine(
+          screenPos[prevNav][1], screenPos[prevNav][2],
+          screenPos[i][1], screenPos[i][2],
+          x, y, x + w, y + h)
+        if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+      end
+      prevNav = i
+    end
+  end
+
+  -- Pass 1b: Draw JUMP connections (dashed orange line from source to target WP)
+  for i, wp in ipairs(mission) do
+    if wp.action == WP_ACT_JUMP then
+      local targetIdx = wp.p1  -- 1-based WP index within this mission
+      -- Find the navigable WP just before this JUMP in the mission sequence
+      local sourceNav = nil
+      for j = i - 1, 1, -1 do
+        if wpIsNavigable(mission[j].action) and screenPos[j] then
+          sourceNav = j
+          break
+        end
+      end
+      if sourceNav and targetIdx >= 1 and targetIdx <= #mission and screenPos[targetIdx] then
+        lcd.color(wpColorJump)
+        lcd.pen(DOTTED)
+        local cx1, cy1, cx2, cy2 = clipLine(
+          screenPos[sourceNav][1], screenPos[sourceNav][2],
+          screenPos[targetIdx][1], screenPos[targetIdx][2],
+          x, y, x + w, y + h)
+        if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+        lcd.pen(SOLID)
+
+        -- Show iteration count on the source navigable WP
+        if not dense and screenPos[sourceNav] then
+          local ssx, ssy = screenPos[sourceNav][1], screenPos[sourceNav][2]
+          local iterCode = computeOutCode(ssx, ssy, x - margin, y - margin, x + w + margin, y + h + margin)
+          if iterCode == 0 then
+            local iterText
+            if wp.p2 == -1 then
+              iterText = "\xE2\x88\x9E"  -- UTF-8 infinity symbol ∞
+            else
+              iterText = "x" .. tostring(wp.p2)
+            end
+            lcd.font(FONT_STD)
+            lcd.color(wpColorLabel)
+            local tw, th = lcd.getTextSize(iterText)
+            local jx = ssx + wpR + 3
+            local jy = ssy - floor(th / 2)
+            lcd.drawText(jx, jy, iterText)
+          end
+        end
+      end
+    end
+  end
+
+  -- Pass 2: Draw WP markers (on top of lines)
+  local navNum = 0  -- sequential number for navigable WPs
+  for i, wp in ipairs(mission) do
+    if wpHasPosition(wp.action) and screenPos[i] then
+      local sx, sy = screenPos[i][1], screenPos[i][2]
+      local code = computeOutCode(sx, sy, x - margin, y - margin, x + w + margin, y + h + margin)
+      if code == 0 then
+        if wpIsNavigable(wp.action) then
+          navNum = navNum + 1
+          drawWpMarker(wp, sx, sy, navNum, wpR, dense)
+        else
+          drawWpMarker(wp, sx, sy, 0, wpR, dense)
+        end
+      end
+    elseif wpIsNavigable(wp.action) then
+      navNum = navNum + 1  -- count even if off-screen for consistent numbering
+    end
+  end
+
+end
+
 function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, allowStateUpdate)
   -- Draws the full map view by combining tile rendering, aircraft/home overlays, trail history, and zoom controls.
   local perfActive = status.perfActive
@@ -805,6 +1075,9 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
     end
   end
+
+  -- Waypoint mission overlay
+  drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY)
 
   -- Observation marker: green line from UAV + marker circle
   if status.observationLat ~= nil and status.observationLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
