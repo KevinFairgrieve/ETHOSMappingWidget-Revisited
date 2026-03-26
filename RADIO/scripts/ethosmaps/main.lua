@@ -31,7 +31,7 @@ local os_clock, os_time = os.clock, os.time
 -- number or order of settings in read()/write().  Stored as the first
 -- hidden storage slot so read() can detect version mismatches and
 -- reset corrupted settings to safe defaults.
-local WIDGET_VERSION = "1.2.0-dev1"
+local WIDGET_VERSION = "1.2.0-dev2"
 
 
 local _getTimeImpl = nil
@@ -141,6 +141,7 @@ local mapStatus = {
     uavSymbol = 1, -- 1 = Arrow, 2 = Airplane, 3 = Multirotor
     zoomControl = 0,  -- 0 = OFF (touch buttons), 1 = 3-POS switch, 2 = Proportional
     zoomChannel = 0,  -- RC channel number (1-64) for zoom input
+    wpDownload = true,  -- Enable/disable INAV waypoint download and display
     -- Layout selection persisted for future layout variants.
     layout = 1,
   },
@@ -538,7 +539,8 @@ local function reset(widget)
     mapStatus.mspMissionIdx = 1
     mapStatus.mspDownloadDone = false
     mapStatus.mspArmedHomeSet = false
-    mapLibs.msp.open()
+    local armOnly = not mapStatus.conf.wpDownload
+    mapLibs.msp.open({ armingOnly = armOnly })
   end
   mapLibs.resetLib.reset(widget)
   markMapDirty()
@@ -1539,7 +1541,8 @@ local function create()
 
   -- Start MSP waypoint download if SmartPort transport is available
   if mapLibs.msp then
-    mapLibs.msp.open()
+    local armOnly = not mapStatus.conf.wpDownload
+    mapLibs.msp.open({ armingOnly = armOnly })
   end
 
   return {
@@ -2331,6 +2334,12 @@ local function configure(widget)
     end
   )
 
+  line = form.addLine("Waypoint download (INAV)")
+  form.addBooleanField(line, nil,
+    function() return mapStatus.conf.wpDownload end,
+    function(value) mapStatus.conf.wpDownload = value end
+  )
+
   line = form.addLine("Zoom control")
   form.addChoiceField(line, form.getFieldSlots(line)[0],
     {{"Off", 0}, {"3-Position", 1}, {"Proportional", 2}},
@@ -2559,6 +2568,7 @@ local function read(widget)
   mapStatus.conf.sensorGpsLon = storageToConfig("sensorGpsLon", nil)
   mapStatus.conf.sensorHeading = storageToConfig("sensorHeading", nil)
   mapStatus.conf.sensorSpeed = storageToConfig("sensorSpeed", nil)
+  mapStatus.conf.wpDownload = storageToConfig("wpDownload", true)
 
   -- Observation marker persistence
   mapStatus.observationLat = storageToConfig("observationLat", nil)
@@ -2603,6 +2613,7 @@ local function write(widget)
   storage.write("sensorGpsLon", mapStatus.conf.sensorGpsLon)
   storage.write("sensorHeading", mapStatus.conf.sensorHeading)
   storage.write("sensorSpeed", mapStatus.conf.sensorSpeed)
+  storage.write("wpDownload", mapStatus.conf.wpDownload)
 
   -- Observation marker persistence
   storage.write("observationLat", mapStatus.observationLat)

@@ -202,6 +202,7 @@ local errorTime    = 0       -- os.clock() when ERROR state was entered
 -- Arming state
 local isArmed        = false   -- true once FC reports armed
 local lastArmPollTime = 0      -- os.clock() of last MSP_STATUS request
+local armingOnly     = false   -- true = skip WP download, only poll arming state
 
 -- ============================================================================
 -- Debug logging helper (uses widget debug log if available)
@@ -566,7 +567,12 @@ local function handleFcVariant(buf)
         fcVariant = char(buf[1], buf[2], buf[3], buf[4])
         log("MSP", fmt("FC variant: %s", fcVariant))
         if fcVariant == "INAV" then
-            state = STATE_GET_WP_INFO
+            if armingOnly then
+                state = STATE_DONE
+                log("MSP", "Arming-only mode — skipping WP download")
+            else
+                state = STATE_GET_WP_INFO
+            end
         else
             log("MSP", fmt("Unsupported FC: %s (need INAV)", fcVariant))
             state = STATE_ERROR
@@ -665,6 +671,7 @@ local function resetState()
     errorTime    = 0
     isArmed        = false
     lastArmPollTime = 0
+    armingOnly     = false
 end
 
 -- ============================================================================
@@ -672,8 +679,12 @@ end
 -- ============================================================================
 
 --- Acquire sensor, auto-detect transport (SmartPort → CRSF), start state machine.
-function msp.open()
+--- @param opts table|nil  Optional { armingOnly = bool } to skip WP download
+function msp.open(opts)
     resetState()
+    if opts and opts.armingOnly then
+        armingOnly = true
+    end
     state     = STATE_CONNECTING
     startTime = clock()
 
