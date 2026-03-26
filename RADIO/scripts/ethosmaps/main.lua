@@ -31,7 +31,7 @@ local os_clock, os_time = os.clock, os.time
 -- number or order of settings in read()/write().  Stored as the first
 -- hidden storage slot so read() can detect version mismatches and
 -- reset corrupted settings to safe defaults.
-local WIDGET_VERSION = "1.1.0-beta1"
+local WIDGET_VERSION = "1.2.0-beta1"
 
 
 local _getTimeImpl = nil
