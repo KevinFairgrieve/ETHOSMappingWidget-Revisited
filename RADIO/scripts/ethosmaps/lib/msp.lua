@@ -109,9 +109,10 @@ local TRANSPORT_NONE  = 0
 local TRANSPORT_SPORT = 1
 local TRANSPORT_CRSF  = 2
 
--- Max MSP chunk bytes per transport frame:
+-- Max bytes per transport chunk (status byte + MSP body):
 --   SmartPort: 6 (2 dataId + 4 value, all repurposed as MSP chunk)
---   CRSF:     58 (64 max frame - 4 CRSF overhead - 2 dest/orig addr)
+--   CRSF:     58 (64 max frame - sync - framelen - type - dest - orig - CRC)
+--             → 1 status byte + up to 57 MSP body bytes per CRSF frame
 local SPORT_FRAME_PAYLOAD = 6
 local CRSF_FRAME_PAYLOAD  = 58
 
@@ -324,9 +325,12 @@ local function mspProcessTxQ()
         i = i + 1
     end
     if i <= maxFramePayload then
-        frame[i] = mspTxCRC
-        i = i + 1
-        -- SmartPort requires fixed-size 6-byte frames; pad with zeros
+        -- SmartPort: append MSP CRC + pad to fixed 6-byte frame
+        -- CRSF: NO MSP CRC (protected by CRSF frame CRC per spec)
+        if transportType ~= TRANSPORT_CRSF then
+            frame[i] = mspTxCRC
+            i = i + 1
+        end
         if transportType == TRANSPORT_SPORT then
             while i <= maxFramePayload do frame[i] = 0; i = i + 1 end
         end
@@ -431,6 +435,17 @@ local function mspReceivedReply(frame)
         mspRxCRC = bxor(mspRxCRC, frame[idx])
         idx = idx + 1
     end
+    -- CRSF: no MSP CRC in frame (protected by CRSF frame CRC per spec)
+    -- Response is complete once all mspRxSize bytes are collected.
+    if transportType == TRANSPORT_CRSF then
+        if #mspRxBuf >= mspRxSize then
+            mspStarted = false
+            return true
+        end
+        mspRemoteSeq = seq
+        return false
+    end
+    -- SmartPort: expect MSP CRC byte after payload
     if idx > frameLen then
         mspRemoteSeq = seq
         return false
