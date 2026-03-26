@@ -1,18 +1,23 @@
 --
 -- msp.lua — MSP transport and waypoint download library
 --
--- Communicates with an INAV flight controller over SmartPort telemetry
--- passthrough to download stored waypoint missions.
+-- Communicates with an INAV flight controller over SmartPort or CRSF
+-- telemetry passthrough to download stored waypoint missions.
 --
 -- Protocol layers:
---   [ETHOS Lua] → sensor:pushFrame/popFrame → [SmartPort MSP Transport]
---   → [Receiver] → [FC UART] → [INAV MSP Handler]
+--   SmartPort: [ETHOS Lua] → sport sensor → [SmartPort MSP Transport]
+--              → [FrSky Rx] → [FC UART] → [INAV MSP Handler]
+--   CRSF:      [ETHOS Lua] → crsf sensor → [CRSF MSP Passthrough]
+--              → [ELRS/TBS Rx] → [FC UART] → [INAV MSP Handler]
 --
 -- Supports MSPv1 (commands < 256) and MSPv2-over-V1 encapsulation
 -- (cmd=0xFF wrapper) for future 16-bit command IDs.
 --
+-- Transport auto-detection: tries SmartPort first, then CRSF.
+-- CRSF support is UNTESTED — needs verification on ELRS/TBS hardware.
+--
 -- Usage from widget:
---   libs.msp.open()      — acquire SmartPort sensor (call in create)
+--   libs.msp.open()      — acquire sensor + auto-detect transport
 --   libs.msp.poll()      — drive state machine (call in wakeup)
 --   libs.msp.close()     — release sensor (call in close)
 --   libs.msp.getState()  — read current state + wp data
@@ -88,7 +93,27 @@ local FP_REMOTE_ID     = 0x00
 -- MSP-over-SmartPort framing
 local MSP_VERSION_BITS = lshift(1, 5)   -- V1 in status byte bits 5-6
 local MSP_STARTFLAG    = lshift(1, 4)
-local MAX_FRAME_PAYLOAD = 6
+
+-- ============================================================================
+-- CRSF transport constants  (UNTESTED — needs hardware verification)
+-- ============================================================================
+local CRSF_FRAMETYPE_MSP_REQ  = 0x7A  -- MSP request  (Radio → FC via Rx)
+local CRSF_FRAMETYPE_MSP_RESP = 0x7B  -- MSP response (FC → Radio via Rx)
+local CRSF_ADDRESS_FC         = 0xC8  -- Flight Controller
+local CRSF_ADDRESS_RADIO      = 0xEA  -- Radio Transmitter
+
+-- ============================================================================
+-- Transport abstraction
+-- ============================================================================
+local TRANSPORT_NONE  = 0
+local TRANSPORT_SPORT = 1
+local TRANSPORT_CRSF  = 2
+
+-- Max MSP chunk bytes per transport frame:
+--   SmartPort: 6 (2 dataId + 4 value, all repurposed as MSP chunk)
+--   CRSF:     58 (64 max frame - 4 CRSF overhead - 2 dest/orig addr)
+local SPORT_FRAME_PAYLOAD = 6
+local CRSF_FRAME_PAYLOAD  = 58
 
 -- ============================================================================
 -- Timing
@@ -119,12 +144,22 @@ msp.STATE_DOWNLOADING = STATE_DOWNLOADING
 msp.STATE_DONE        = STATE_DONE
 msp.STATE_ERROR       = STATE_ERROR
 
+msp.TRANSPORT_NONE  = TRANSPORT_NONE
+msp.TRANSPORT_SPORT = TRANSPORT_SPORT
+msp.TRANSPORT_CRSF  = TRANSPORT_CRSF
+
 -- ============================================================================
 -- Module-level state
 -- ============================================================================
 
 -- ETHOS sensor handle
 local sensor = nil
+
+-- Transport state (set during open(), preserved across resetState())
+local transportType    = TRANSPORT_NONE
+local maxFramePayload  = SPORT_FRAME_PAYLOAD
+local rawSend          = nil   -- function(chunk) -> bool
+local rawPoll          = nil   -- function() -> chunk_table or nil
 
 -- MSP transport state
 local mspSeq       = 0
@@ -229,7 +264,48 @@ local function sportPoll()
 end
 
 -- ============================================================================
--- MSP framing  (SmartPort chunking)
+-- CRSF send / receive   (UNTESTED — needs hardware verification)
+-- ============================================================================
+
+--- Send an MSP chunk as a CRSF frame (type 0x7A).
+--- Wraps the chunk with destination/origin address bytes.
+--- NOTE: ETHOS CRSF sensor API field names may differ — verify on hardware.
+local function crsfSend(chunk)
+    if not sensor then return false end
+    local payload = { CRSF_ADDRESS_FC, CRSF_ADDRESS_RADIO }
+    for i = 1, #chunk do
+        payload[i + 2] = chunk[i]
+    end
+    return sensor:pushFrame({
+        frameType = CRSF_FRAMETYPE_MSP_REQ,
+        data      = payload,
+    })
+end
+
+--- Poll for a CRSF MSP response frame (type 0x7B).
+--- Strips destination/origin address bytes and returns the MSP chunk.
+local function crsfPoll()
+    if not sensor then return nil end
+    while true do
+        local frame = sensor:popFrame()
+        if not frame then return nil end
+        local fType = frame:frameType()
+        if fType == CRSF_FRAMETYPE_MSP_RESP then
+            local data = frame:data()
+            if data and #data >= 3 then
+                -- Strip dest(1) + orig(1), return MSP chunk from status byte
+                local chunk = {}
+                for i = 3, #data do
+                    chunk[#chunk + 1] = data[i]
+                end
+                return chunk
+            end
+        end
+    end
+end
+
+-- ============================================================================
+-- MSP framing  (shared chunking for SmartPort and CRSF)
 -- ============================================================================
 
 local function mspProcessTxQ()
@@ -241,23 +317,26 @@ local function mspProcessTxQ()
         frame[1] = frame[1] + MSP_STARTFLAG
     end
     local i = 2
-    while i <= MAX_FRAME_PAYLOAD and mspTxIdx <= #mspTxBuf do
+    while i <= maxFramePayload and mspTxIdx <= #mspTxBuf do
         frame[i] = mspTxBuf[mspTxIdx]
         mspTxIdx = mspTxIdx + 1
         mspTxCRC = bxor(mspTxCRC, frame[i])
         i = i + 1
     end
-    if i <= MAX_FRAME_PAYLOAD then
+    if i <= maxFramePayload then
         frame[i] = mspTxCRC
         i = i + 1
-        while i <= MAX_FRAME_PAYLOAD do frame[i] = 0; i = i + 1 end
-        sportSend(frame)
+        -- SmartPort requires fixed-size 6-byte frames; pad with zeros
+        if transportType == TRANSPORT_SPORT then
+            while i <= maxFramePayload do frame[i] = 0; i = i + 1 end
+        end
+        rawSend(frame)
         mspTxBuf = {}
         mspTxIdx = 1
         mspTxCRC = 0
         return false
     end
-    sportSend(frame)
+    rawSend(frame)
     return true
 end
 
@@ -346,12 +425,13 @@ local function mspReceivedReply(frame)
         mspStarted = false
         return nil
     end
-    while idx <= MAX_FRAME_PAYLOAD and #mspRxBuf < mspRxSize do
+    local frameLen = #frame
+    while idx <= frameLen and #mspRxBuf < mspRxSize do
         mspRxBuf[#mspRxBuf + 1] = frame[idx]
         mspRxCRC = bxor(mspRxCRC, frame[idx])
         idx = idx + 1
     end
-    if idx > MAX_FRAME_PAYLOAD then
+    if idx > frameLen then
         mspRemoteSeq = seq
         return false
     end
@@ -392,11 +472,12 @@ local function unwrapV2Response(cmd, buf)
 end
 
 --- Poll for a complete MSP reply.
---- Drains ALL available SmartPort frames so multi-frame responses
+--- Drains ALL available transport frames so multi-frame responses
 --- are assembled in a single wakeup cycle.
 local function mspPollReply()
+    if not rawPoll then return nil end
     while true do
-        local frame = sportPoll()
+        local frame = rawPoll()
         if not frame then return nil end
         local result = mspReceivedReply(frame)
         if result then
@@ -575,33 +656,68 @@ end
 -- Public API
 -- ============================================================================
 
---- Acquire the SmartPort sensor and start the download state machine.
+--- Acquire sensor, auto-detect transport (SmartPort → CRSF), start state machine.
 function msp.open()
     resetState()
     state     = STATE_CONNECTING
     startTime = clock()
 
-    local rssiSource =
+    -- Try SmartPort first (FrSky ACCESS / ACCST / TD)
+    local sportRssi =
         system.getSource("RSSI") or
         system.getSource("RSSI 2.4G") or
         system.getSource("RSSI 900M") or
         system.getSource("Rx RSSI1") or
         system.getSource("Rx RSSI2")
 
-    sensor = sport.getSensor({primId = 0x32})
-    if rssiSource and sensor then
-        sensor:module(rssiSource:module())
-        log("MSP", "SmartPort sensor acquired")
-    else
-        log("MSP", "Failed to acquire SmartPort sensor")
-        state = STATE_ERROR
+    if sportRssi then
+        local sportSensor = sport.getSensor({primId = 0x32})
+        if sportSensor then
+            sensor          = sportSensor
+            sensor:module(sportRssi:module())
+            transportType   = TRANSPORT_SPORT
+            maxFramePayload = SPORT_FRAME_PAYLOAD
+            rawSend         = sportSend
+            rawPoll         = sportPoll
+            log("MSP", "SmartPort transport acquired")
+            return
+        end
     end
+
+    -- Try CRSF (Crossfire / ELRS)  — UNTESTED, needs hardware verification
+    local crsfRssi =
+        system.getSource("1RSS") or
+        system.getSource("2RSS") or
+        system.getSource("RQly") or
+        system.getSource("RSNR")
+
+    if crsfRssi and type(crsf) == "table" and type(crsf.getSensor) == "function" then
+        local ok, crsfSensor = pcall(crsf.getSensor, {})
+        if ok and crsfSensor then
+            sensor          = crsfSensor
+            pcall(function() sensor:module(crsfRssi:module()) end)
+            transportType   = TRANSPORT_CRSF
+            maxFramePayload = CRSF_FRAME_PAYLOAD
+            rawSend         = crsfSend
+            rawPoll         = crsfPoll
+            log("MSP", "CRSF transport acquired")
+            return
+        end
+    end
+
+    log("MSP", "No transport available (tried SmartPort and CRSF)")
+    state     = STATE_ERROR
+    errorTime = clock()
 end
 
---- Release the SmartPort sensor.
+--- Release sensor and reset transport state.
 function msp.close()
-    sensor = nil
-    state  = STATE_OFF
+    sensor          = nil
+    transportType   = TRANSPORT_NONE
+    maxFramePayload = SPORT_FRAME_PAYLOAD
+    rawSend         = nil
+    rawPoll         = nil
+    state           = STATE_OFF
     log("MSP", "Sensor released")
 end
 
@@ -731,6 +847,7 @@ end
 --- Return current state snapshot for external consumers.
 --- @return table { state, fcVariant, connected, wpCount, wpValid, wpList, wpNextIdx }
 function msp.getState()
+    local TRANSPORT_NAMES = { [0]="NONE", "SPORT", "CRSF" }
     return {
         state      = state,
         fcVariant  = fcVariant,
@@ -742,6 +859,7 @@ function msp.getState()
         wpMaxCount = wpMaxCount,
         missions   = missions,
         isArmed    = isArmed,
+        transport  = TRANSPORT_NAMES[transportType] or "UNKNOWN",
     }
 end
 

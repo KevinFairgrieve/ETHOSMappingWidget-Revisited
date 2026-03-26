@@ -1346,9 +1346,10 @@ local function wakeup(widget)
         mapStatus._mspLastStatusLog = now
         local ms = mapLibs.msp.getState()
         local stateNames = { [0]="OFF", "CONNECTING", "GET_WP_INFO", "DOWNLOADING", "DONE", "ERROR" }
-        mapLibs.utils.logDebug("MSP_DBG", fmt("state=%s fc=%s wpCount=%d done=%s active=%s missions=%d published=%s",
+        mapLibs.utils.logDebug("MSP_DBG", fmt("state=%s fc=%s transport=%s wpCount=%d done=%s active=%s missions=%d published=%s",
             stateNames[ms.state] or tostring(ms.state),
             tostring(ms.fcVariant),
+            ms.transport or "?",
             ms.wpCount or 0,
             tostring(mapLibs.msp.isDone()),
             tostring(mapLibs.msp.isActive()),
