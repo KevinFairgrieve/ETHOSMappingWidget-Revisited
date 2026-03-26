@@ -712,7 +712,7 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
           local len = sqrt(dx * dx + dy * dy)
           if len > 1 then
             lcd.color(wpColorJump)
-            drawChevron(mx + dx / len * 5, my + dy / len * 5, dx / len, dy / len, 8)
+            drawChevron(mx + dx / len * 12, my + dy / len * 12, dx / len, dy / len, 20)
           end
         end
 
@@ -778,10 +778,10 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
             local hx = sin(headRad)     -- screen X component (east = right)
             local hy = -cos(headRad)    -- screen Y component (north = up)
             -- Place chevron tip just outside the circle
-            local tipX = sx + hx * (wpR + 8)
-            local tipY = sy + hy * (wpR + 8)
+            local tipX = sx + hx * (wpR + 16)
+            local tipY = sy + hy * (wpR + 16)
             lcd.color(wpColorLabel)
-            drawChevron(tipX, tipY, hx, hy, 6)
+            drawChevron(tipX, tipY, hx, hy, 15)
           end
         end
       end
