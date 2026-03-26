@@ -18,7 +18,11 @@ It displays your real-time GPS position on a supported map type of your choice a
 - Home position marker and Home Arrow
 - Scale bar with distance indication
 - Trail history
-- Visual Zoom Buttons (+ / -) on the right edge
+- INAV waypoint mission overlay (automatic MSP download)
+  - Active waypoint tracking with nav-mode coloring (green for NAV/HOLD, orange for RTH)
+  - Dual transport support: SmartPort and CRSF/ELRS
+- Map panning with custom observation marker
+- Visual Zoom Buttons (+ / -) on the left edge
 - Works in Fullscreen, Split-Screen and all custom widget sizes
 - **One mapping widget per screen** (multiple instances on the same screen are not supported)
 - Optimized tile loading and performance
@@ -263,6 +267,18 @@ Notes:
 - Existing installations are migrated automatically from legacy provider-specific zoom keys.
 - If no valid provider or map type is available, the UI shows `NONE` and map-related selection fields are disabled.
 
+## INAV Waypoint Mission
+
+The widget can automatically download and display INAV waypoint missions directly from the flight controller via MSP protocol. The mission path, waypoint markers, and active navigation state are rendered as an overlay on the map.
+
+For full details, see [Waypoint Mission Documentation](Docs/manuals/WaypointMission.md).
+
+## Map Panning & Observation Marker (Only in Full Screen Mode)
+
+The map supports touch-based panning (drag to scroll) and a custom observation marker that can be placed on any position. The map can also operate in detached mode, allowing free exploration while the UAV continues to fly.
+
+For full details, see [Panning & Observation Marker Documentation](Docs/manuals/PanningAndMarker.md).
+
 ## Custom Enhancements & Modifications
 
 This version includes extensive custom improvements:
@@ -271,8 +287,10 @@ This version includes extensive custom improvements:
 - Improved Scale Bar visibility and background
 - Refined "Home Not Set" warning with dynamic box sizing
 - Better performance and reduced tile loading in small widgets
+- Nav-aware UAV symbol coloring based on flight mode
+- Automatic arming detection and home position setting via MSP
 
 ## Credits
 
 - Original concept and base code: Yaapu (Alessandro Apostoli)
-- Heavy modifications and scalability enhancements: b14ckyy
+- Heavy modifications and enhancements: b14ckyy
