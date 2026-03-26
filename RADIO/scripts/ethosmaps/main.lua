@@ -2413,15 +2413,65 @@ local function configure(widget)
   form.addChoiceField(line, form.getFieldSlots(line)[0],
     {{"Off", 0}, {"20 m", 20}, {"50 m", 50}, {"100 m", 100}, {"500 m", 500}, {"1 km", 1000}},
     function() return mapStatus.conf.mapTrailResolution end,
-    function(value) mapStatus.conf.mapTrailResolution = value end
+    function(value)
+      mapStatus.conf.mapTrailResolution = value
+      if widget.trailBendField ~= nil then
+        widget.trailBendField:enable(value ~= 0)
+      end
+    end
   )
 
   line = form.addLine("Trail bend threshold")
-  form.addNumberField(line, nil, 3, 15,
+  widget.trailBendField = form.addNumberField(line, nil, 3, 15,
     function() return mapStatus.conf.mapTrailHeadingThreshold end,
     function(value) mapStatus.conf.mapTrailHeadingThreshold = value end
   )
+  widget.trailBendField:enable(mapStatus.conf.mapTrailResolution ~= 0)
   form.addStaticText(line, nil, "deg")
+
+  -- Telemetry source mode: allows switching between ETHOS and direct sensor input.
+  line = form.addLine("Telemetry source")
+  widget.telemetrySourceModeField = form.addChoiceField(line, form.getFieldSlots(line)[0],
+    {{"ETHOS", 1}, {"Sensors", 2}},
+    function() return mapStatus.conf.telemetrySourceMode or 1 end,
+    function(value)
+      mapStatus.conf.telemetrySourceMode = value
+      -- Toggle sensor source field visibility.
+      local sensorsActive = (value == 2)
+      if widget.sensorGpsLatField ~= nil then widget.sensorGpsLatField:enable(sensorsActive) end
+      if widget.sensorGpsLonField ~= nil then widget.sensorGpsLonField:enable(sensorsActive) end
+      if widget.sensorHeadingField ~= nil then widget.sensorHeadingField:enable(sensorsActive) end
+      if widget.sensorSpeedField ~= nil then widget.sensorSpeedField:enable(sensorsActive) end
+    end
+  )
+
+  line = form.addLine("GPS Lat source")
+  widget.sensorGpsLatField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorGpsLat end,
+    function(value) mapStatus.conf.sensorGpsLat = value end
+  )
+  widget.sensorGpsLatField:enable(mapStatus.conf.telemetrySourceMode == 2)
+
+  line = form.addLine("GPS Lon source")
+  widget.sensorGpsLonField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorGpsLon end,
+    function(value) mapStatus.conf.sensorGpsLon = value end
+  )
+  widget.sensorGpsLonField:enable(mapStatus.conf.telemetrySourceMode == 2)
+
+  line = form.addLine("Heading source (optional)")
+  widget.sensorHeadingField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorHeading end,
+    function(value) mapStatus.conf.sensorHeading = value end
+  )
+  widget.sensorHeadingField:enable(mapStatus.conf.telemetrySourceMode == 2)
+
+  line = form.addLine("Speed source (optional)")
+  widget.sensorSpeedField = form.addSourceField(line, nil,
+    function() return mapStatus.conf.sensorSpeed end,
+    function(value) mapStatus.conf.sensorSpeed = value end
+  )
+  widget.sensorSpeedField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   -- ── Debug & Developer Tools ─────────────────────────────────────────────
 
@@ -2485,50 +2535,6 @@ local function configure(widget)
   )
   -- Only show perf profile option when debug logging is enabled.
   widget.enablePerfProfileField:enable(mapStatus.flagEnabled(mapStatus.conf.enableDebugLog))
-
-  -- Telemetry source mode: allows switching between ETHOS and direct sensor input.
-  line = form.addLine("Telemetry source")
-  widget.telemetrySourceModeField = form.addChoiceField(line, form.getFieldSlots(line)[0],
-    {{"ETHOS", 1}, {"Sensors", 2}},
-    function() return mapStatus.conf.telemetrySourceMode or 1 end,
-    function(value)
-      mapStatus.conf.telemetrySourceMode = value
-      -- Toggle sensor source field visibility.
-      local sensorsActive = (value == 2)
-      if widget.sensorGpsLatField ~= nil then widget.sensorGpsLatField:enable(sensorsActive) end
-      if widget.sensorGpsLonField ~= nil then widget.sensorGpsLonField:enable(sensorsActive) end
-      if widget.sensorHeadingField ~= nil then widget.sensorHeadingField:enable(sensorsActive) end
-      if widget.sensorSpeedField ~= nil then widget.sensorSpeedField:enable(sensorsActive) end
-    end
-  )
-
-  line = form.addLine("GPS Lat source")
-  widget.sensorGpsLatField = form.addSourceField(line, nil,
-    function() return mapStatus.conf.sensorGpsLat end,
-    function(value) mapStatus.conf.sensorGpsLat = value end
-  )
-  widget.sensorGpsLatField:enable(mapStatus.conf.telemetrySourceMode == 2)
-
-  line = form.addLine("GPS Lon source")
-  widget.sensorGpsLonField = form.addSourceField(line, nil,
-    function() return mapStatus.conf.sensorGpsLon end,
-    function(value) mapStatus.conf.sensorGpsLon = value end
-  )
-  widget.sensorGpsLonField:enable(mapStatus.conf.telemetrySourceMode == 2)
-
-  line = form.addLine("Heading source (optional)")
-  widget.sensorHeadingField = form.addSourceField(line, nil,
-    function() return mapStatus.conf.sensorHeading end,
-    function(value) mapStatus.conf.sensorHeading = value end
-  )
-  widget.sensorHeadingField:enable(mapStatus.conf.telemetrySourceMode == 2)
-
-  line = form.addLine("Speed source (optional)")
-  widget.sensorSpeedField = form.addSourceField(line, nil,
-    function() return mapStatus.conf.sensorSpeed end,
-    function(value) mapStatus.conf.sensorSpeed = value end
-  )
-  widget.sensorSpeedField:enable(mapStatus.conf.telemetrySourceMode == 2)
 
   line = form.addLine("Widget version")
   form.addStaticText(line, nil, WIDGET_VERSION)
