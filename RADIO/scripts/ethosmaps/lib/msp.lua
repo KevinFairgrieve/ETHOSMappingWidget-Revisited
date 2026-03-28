@@ -285,29 +285,25 @@ end
 
 --- Send an MSP chunk as a CRSF frame (type 0x7A).
 --- Wraps the chunk with destination/origin address bytes.
---- NOTE: ETHOS CRSF sensor API field names may differ — verify on hardware.
+--- ETHOS API: sensor:pushFrame(frameType, {byte1, byte2, ...})
 local function crsfSend(chunk)
     if not sensor then return false end
     local payload = { CRSF_ADDRESS_FC, CRSF_ADDRESS_RADIO }
     for i = 1, #chunk do
         payload[i + 2] = chunk[i]
     end
-    return sensor:pushFrame({
-        frameType = CRSF_FRAMETYPE_MSP_REQ,
-        data      = payload,
-    })
+    return sensor:pushFrame(CRSF_FRAMETYPE_MSP_REQ, payload)
 end
 
 --- Poll for a CRSF MSP response frame (type 0x7B).
 --- Strips destination/origin address bytes and returns the MSP chunk.
+--- ETHOS API: sensor:popFrame() → frameType, {byte1, byte2, ...} | nil
 local function crsfPoll()
     if not sensor then return nil end
     while true do
-        local frame = sensor:popFrame()
-        if not frame then return nil end
-        local fType = frame:frameType()
+        local fType, data = sensor:popFrame()
+        if not fType then return nil end
         if fType == CRSF_FRAMETYPE_MSP_RESP then
-            local data = frame:data()
             if data and #data >= 3 then
                 -- Strip dest(1) + orig(1), return MSP chunk from status byte
                 local chunk = {}
@@ -792,8 +788,18 @@ function msp.open(opts)
 
     -- Probe CRSF (Crossfire / ELRS)
     -- Don't gate on specific RSSI source names — ELRS sources vary by setup.
-    -- Just check if the crsf API exists and returns a usable sensor.
-    if type(crsf) == "table" and type(crsf.getSensor) == "function" then
+    -- Just check if the crsf global exists and has a getSensor function.
+    local crsfAvail = false
+    if crsf then
+        local gt = type(crsf)
+        crsfAvail = (gt == "table" or gt == "userdata") and type(crsf.getSensor) == "function"
+        if not crsfAvail then
+            log("MSP", fmt("CRSF probe: crsf exists (type=%s) but no getSensor", gt))
+        end
+    else
+        log("MSP", "CRSF probe: crsf global not found")
+    end
+    if crsfAvail then
         local ok, crsfSensor = pcall(crsf.getSensor, {})
         if ok and crsfSensor then
             -- Try to bind to the correct RF module (best-effort, not required)
@@ -816,6 +822,9 @@ function msp.open(opts)
                 sensor  = crsfSensor,
                 name    = "CRSF",
             }
+        else
+            log("MSP", fmt("CRSF probe: getSensor failed: ok=%s sensor=%s",
+                tostring(ok), tostring(crsfSensor)))
         end
     end
 
