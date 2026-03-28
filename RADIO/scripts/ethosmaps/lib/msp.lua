@@ -791,16 +791,23 @@ function msp.open(opts)
     end
 
     -- Probe CRSF (Crossfire / ELRS)
-    local crsfRssi =
-        system.getSource("1RSS") or
-        system.getSource("2RSS") or
-        system.getSource("RQly") or
-        system.getSource("RSNR")
-
-    if crsfRssi and type(crsf) == "table" and type(crsf.getSensor) == "function" then
+    -- Don't gate on specific RSSI source names — ELRS sources vary by setup.
+    -- Just check if the crsf API exists and returns a usable sensor.
+    if type(crsf) == "table" and type(crsf.getSensor) == "function" then
         local ok, crsfSensor = pcall(crsf.getSensor, {})
         if ok and crsfSensor then
-            pcall(function() crsfSensor:module(crsfRssi:module()) end)
+            -- Try to bind to the correct RF module (best-effort, not required)
+            local crsfRssi =
+                system.getSource("1RSS") or
+                system.getSource("2RSS") or
+                system.getSource("RQly") or
+                system.getSource("RSNR") or
+                system.getSource("Rx RSSI1") or
+                system.getSource("Rx RSSI2") or
+                system.getSource("RSSI")
+            if crsfRssi then
+                pcall(function() crsfSensor:module(crsfRssi:module()) end)
+            end
             transportCandidates[#transportCandidates + 1] = {
                 type    = TRANSPORT_CRSF,
                 payload = CRSF_FRAME_PAYLOAD,
