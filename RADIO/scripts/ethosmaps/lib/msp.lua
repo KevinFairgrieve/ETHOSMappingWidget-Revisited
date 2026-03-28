@@ -124,7 +124,7 @@ local POST_REPLY_DELAY = 0.02     -- seconds after reply before next request
 local REQUEST_TIMEOUT  = 1.00     -- seconds before retry
 local CONNECT_TIMEOUT  = 3.00     -- seconds without reply → disconnected
 local MAX_RETRIES      = 10
-local FC_DETECT_TIMEOUT = 10.0    -- seconds to wait for FC before giving up
+local FC_DETECT_TIMEOUT = 5.0     -- seconds to wait for FC on one transport before trying next
 local RETRY_DELAY      = 5.0     -- seconds to wait before auto-retry after ERROR
 local ARM_POLL_INTERVAL = 5.0    -- seconds between arming state queries
 local NAV_STATUS_POLL_INTERVAL = 2.0  -- seconds between MSP_NAV_STATUS queries
@@ -163,6 +163,11 @@ local transportType    = TRANSPORT_NONE
 local maxFramePayload  = SPORT_FRAME_PAYLOAD
 local rawSend          = nil   -- function(chunk) -> bool
 local rawPoll          = nil   -- function() -> chunk_table or nil
+
+-- Transport fallback: list of candidate transports built during open()
+-- Each entry: { type=TRANSPORT_*, payload=int, send=fn, poll=fn, name=string }
+local transportCandidates = {}
+local transportIdx        = 0   -- index into transportCandidates (current)
 
 -- MSP transport state
 local mspSeq       = 0
@@ -711,17 +716,58 @@ end
 -- Public API
 -- ============================================================================
 
+--- Activate the transport candidate at transportCandidates[transportIdx].
+--- Sets sensor, transportType, maxFramePayload, rawSend, rawPoll.
+local function activateTransport()
+    local t = transportCandidates[transportIdx]
+    if not t then return false end
+    sensor          = t.sensor
+    transportType   = t.type
+    maxFramePayload = t.payload
+    rawSend         = t.send
+    rawPoll         = t.poll
+    log("MSP", fmt("%s transport acquired", t.name))
+    return true
+end
+
+--- Try the next transport candidate. Returns true if activated, false if exhausted.
+local function tryNextTransport()
+    transportIdx = transportIdx + 1
+    if transportIdx > #transportCandidates then
+        return false
+    end
+    -- Reset MSP protocol state for the new transport attempt
+    mspSeq       = 0
+    mspRemoteSeq = 0
+    mspTxBuf     = {}
+    mspTxIdx     = 1
+    mspRxBuf     = {}
+    mspRxError   = false
+    mspRxSize    = 0
+    mspStarted   = false
+    currentCmd   = nil
+    lastReqTime  = 0
+    lastRspTime  = 0
+    retries      = 0
+    connected    = false
+    return activateTransport()
+end
+
 --- Acquire sensor, auto-detect transport (SmartPort → CRSF), start state machine.
+--- Builds a list of available transports and tries each in order.
+--- On FC detection timeout, falls back to next transport before entering ERROR.
 --- @param opts table|nil  Optional { armingOnly = bool } to skip WP download
 function msp.open(opts)
     resetState()
     if opts and opts.armingOnly then
         armingOnly = true
     end
-    state     = STATE_CONNECTING
-    startTime = clock()
 
-    -- Try SmartPort first (FrSky ACCESS / ACCST / TD)
+    -- Build list of available transport candidates
+    transportCandidates = {}
+    transportIdx        = 0
+
+    -- Probe SmartPort (FrSky ACCESS / ACCST / TD)
     local sportRssi =
         system.getSource("RSSI") or
         system.getSource("RSSI 2.4G") or
@@ -732,18 +778,19 @@ function msp.open(opts)
     if sportRssi then
         local sportSensor = sport.getSensor({primId = 0x32})
         if sportSensor then
-            sensor          = sportSensor
-            sensor:module(sportRssi:module())
-            transportType   = TRANSPORT_SPORT
-            maxFramePayload = SPORT_FRAME_PAYLOAD
-            rawSend         = sportSend
-            rawPoll         = sportPoll
-            log("MSP", "SmartPort transport acquired")
-            return
+            sportSensor:module(sportRssi:module())
+            transportCandidates[#transportCandidates + 1] = {
+                type    = TRANSPORT_SPORT,
+                payload = SPORT_FRAME_PAYLOAD,
+                send    = sportSend,
+                poll    = sportPoll,
+                sensor  = sportSensor,
+                name    = "SmartPort",
+            }
         end
     end
 
-    -- Try CRSF (Crossfire / ELRS)  — UNTESTED, needs hardware verification
+    -- Probe CRSF (Crossfire / ELRS)
     local crsfRssi =
         system.getSource("1RSS") or
         system.getSource("2RSS") or
@@ -753,30 +800,44 @@ function msp.open(opts)
     if crsfRssi and type(crsf) == "table" and type(crsf.getSensor) == "function" then
         local ok, crsfSensor = pcall(crsf.getSensor, {})
         if ok and crsfSensor then
-            sensor          = crsfSensor
-            pcall(function() sensor:module(crsfRssi:module()) end)
-            transportType   = TRANSPORT_CRSF
-            maxFramePayload = CRSF_FRAME_PAYLOAD
-            rawSend         = crsfSend
-            rawPoll         = crsfPoll
-            log("MSP", "CRSF transport acquired")
-            return
+            pcall(function() crsfSensor:module(crsfRssi:module()) end)
+            transportCandidates[#transportCandidates + 1] = {
+                type    = TRANSPORT_CRSF,
+                payload = CRSF_FRAME_PAYLOAD,
+                send    = crsfSend,
+                poll    = crsfPoll,
+                sensor  = crsfSensor,
+                name    = "CRSF",
+            }
         end
     end
 
-    log("MSP", "No transport available (tried SmartPort and CRSF)")
-    state     = STATE_ERROR
-    errorTime = clock()
+    -- Activate first candidate
+    if #transportCandidates == 0 then
+        log("MSP", "No transport available (tried SmartPort and CRSF)")
+        state     = STATE_ERROR
+        errorTime = clock()
+        return
+    end
+
+    transportIdx = 1
+    activateTransport()
+    state     = STATE_CONNECTING
+    startTime = clock()
+    log("MSP", fmt("Trying transport %d/%d: %s",
+        transportIdx, #transportCandidates, transportCandidates[transportIdx].name))
 end
 
 --- Release sensor and reset transport state.
 function msp.close()
-    sensor          = nil
-    transportType   = TRANSPORT_NONE
-    maxFramePayload = SPORT_FRAME_PAYLOAD
-    rawSend         = nil
-    rawPoll         = nil
-    state           = STATE_OFF
+    sensor              = nil
+    transportType       = TRANSPORT_NONE
+    maxFramePayload     = SPORT_FRAME_PAYLOAD
+    rawSend             = nil
+    rawPoll             = nil
+    transportCandidates = {}
+    transportIdx        = 0
+    state               = STATE_OFF
     log("MSP", "Sensor released")
 end
 
@@ -822,30 +883,42 @@ function msp.poll()
         return
     end
 
-    -- Auto-retry after ERROR: wait RETRY_DELAY then restart
+    -- Auto-retry after ERROR: wait RETRY_DELAY then restart from first transport
     if state == STATE_ERROR then
         local now = clock()
-        if sensor and (now - errorTime) >= RETRY_DELAY then
+        if #transportCandidates > 0 and (now - errorTime) >= RETRY_DELAY then
             log("MSP", "Auto-retry after error...")
-            local savedSensor = sensor
             local savedArmingOnly = armingOnly
+            local savedCandidates = transportCandidates
             resetState()
-            sensor     = savedSensor
-            armingOnly = savedArmingOnly
-            state      = STATE_CONNECTING
-            startTime  = now
+            armingOnly          = savedArmingOnly
+            transportCandidates = savedCandidates
+            transportIdx        = 1
+            activateTransport()
+            state     = STATE_CONNECTING
+            startTime = now
+            log("MSP", fmt("Trying transport %d/%d: %s",
+                transportIdx, #transportCandidates, transportCandidates[transportIdx].name))
         end
         return
     end
 
     local now = clock()
 
-    -- FC detection timeout (only during CONNECTING phase)
+    -- FC detection timeout: try next transport, then ERROR if exhausted
     if state == STATE_CONNECTING and (now - startTime) > FC_DETECT_TIMEOUT then
-        log("MSP", fmt("No FC detected after %.0fs, retrying...", FC_DETECT_TIMEOUT))
-        state = STATE_ERROR
-        errorTime = clock()
-        currentCmd = nil
+        if tryNextTransport() then
+            log("MSP", fmt("No FC on %s after %.0fs, trying transport %d/%d: %s",
+                transportCandidates[transportIdx - 1].name, FC_DETECT_TIMEOUT,
+                transportIdx, #transportCandidates, transportCandidates[transportIdx].name))
+            startTime = now
+            currentCmd = nil
+        else
+            log("MSP", fmt("No FC detected on any transport after %.0fs each", FC_DETECT_TIMEOUT))
+            state = STATE_ERROR
+            errorTime = clock()
+            currentCmd = nil
+        end
         return
     end
 
