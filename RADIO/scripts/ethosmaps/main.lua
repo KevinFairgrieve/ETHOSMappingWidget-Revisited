@@ -590,10 +590,12 @@ local function bgtasks(widget)
     local srcLat = conf.sensorGpsLat
     local srcLon = conf.sensorGpsLon
     if srcLat ~= nil and type(srcLat.value) == "function" then
-      gpsLat = srcLat:value()
+      local ok, v = pcall(srcLat.value, srcLat)
+      if ok then gpsLat = v end
     end
     if srcLon ~= nil and type(srcLon.value) == "function" then
-      gpsLon = srcLon:value()
+      local ok, v = pcall(srcLon.value, srcLon)
+      if ok then gpsLon = v end
     end
     -- Optional heading source → telemetry.yaw (overrides calculated COG).
     local srcHdg = conf.sensorHeading
@@ -621,8 +623,14 @@ local function bgtasks(widget)
     if cachedGpsSrcLon == nil then
       cachedGpsSrcLon = system.getSource({name="GPS", options=OPTION_LONGITUDE})
     end
-    gpsLat = cachedGpsSrcLat and cachedGpsSrcLat:value() or nil
-    gpsLon = cachedGpsSrcLon and cachedGpsSrcLon:value() or nil
+    if cachedGpsSrcLat then
+      local ok, v = pcall(cachedGpsSrcLat.value, cachedGpsSrcLat)
+      if ok then gpsLat = v end
+    end
+    if cachedGpsSrcLon then
+      local ok, v = pcall(cachedGpsSrcLon.value, cachedGpsSrcLon)
+      if ok then gpsLon = v end
+    end
   end
 
   -- GPS source diagnostics (throttled to once per 10s)

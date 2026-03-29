@@ -636,41 +636,40 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
   local computeOutCode = libs.drawLib.computeOutCode
   local margin = wpR + 20  -- viewport margin for clipping
 
-  -- Pre-compute screen positions for all positioned WPs
+  -- Pre-compute screen positions and density in a single pass
   local screenPos = {}   -- indexed by mission WP index
+  local dense = false
+  local prevNavDense = nil
   for i, wp in ipairs(mission) do
     if wpHasPosition(wp.action) then
       local tx, ty, ox, oy = coordToTiles(wp.lat, wp.lon, level)
       local sx = myScreenX + (tx - uav_tile_x) * TILES_SIZE + (ox - uav_offset_x) + renderOffsetX
       local sy = myScreenY + (ty - uav_tile_y) * TILES_SIZE + (oy - uav_offset_y) + renderOffsetY
       screenPos[i] = { sx, sy }
-    end
-  end
-
-  -- Determine density: check min spacing between consecutive navigable WPs
-  local dense = false
-  local prevNav = nil
-  for i, wp in ipairs(mission) do
-    if wpIsNavigable(wp.action) and screenPos[i] then
-      if prevNav then
-        local dx = screenPos[i][1] - screenPos[prevNav][1]
-        local dy = screenPos[i][2] - screenPos[prevNav][2]
-        if (dx * dx + dy * dy) < (50 * 50) then
-          dense = true
-          break
+      if not dense and wpIsNavigable(wp.action) then
+        if prevNavDense then
+          local dx = sx - screenPos[prevNavDense][1]
+          local dy = sy - screenPos[prevNavDense][2]
+          if (dx * dx + dy * dy) < (50 * 50) then
+            dense = true
+          end
         end
+        prevNavDense = i
       end
-      prevNav = i
     end
   end
 
-  -- Pass 1: Draw path lines between navigable WPs (shortened to stop at circle edges)
+  -- Pass 1: Path lines + JUMP connections (all line work, drawn below circles)
   lcd.color(wpColorPath)
   lcd.pen(SOLID)
-  prevNav = nil
+  local prevNav = nil
   for i, wp in ipairs(mission) do
-    if wpIsNavigable(wp.action) and screenPos[i] then
-      if prevNav and screenPos[prevNav] then
+    local action = wp.action
+    local isNav = wpIsNavigable(action)
+
+    -- Path lines between consecutive navigable WPs
+    if isNav and screenPos[i] then
+      if prevNav then
         local lx1, ly1, lx2, ly2
         if dense then
           lx1, ly1 = screenPos[prevNav][1], screenPos[prevNav][2]
@@ -681,35 +680,26 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
             screenPos[i][1], screenPos[i][2], wpR)
         end
         if lx1 then
+          lcd.color(wpColorPath)
+          lcd.pen(SOLID)
           local cx1, cy1, cx2, cy2 = clipLine(lx1, ly1, lx2, ly2, x, y, x + w, y + h)
           if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
         end
       end
       prevNav = i
     end
-  end
 
-  -- Pass 1b: Draw JUMP connections (dashed yellow line from source to target WP)
-  for i, wp in ipairs(mission) do
-    if wp.action == WP_ACT_JUMP then
-      local targetIdx = wp.p1  -- 1-based WP index within this mission
-      -- Find the navigable WP just before this JUMP in the mission sequence
-      local sourceNav = nil
-      for j = i - 1, 1, -1 do
-        if wpIsNavigable(mission[j].action) and screenPos[j] then
-          sourceNav = j
-          break
-        end
-      end
-      if sourceNav and targetIdx >= 1 and targetIdx <= #mission and screenPos[targetIdx] then
+    -- JUMP connections (dashed yellow line from preceding nav WP to target)
+    if action == WP_ACT_JUMP and prevNav then
+      local targetIdx = wp.p1
+      if targetIdx >= 1 and targetIdx <= #mission and screenPos[targetIdx] and screenPos[prevNav] then
         local lx1, ly1, lx2, ly2
         if dense then
-          lx1, ly1 = screenPos[sourceNav][1], screenPos[sourceNav][2]
+          lx1, ly1 = screenPos[prevNav][1], screenPos[prevNav][2]
           lx2, ly2 = screenPos[targetIdx][1], screenPos[targetIdx][2]
         else
-          -- Shorten line to stop at circle edges
           lx1, ly1, lx2, ly2 = shortenLine(
-            screenPos[sourceNav][1], screenPos[sourceNav][2],
+            screenPos[prevNav][1], screenPos[prevNav][2],
             screenPos[targetIdx][1], screenPos[targetIdx][2], wpR)
         end
         if lx1 then
@@ -719,7 +709,6 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
           if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
           lcd.pen(SOLID)
 
-          -- Chevron arrow at midpoint showing jump direction (source → target)
           local mx = (lx1 + lx2) * 0.5
           local my = (ly1 + ly2) * 0.5
           local dx = lx2 - lx1
@@ -730,115 +719,86 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
             drawChevron(mx + dx / len * 12, my + dy / len * 12, dx / len, dy / len, 20)
           end
         end
-
-        -- Show iteration count on the source navigable WP
-        if not isPanning and not dense and screenPos[sourceNav] then
-          local ssx, ssy = screenPos[sourceNav][1], screenPos[sourceNav][2]
-          local iterCode = computeOutCode(ssx, ssy, x - margin, y - margin, x + w + margin, y + h + margin)
-          if iterCode == 0 then
-            local iterText
-            if wp.p2 == -1 then
-              iterText = "\xE2\x88\x9E"  -- UTF-8 infinity symbol ∞
-            else
-              iterText = "x" .. tostring(wp.p2)
-            end
-            lcd.font(FONT_STD)
-            lcd.color(wpColorLabel)
-            local tw, th = lcd.getTextSize(iterText)
-            local jx = ssx + wpR + 3
-            local jy = ssy - floor(th / 2)
-            lcd.drawText(jx, jy, iterText)
-          end
-        end
       end
     end
   end
 
-  -- When panning, skip heavy passes (circles, numbers, markers) for performance
+  -- When actively dragging, skip heavy passes (circles, numbers, annotations)
   if isPanning then return end
 
-  -- Pass 2: Draw WP markers (on top of lines)
-  local navNum = 0  -- sequential number for navigable WPs
+  -- Pass 2: Markers + SET_HEAD chevrons + JUMP iteration text + RTH lines
+  local navNum = 0
   local curActiveWp = status.mspActiveWp or 0
+  local lastNavIdx = nil  -- preceding navigable WP (for annotations)
+  local telemetry = status.telemetry
+  local hasHome = telemetry and telemetry.homeLat and telemetry.homeLon
   for i, wp in ipairs(mission) do
-    local isNav = wpIsNavigable(wp.action)
+    local action = wp.action
+    local isNav = wpIsNavigable(action)
     if isNav then
-      navNum = navNum + 1  -- always count navigable WPs for consistent numbering
+      navNum = navNum + 1
     end
-    if wpHasPosition(wp.action) and screenPos[i] then
+
+    -- WP marker (circle + number)
+    if wpHasPosition(action) and screenPos[i] then
       local sx, sy = screenPos[i][1], screenPos[i][2]
       local code = computeOutCode(sx, sy, x - margin, y - margin, x + w + margin, y + h + margin)
       if code == 0 then
         local isActive = curActiveWp > 0 and wp.idx == curActiveWp
-        if isNav then
-          drawWpMarker(wp, sx, sy, navNum, wpR, dense, isActive)
+        drawWpMarker(wp, sx, sy, isNav and navNum or 0, wpR, dense, isActive)
+      end
+    end
+
+    -- SET_HEAD heading chevron on the preceding navigable WP
+    if not dense and action == WP_ACT_SET_HEAD and wp.p1 >= 0 and lastNavIdx and screenPos[lastNavIdx] then
+      local nsx, nsy = screenPos[lastNavIdx][1], screenPos[lastNavIdx][2]
+      local code = computeOutCode(nsx, nsy, x - margin, y - margin, x + w + margin, y + h + margin)
+      if code == 0 then
+        local headRad = rad(wp.p1)
+        local hx = sin(headRad)
+        local hy = -cos(headRad)
+        lcd.color(wpColorLabel)
+        drawChevron(nsx + hx * (wpR + 16), nsy + hy * (wpR + 16), hx, hy, 15)
+      end
+    end
+
+    -- JUMP iteration count label on the preceding navigable WP
+    if not dense and action == WP_ACT_JUMP and lastNavIdx and screenPos[lastNavIdx] then
+      local ssx, ssy = screenPos[lastNavIdx][1], screenPos[lastNavIdx][2]
+      local iterCode = computeOutCode(ssx, ssy, x - margin, y - margin, x + w + margin, y + h + margin)
+      if iterCode == 0 then
+        local iterText
+        if wp.p2 == -1 then
+          iterText = "\xE2\x88\x9E"  -- UTF-8 infinity symbol ∞
         else
-          drawWpMarker(wp, sx, sy, 0, wpR, dense, isActive)
+          iterText = "x" .. tostring(wp.p2)
         end
+        lcd.font(FONT_STD)
+        lcd.color(wpColorLabel)
+        local tw, th = lcd.getTextSize(iterText)
+        lcd.drawText(ssx + wpR + 3, ssy - floor(th / 2), iterText)
       end
     end
-  end
 
-  -- Pass 3: Draw SET_HEAD heading chevrons on the preceding navigable WP circle
-  if not dense then
-    for i, wp in ipairs(mission) do
-      if wp.action == WP_ACT_SET_HEAD and wp.p1 >= 0 then
-        -- Find preceding navigable WP
-        local navIdx = nil
-        for j = i - 1, 1, -1 do
-          if wpIsNavigable(mission[j].action) and screenPos[j] then
-            navIdx = j
-            break
-          end
-        end
-        if navIdx then
-          local sx, sy = screenPos[navIdx][1], screenPos[navIdx][2]
-          local code = computeOutCode(sx, sy, x - margin, y - margin, x + w + margin, y + h + margin)
-          if code == 0 then
-            local headRad = rad(wp.p1)  -- p1 = heading in degrees (0=N, 90=E)
-            local hx = sin(headRad)     -- screen X component (east = right)
-            local hy = -cos(headRad)    -- screen Y component (north = up)
-            -- Place chevron tip just outside the circle
-            local tipX = sx + hx * (wpR + 16)
-            local tipY = sy + hy * (wpR + 16)
-            lcd.color(wpColorLabel)
-            drawChevron(tipX, tipY, hx, hy, 15)
-          end
-        end
+    -- RTH dashed line from preceding navigable WP to home point
+    if action == WP_ACT_RTH and lastNavIdx and screenPos[lastNavIdx] and hasHome then
+      local sx, sy = screenPos[lastNavIdx][1], screenPos[lastNavIdx][2]
+      local htx, hty, hox, hoy = coordToTiles(telemetry.homeLat, telemetry.homeLon, level)
+      local homeSx = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
+      local homeSy = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
+      local lx1, ly1, lx2, ly2 = shortenLine(sx, sy, homeSx, homeSy, wpR)
+      if lx1 then
+        lcd.color(wpColorRth)
+        lcd.pen(DOTTED)
+        local cx1, cy1, cx2, cy2 = clipLine(lx1, ly1, lx2, ly2, x, y, x + w, y + h)
+        if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
+        lcd.pen(SOLID)
       end
     end
-  end
 
-  -- Pass 4: Draw RTH dashed line from preceding navigable WP to home point
-  local telemetry = status.telemetry
-  if telemetry and telemetry.homeLat and telemetry.homeLon then
-    for i, wp in ipairs(mission) do
-      if wp.action == WP_ACT_RTH then
-        -- Find preceding navigable WP
-        local navIdx = nil
-        for j = i - 1, 1, -1 do
-          if wpIsNavigable(mission[j].action) and screenPos[j] then
-            navIdx = j
-            break
-          end
-        end
-        if navIdx then
-          local sx, sy = screenPos[navIdx][1], screenPos[navIdx][2]
-          -- Compute home screen position
-          local htx, hty, hox, hoy = coordToTiles(telemetry.homeLat, telemetry.homeLon, level)
-          local homeSx = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
-          local homeSy = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
-          -- Shorten to stop at circle edge on source side
-          local lx1, ly1, lx2, ly2 = shortenLine(sx, sy, homeSx, homeSy, wpR)
-          if lx1 then
-            lcd.color(wpColorRth)
-            lcd.pen(DOTTED)
-            local cx1, cy1, cx2, cy2 = clipLine(lx1, ly1, lx2, ly2, x, y, x + w, y + h)
-            if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
-            lcd.pen(SOLID)
-          end
-        end
-      end
+    -- Track preceding navigable WP for annotation placement
+    if isNav then
+      lastNavIdx = i
     end
   end
 
@@ -1210,8 +1170,8 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     end
   end
 
-  -- Waypoint mission overlay
-  drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY, isPanning)
+  -- Waypoint mission overlay (skip heavy rendering only during active finger drag)
+  drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY, panState == 1)
 
   -- Observation marker: green line from UAV + marker circle
   if status.observationLat ~= nil and status.observationLon ~= nil and myScreenX ~= nil and uav_tile_x ~= nil then
