@@ -761,20 +761,21 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
   local navNum = 0  -- sequential number for navigable WPs
   local curActiveWp = status.mspActiveWp or 0
   for i, wp in ipairs(mission) do
+    local isNav = wpIsNavigable(wp.action)
+    if isNav then
+      navNum = navNum + 1  -- always count navigable WPs for consistent numbering
+    end
     if wpHasPosition(wp.action) and screenPos[i] then
       local sx, sy = screenPos[i][1], screenPos[i][2]
       local code = computeOutCode(sx, sy, x - margin, y - margin, x + w + margin, y + h + margin)
       if code == 0 then
         local isActive = curActiveWp > 0 and wp.idx == curActiveWp
-        if wpIsNavigable(wp.action) then
-          navNum = navNum + 1
+        if isNav then
           drawWpMarker(wp, sx, sy, navNum, wpR, dense, isActive)
         else
           drawWpMarker(wp, sx, sy, 0, wpR, dense, isActive)
         end
       end
-    elseif wpIsNavigable(wp.action) then
-      navNum = navNum + 1  -- count even if off-screen for consistent numbering
     end
   end
 
