@@ -279,6 +279,7 @@ function utils.haversine(lat1, lon1, lat2, lon2)
   local lon_hsin  = sin(lon_dist/2)^2
 
   local a = lat_hsin + cos(lat1) * cos(lat2) * lon_hsin
+  if a < 0 then a = 0 end  -- Guard against FP rounding producing a tiny negative value.
   return 2 * 6372.8 * asin(sqrt(a)) * 1000
 end
 

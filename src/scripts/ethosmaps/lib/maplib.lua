@@ -47,6 +47,7 @@ local estimatedHomeScreenX, estimatedHomeScreenY
 local tile_x, tile_y, offset_x, offset_y
 local tiles = {}
 local tiles_path_to_idx = {} -- Maps tile file paths back to their active slot in the visible tile grid.
+local _lastCenterTileX, _lastCenterTileY, _lastCenterLevel  -- cache to skip rebuild when unchanged
 local world_tiles
 local tiles_per_radian
 local tile_dim
@@ -66,8 +67,24 @@ local trailAccumDist = 0
 local trailLastLat = nil
 local trailLastLon = nil
 local trailCachedLevel = nil  -- zoom level for which tpx/tpy are cached
+local trailReprojectNext = nil  -- next index for batched trail reproject (nil = idle)
+local TRAIL_REPROJECT_BATCH = 15  -- max trail points to reproject per paint cycle
 local trailTpx = {}           -- cached tile-pixel X per waypoint slot
 local trailTpy = {}           -- cached tile-pixel Y per waypoint slot
+
+-- Waypoint tile-pixel cache: avoids per-frame coordToTiles trig in drawWaypoints.
+-- Invalidated on zoom change or mission switch (same pattern as trail cache).
+local wpCachedLevel = nil
+local wpCachedMIdx = nil
+local wpCachedMLen = nil
+local wpTpx = {}
+local wpTpy = {}
+local wpReprojectNext = nil   -- next index for batched full-reproject (nil = idle)
+local WP_REPROJECT_BATCH = 15 -- max WPs to reproject per paint cycle
+
+-- Reusable flat arrays for waypoint screen positions (avoids per-frame table-of-tables).
+local wpScrX = {}
+local wpScrY = {}
 local homeNeedsRefresh = true
 local lastHomePosUpdate = 0   -- Initialised to 0; first check after init always triggers.
 local lastZoomLevel = -99
@@ -103,6 +120,20 @@ local DIRECTIONAL_LEAD_OFFSET_THRESHOLD = 90
 local PREFETCH_LEAD_OFFSET_THRESHOLD = 60
 local PREFETCH_STRIP_DEPTH = 1
 
+-- Pre-built octant lookup: heading octant → {leadX, leadY}.  Module-level
+-- constant so the table is not recreated on every call.
+local OCTANT_LEAD = {
+  [0] = { 0, -1 }, -- N
+  [1] = { 1, -1 }, -- NE
+  [2] = { 1,  0 }, -- E
+  [3] = { 1,  1 }, -- SE
+  [4] = { 0,  1 }, -- S
+  [5] = {-1,  1 }, -- SW
+  [6] = {-1,  0 }, -- W
+  [7] = {-1, -1 }, -- NW
+}
+local OCTANT_LEAD_ZERO = { 0, 0 }
+
 local function getDirectionalLeadFromHeading(heading)
   if DIRECTIONAL_LEAD_TILES <= 0 then
     return 0, 0
@@ -115,18 +146,7 @@ local function getDirectionalLeadFromHeading(heading)
 
   local normalizedHeading = heading % 360
   local octant = floor((normalizedHeading + 22.5) / 45) % 8
-  local octantLead = {
-    [0] = { 0, -1 }, -- N
-    [1] = { 1, -1 }, -- NE
-    [2] = { 1,  0 }, -- E
-    [3] = { 1,  1 }, -- SE
-    [4] = { 0,  1 }, -- S
-    [5] = {-1,  1 }, -- SW
-    [6] = {-1,  0 }, -- W
-    [7] = {-1, -1 }, -- NW
-  }
-
-  local lead = octantLead[octant] or { 0, 0 }
+  local lead = OCTANT_LEAD[octant] or OCTANT_LEAD_ZERO
   return lead[1] * DIRECTIONAL_LEAD_TILES, lead[2] * DIRECTIONAL_LEAD_TILES
 end
 
@@ -316,21 +336,26 @@ function mapLib.loadAndCenterTiles(tile_x, tile_y, offset_x, offset_y, width, le
   local tilesChanged = false
   local removedCacheEntries = 0
 
-  libs.resetLib.clearTable(tiles_path_to_idx)
-
   local halfX = floor(TILES_X / 2 + 0.5)
   local halfY = floor(TILES_Y / 2 + 0.5)
 
-  for x=1,TILES_X do
-    for y=1,TILES_Y do
-      local tile_path = mapLib.tiles_to_path(centerTileX + x - halfX, centerTileY + y - halfY, level)
-      local idx = width*(y-1)+x
-
-      tiles_path_to_idx[tile_path] = { idx, x, y }
-
-      if tiles[idx] ~= tile_path then
-        tiles[idx] = tile_path
-        tilesChanged = true
+  -- Only rebuild tiles_path_to_idx when the center tile or zoom level changed.
+  local centerMoved = (centerTileX ~= _lastCenterTileX or centerTileY ~= _lastCenterTileY or level ~= _lastCenterLevel)
+  if centerMoved then
+    _lastCenterTileX = centerTileX
+    _lastCenterTileY = centerTileY
+    _lastCenterLevel = level
+    libs.resetLib.clearTable(tiles_path_to_idx)
+    for x=1,TILES_X do
+      for y=1,TILES_Y do
+        local tile_path = mapLib.tiles_to_path(centerTileX + x - halfX, centerTileY + y - halfY, level)
+        local idx = width*(y-1)+x
+        -- Pack idx/x/y into one number: avoids 24 table allocations per rebuild.
+        tiles_path_to_idx[tile_path] = idx * 10000 + x * 100 + y
+        if tiles[idx] ~= tile_path then
+          tiles[idx] = tile_path
+          tilesChanged = true
+        end
       end
     end
   end
@@ -443,10 +468,13 @@ end
 function mapLib.getScreenCoordinates(minX, minY, tile_x, tile_y, offset_x, offset_y, level)
   -- Resolves tile-local coordinates back into screen coordinates using the current visible tile cache.
   local tile_path = mapLib.tiles_to_path(tile_x, tile_y, level)
-  local tcache = tiles_path_to_idx[tile_path]
-  if tcache ~= nil then
-    if tiles[tcache[1]] ~= nil then
-      return minX + (tcache[2]-1)*TILES_SIZE + offset_x, minY + (tcache[3]-1)*TILES_SIZE + offset_y
+  local packed = tiles_path_to_idx[tile_path]
+  if packed ~= nil then
+    local idx = floor(packed * 0.0001)
+    if tiles[idx] ~= nil then
+      local cx = floor((packed % 10000) * 0.01)
+      local cy = packed % 100
+      return minX + (cx-1)*TILES_SIZE + offset_x, minY + (cy-1)*TILES_SIZE + offset_y
     end
   end
   return status.widgetWidth / 2, -10
@@ -475,7 +503,9 @@ local wpColorJump    = nil  -- light yellow for JUMP dashed lines
 local wpColorRth     = nil  -- green dashed line for RTH
 local wpColorActive  = nil  -- green ring for active WP
 local wpColorUavRth  = nil  -- orange for UAV in RTH mode
+local wpColorShadow  = nil  -- translucent black for marker shadow fill
 local wpColorsReady  = false
+local WP_DENSE_THRESHOLD = 25 -- auto-dense mode when mission has more WPs than this
 
 local function ensureWpColors()
   if wpColorsReady then return end
@@ -488,6 +518,7 @@ local function ensureWpColors()
   wpColorRth     = lcd.RGB(0, 255, 43)    -- neon green (same as path)
   wpColorActive  = lcd.RGB(0, 255, 43)    -- neon green for active WP ring
   wpColorUavRth  = lcd.RGB(255, 165, 0)   -- orange for UAV in RTH mode
+  wpColorShadow  = lcd.RGB(0, 0, 0, 0.4)  -- translucent black shadow fill
   wpColorsReady  = true
 end
 
@@ -554,14 +585,13 @@ local function drawWpMarker(wp, sx, sy, wpNum, r, dense, isActive)
   end
 
   -- Shadow fill (alpha 0.4) first, then contrast ring on top
-  lcd.color(lcd.RGB(0, 0, 0, 0.4))
+  lcd.color(wpColorShadow)
   lcd.drawFilledCircle(sx, sy, r - 2)
   lcd.color(isActive and wpColorActive or wpColorRingIn)
   lcd.drawCircle(sx, sy, r - 2)
   lcd.drawCircle(sx, sy, r - 3)
 
-  -- WP type-specific decoration
-  lcd.font(FONT_STD)
+  -- WP type-specific decoration (lcd.font set once before Pass 2 loop)
   lcd.color(wpColorLabel)
   if action == WP_ACT_POSHOLD_TIME then
     -- Seconds from p1 above the circle
@@ -636,21 +666,110 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
   local computeOutCode = libs.drawLib.computeOutCode
   local margin = wpR + 20  -- viewport margin for clipping
 
-  -- Pre-compute screen positions and density in a single pass
-  local screenPos = {}   -- indexed by mission WP index
+  -- Reproject waypoint tile-pixel cache.
+  -- Full reproject is spread across multiple frames (WP_REPROJECT_BATCH per cycle)
+  -- to stay within the ETHOS instruction budget on large missions.
+  -- Incremental path handles progressive download (1 new WP per frame).
+  local mLen = #mission
+  local reprojectActive = false
+  if wpCachedLevel ~= level or wpCachedMIdx ~= mIdx then
+    -- Full reproject needed — start or continue batched reproject
+    if not wpReprojectNext or wpCachedLevel ~= level or wpCachedMIdx ~= mIdx then
+      -- New reproject request (zoom or mission changed)
+      wpReprojectNext = 1
+      wpCachedLevel = level
+      wpCachedMIdx = mIdx
+    end
+    local batchEnd = min(wpReprojectNext + WP_REPROJECT_BATCH - 1, mLen)
+    for i = wpReprojectNext, batchEnd do
+      local wp = mission[i]
+      if wpHasPosition(wp.action) then
+        local tx, ty, ox, oy = coordToTiles(wp.lat, wp.lon, level)
+        wpTpx[i] = tx * TILES_SIZE + ox
+        wpTpy[i] = ty * TILES_SIZE + oy
+      else
+        wpTpx[i] = nil
+        wpTpy[i] = nil
+      end
+    end
+    if batchEnd >= mLen then
+      -- Reproject complete
+      wpReprojectNext = nil
+      wpCachedMLen = mLen
+    else
+      -- More batches needed — skip drawing this frame
+      wpReprojectNext = batchEnd + 1
+      reprojectActive = true
+    end
+  elseif wpReprojectNext then
+    -- Continue a previously-started batched reproject (e.g. mission grew while reprojecting)
+    local batchEnd = min(wpReprojectNext + WP_REPROJECT_BATCH - 1, mLen)
+    for i = wpReprojectNext, batchEnd do
+      local wp = mission[i]
+      if wp and wpHasPosition(wp.action) then
+        local tx, ty, ox, oy = coordToTiles(wp.lat, wp.lon, level)
+        wpTpx[i] = tx * TILES_SIZE + ox
+        wpTpy[i] = ty * TILES_SIZE + oy
+      else
+        wpTpx[i] = nil
+        wpTpy[i] = nil
+      end
+    end
+    if batchEnd >= mLen then
+      wpReprojectNext = nil
+      wpCachedMLen = mLen
+    else
+      wpReprojectNext = batchEnd + 1
+      reprojectActive = true
+    end
+  elseif mLen > (wpCachedMLen or 0) then
+    -- Incremental: only project newly-added WPs (download in progress)
+    for i = (wpCachedMLen or 0) + 1, mLen do
+      local wp = mission[i]
+      if wp and wpHasPosition(wp.action) then
+        local tx, ty, ox, oy = coordToTiles(wp.lat, wp.lon, level)
+        wpTpx[i] = tx * TILES_SIZE + ox
+        wpTpy[i] = ty * TILES_SIZE + oy
+      else
+        wpTpx[i] = nil
+        wpTpy[i] = nil
+      end
+    end
+    wpCachedMLen = mLen
+  end
+
+  -- While a batched reproject is still in progress, skip WP rendering
+  -- (mixed old/new projections would look wrong). Completes in 2-3 frames.
+  if reprojectActive then return end
+
+  -- Pass 0: Compute screen positions and determine dense mode.
+  -- Dense mode (proximity + auto-dense) is resolved BEFORE any line drawing so
+  -- that the WP1→WP2 segment isn't accidentally shortened when a later pair
+  -- triggers the density threshold.
+  local baseX = myScreenX - uav_tile_x * TILES_SIZE - uav_offset_x + renderOffsetX
+  local baseY = myScreenY - uav_tile_y * TILES_SIZE - uav_offset_y + renderOffsetY
+  local scrX = wpScrX
+  local scrY = wpScrY
   local dense = false
+  local visibleNavCount = 0
   local prevNavDense = nil
-  for i, wp in ipairs(mission) do
-    if wpHasPosition(wp.action) then
-      local tx, ty, ox, oy = coordToTiles(wp.lat, wp.lon, level)
-      local sx = myScreenX + (tx - uav_tile_x) * TILES_SIZE + (ox - uav_offset_x) + renderOffsetX
-      local sy = myScreenY + (ty - uav_tile_y) * TILES_SIZE + (oy - uav_offset_y) + renderOffsetY
-      screenPos[i] = { sx, sy }
-      if not dense and wpIsNavigable(wp.action) then
+  for i = 1, mLen do
+    if wpTpx[i] then
+      scrX[i] = baseX + wpTpx[i]
+      scrY[i] = baseY + wpTpy[i]
+    else
+      scrX[i] = nil
+      scrY[i] = nil
+    end
+    if scrX[i] and wpIsNavigable(mission[i].action) then
+      if scrX[i] >= x and scrX[i] <= x + w and scrY[i] >= y and scrY[i] <= y + h then
+        visibleNavCount = visibleNavCount + 1
+      end
+      if not dense then
         if prevNavDense then
-          local dx = sx - screenPos[prevNavDense][1]
-          local dy = sy - screenPos[prevNavDense][2]
-          if (dx * dx + dy * dy) < (50 * 50) then
+          local dx = scrX[i] - scrX[prevNavDense]
+          local dy = scrY[i] - scrY[prevNavDense]
+          if (dx * dx + dy * dy) < 2500 then
             dense = true
           end
         end
@@ -658,26 +777,35 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
       end
     end
   end
+  -- Clear stale entries beyond current mission length.
+  for i = mLen + 1, #scrX do scrX[i] = nil end
+  for i = mLen + 1, #scrY do scrY[i] = nil end
 
-  -- Pass 1: Path lines + JUMP connections (all line work, drawn below circles)
+  -- Auto-dense: force dot-mode when too many WPs are visible in viewport
+  if not dense and visibleNavCount > WP_DENSE_THRESHOLD then
+    dense = true
+  end
+
+  -- Pass 1: Draw path lines + JUMP connections using pre-determined dense.
+  local prevNav = nil
   lcd.color(wpColorPath)
   lcd.pen(SOLID)
-  local prevNav = nil
-  for i, wp in ipairs(mission) do
+  for i = 1, mLen do
+    local wp = mission[i]
     local action = wp.action
     local isNav = wpIsNavigable(action)
 
     -- Path lines between consecutive navigable WPs
-    if isNav and screenPos[i] then
-      if prevNav then
+    if isNav and scrX[i] then
+      if prevNav and scrX[prevNav] then
         local lx1, ly1, lx2, ly2
         if dense then
-          lx1, ly1 = screenPos[prevNav][1], screenPos[prevNav][2]
-          lx2, ly2 = screenPos[i][1], screenPos[i][2]
+          lx1, ly1 = scrX[prevNav], scrY[prevNav]
+          lx2, ly2 = scrX[i], scrY[i]
         else
           lx1, ly1, lx2, ly2 = shortenLine(
-            screenPos[prevNav][1], screenPos[prevNav][2],
-            screenPos[i][1], screenPos[i][2], wpR)
+            scrX[prevNav], scrY[prevNav],
+            scrX[i], scrY[i], wpR)
         end
         if lx1 then
           lcd.color(wpColorPath)
@@ -692,15 +820,15 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
     -- JUMP connections (dashed yellow line from preceding nav WP to target)
     if action == WP_ACT_JUMP and prevNav then
       local targetIdx = wp.p1
-      if targetIdx >= 1 and targetIdx <= #mission and screenPos[targetIdx] and screenPos[prevNav] then
+      if targetIdx >= 1 and targetIdx <= mLen and scrX[targetIdx] and scrX[prevNav] then
         local lx1, ly1, lx2, ly2
         if dense then
-          lx1, ly1 = screenPos[prevNav][1], screenPos[prevNav][2]
-          lx2, ly2 = screenPos[targetIdx][1], screenPos[targetIdx][2]
+          lx1, ly1 = scrX[prevNav], scrY[prevNav]
+          lx2, ly2 = scrX[targetIdx], scrY[targetIdx]
         else
           lx1, ly1, lx2, ly2 = shortenLine(
-            screenPos[prevNav][1], screenPos[prevNav][2],
-            screenPos[targetIdx][1], screenPos[targetIdx][2], wpR)
+            scrX[prevNav], scrY[prevNav],
+            scrX[targetIdx], scrY[targetIdx], wpR)
         end
         if lx1 then
           lcd.color(wpColorJump)
@@ -727,12 +855,14 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
   if isPanning then return end
 
   -- Pass 2: Markers + SET_HEAD chevrons + JUMP iteration text + RTH lines
+  lcd.font(FONT_STD)  -- set once for all markers (not per-marker)
   local navNum = 0
   local curActiveWp = status.mspActiveWp or 0
   local lastNavIdx = nil  -- preceding navigable WP (for annotations)
   local telemetry = status.telemetry
   local hasHome = telemetry and telemetry.homeLat and telemetry.homeLon
-  for i, wp in ipairs(mission) do
+  for i = 1, mLen do
+    local wp = mission[i]
     local action = wp.action
     local isNav = wpIsNavigable(action)
     if isNav then
@@ -740,8 +870,8 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
     end
 
     -- WP marker (circle + number)
-    if wpHasPosition(action) and screenPos[i] then
-      local sx, sy = screenPos[i][1], screenPos[i][2]
+    if wpHasPosition(action) and scrX[i] then
+      local sx, sy = scrX[i], scrY[i]
       local code = computeOutCode(sx, sy, x - margin, y - margin, x + w + margin, y + h + margin)
       if code == 0 then
         local isActive = curActiveWp > 0 and wp.idx == curActiveWp
@@ -750,8 +880,8 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
     end
 
     -- SET_HEAD heading chevron on the preceding navigable WP
-    if not dense and action == WP_ACT_SET_HEAD and wp.p1 >= 0 and lastNavIdx and screenPos[lastNavIdx] then
-      local nsx, nsy = screenPos[lastNavIdx][1], screenPos[lastNavIdx][2]
+    if not dense and action == WP_ACT_SET_HEAD and wp.p1 >= 0 and lastNavIdx and scrX[lastNavIdx] then
+      local nsx, nsy = scrX[lastNavIdx], scrY[lastNavIdx]
       local code = computeOutCode(nsx, nsy, x - margin, y - margin, x + w + margin, y + h + margin)
       if code == 0 then
         local headRad = rad(wp.p1)
@@ -763,8 +893,8 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
     end
 
     -- JUMP iteration count label on the preceding navigable WP
-    if not dense and action == WP_ACT_JUMP and lastNavIdx and screenPos[lastNavIdx] then
-      local ssx, ssy = screenPos[lastNavIdx][1], screenPos[lastNavIdx][2]
+    if not dense and action == WP_ACT_JUMP and lastNavIdx and scrX[lastNavIdx] then
+      local ssx, ssy = scrX[lastNavIdx], scrY[lastNavIdx]
       local iterCode = computeOutCode(ssx, ssy, x - margin, y - margin, x + w + margin, y + h + margin)
       if iterCode == 0 then
         local iterText
@@ -781,8 +911,8 @@ local function drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offs
     end
 
     -- RTH dashed line from preceding navigable WP to home point
-    if action == WP_ACT_RTH and lastNavIdx and screenPos[lastNavIdx] and hasHome then
-      local sx, sy = screenPos[lastNavIdx][1], screenPos[lastNavIdx][2]
+    if action == WP_ACT_RTH and lastNavIdx and scrX[lastNavIdx] and hasHome then
+      local sx, sy = scrX[lastNavIdx], scrY[lastNavIdx]
       local htx, hty, hox, hoy = coordToTiles(telemetry.homeLat, telemetry.homeLon, level)
       local homeSx = myScreenX + (htx - uav_tile_x) * TILES_SIZE + (hox - uav_offset_x) + renderOffsetX
       local homeSy = myScreenY + (hty - uav_tile_y) * TILES_SIZE + (hoy - uav_offset_y) + renderOffsetY
@@ -1118,10 +1248,15 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
     local baseX = myScreenX - uav_tile_x * TILES_SIZE - uav_offset_x + renderOffsetX
     local baseY = myScreenY - uav_tile_y * TILES_SIZE - uav_offset_y + renderOffsetY
 
-    -- Reproject trail waypoints only when zoom level changes (expensive trig).
+    -- Reproject trail waypoints: batched across frames to stay within instruction budget.
     if trailCachedLevel ~= level then
+      if not trailReprojectNext then
+        trailReprojectNext = 1
+        trailCachedLevel = level
+      end
       local coordToTiles = mapLib.coord_to_tiles
-      for i = 1, trailWpCount do
+      local batchEnd = min(trailReprojectNext + TRAIL_REPROJECT_BATCH - 1, trailWpCount)
+      for i = trailReprojectNext, batchEnd do
         local slot
         if trailWpCount < TRAIL_MAX_WAYPOINTS then
           slot = i
@@ -1133,7 +1268,35 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
         trailTpx[slot] = tx * TILES_SIZE + ox
         trailTpy[slot] = ty * TILES_SIZE + oy
       end
-      trailCachedLevel = level
+      if batchEnd >= trailWpCount then
+        trailReprojectNext = nil  -- done
+      else
+        trailReprojectNext = batchEnd + 1
+        -- Skip trail drawing this frame (mixed projections)
+        goto trailDrawDone
+      end
+    elseif trailReprojectNext then
+      -- Continue batched reproject from previous frame
+      local coordToTiles = mapLib.coord_to_tiles
+      local batchEnd = min(trailReprojectNext + TRAIL_REPROJECT_BATCH - 1, trailWpCount)
+      for i = trailReprojectNext, batchEnd do
+        local slot
+        if trailWpCount < TRAIL_MAX_WAYPOINTS then
+          slot = i
+        else
+          slot = ((trailHead + i - 1) % TRAIL_MAX_WAYPOINTS) + 1
+        end
+        local wp = trailWaypoints[slot]
+        local tx, ty, ox, oy = coordToTiles(wp[1], wp[2], level)
+        trailTpx[slot] = tx * TILES_SIZE + ox
+        trailTpy[slot] = ty * TILES_SIZE + oy
+      end
+      if batchEnd >= trailWpCount then
+        trailReprojectNext = nil
+      else
+        trailReprojectNext = batchEnd + 1
+        goto trailDrawDone
+      end
     end
 
     -- Iterate ring-buffer in insertion order (oldest to newest).
@@ -1169,6 +1332,7 @@ function mapLib.drawMap(widget, x, y, w, h, level, tiles_x, tiles_y, heading, al
       if cx1 then lcd.drawLine(cx1, cy1, cx2, cy2) end
     end
   end
+  ::trailDrawDone::
 
   -- Waypoint mission overlay (skip heavy rendering only during active finger drag)
   drawWaypoints(x, y, w, h, level, uav_tile_x, uav_tile_y, uav_offset_x, uav_offset_y, renderOffsetX, renderOffsetY, panState == 1)
@@ -1257,6 +1421,8 @@ function setupMaps(x, y, w, h, level, tiles_x, tiles_y)
   local mapType = (status and status.conf and status.conf.mapType) or ""
   if level ~= lastZoomLevel or provider ~= lastMapProvider or mapType ~= lastMapType or lastZoomLevel == -99 then
     libs.resetLib.clearTable(tiles)
+    libs.resetLib.clearTable(tiles_path_to_idx)
+    _lastCenterTileX = nil  -- force rebuild on next loadAndCenterTiles
     libs.tileLoader.clearCache()
 
     world_tiles = mapLib.tiles_on_level(level)
@@ -1284,6 +1450,16 @@ function mapLib.clearTrail()
   trailLastLat = nil
   trailLastLon = nil
   trailCachedLevel = nil
+  trailReprojectNext = nil
+  -- Also invalidate waypoint tile-pixel cache.
+  libs.resetLib.clearTable(wpTpx)
+  libs.resetLib.clearTable(wpTpy)
+  libs.resetLib.clearTable(wpScrX)
+  libs.resetLib.clearTable(wpScrY)
+  wpCachedLevel = nil
+  wpCachedMIdx = nil
+  wpCachedMLen = nil
+  wpReprojectNext = nil
 end
 
 function mapLib.init(param_status, param_libs)

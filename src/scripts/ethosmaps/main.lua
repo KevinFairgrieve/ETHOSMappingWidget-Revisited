@@ -221,8 +221,6 @@ local mapStatus = {
     avgTravelDist = 0,
     avgTravelTime = 0,
     travelDist = 0,
-    prevLat = nil,
-    prevLon = nil,
     value = 0,
   },
 

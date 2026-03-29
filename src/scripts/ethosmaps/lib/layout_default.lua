@@ -45,6 +45,11 @@ local _lastHdgVal, _cachedHdgStr = nil, ""
 local _lastTravVal, _cachedTravStr = nil, ""
 local _lastHDistVal, _cachedHDistStr = nil, ""
 
+-- Bar height cache: avoids 8 lcd.font/lcd.getTextSize calls per frame for static values.
+local _barHeightCacheKey = nil
+local _cachedTopH = 0
+local _cachedBottomH = 0
+
 local function getBarSnapshot()
   local barTickSerial = status.barTickSerial or 0
 
@@ -148,23 +153,34 @@ function panel.draw(widget)
     topH = 0
     bottomH = 0
   else
-    local topValueFont = verticalMedium and FONT_S or FONT_L
-    local topLabelFont = FONT_XS
-    lcd.font(topValueFont)
-    local _, topValueH = lcd.getTextSize("TX 99.9V")
-    lcd.font(topLabelFont)
-    local _, topLabelH = lcd.getTextSize("SRC")
-    local topContentH = max(topValueH, topLabelH)
-    topH = max(floor(26 * sy), topContentH + floor(8 * sy))
+    -- Cache bar heights: only recompute when verticalMedium or scaleY changes.
+    local barKey = (verticalMedium and 1 or 0) * 10000 + floor(sy * 1000)
+    if _barHeightCacheKey == barKey then
+      topH = _cachedTopH
+      bottomH = _cachedBottomH
+    else
+      local topValueFont = verticalMedium and FONT_S or FONT_L
+      local topLabelFont = FONT_XS
+      lcd.font(topValueFont)
+      local _, topValueH = lcd.getTextSize("TX 99.9V")
+      lcd.font(topLabelFont)
+      local _, topLabelH = lcd.getTextSize("SRC")
+      local topContentH = max(topValueH, topLabelH)
+      topH = max(floor(26 * sy), topContentH + floor(8 * sy))
 
-    local bottomValueFont = verticalMedium and FONT_S or FONT_L
-    local bottomMetaFont = FONT_XS
-    lcd.font(bottomValueFont)
-    local _, bottomValueH = lcd.getTextSize("999.9")
-    lcd.font(bottomMetaFont)
-    local _, bottomMetaH = lcd.getTextSize("km/h")
-    local bottomContentH = max(bottomValueH, bottomMetaH)
-    bottomH = max(floor(46 * sy), bottomContentH + floor(12 * sy))
+      local bottomValueFont = verticalMedium and FONT_S or FONT_L
+      local bottomMetaFont = FONT_XS
+      lcd.font(bottomValueFont)
+      local _, bottomValueH = lcd.getTextSize("999.9")
+      lcd.font(bottomMetaFont)
+      local _, bottomMetaH = lcd.getTextSize("km/h")
+      local bottomContentH = max(bottomValueH, bottomMetaH)
+      bottomH = max(floor(46 * sy), bottomContentH + floor(12 * sy))
+
+      _cachedTopH = topH
+      _cachedBottomH = bottomH
+      _barHeightCacheKey = barKey
+    end
   end
   local mapY    = topH
   local mapH    = h - topH - bottomH
@@ -409,28 +425,30 @@ function panel.draw(widget)
     end
   end
 
-  -- Edge arrows: drawn after all overlays so they are always on top
+  -- Edge arrows: drawn after all overlays so they are always on top.
+  -- Black outline is drawn first (larger), colored fill second (smaller, on top)
+  -- so that both colors are always clearly visible.
   local edgeMargin = floor(33 * min(sx, sy))
   local edgeArrowR = floor(30 * min(sx, sy))
   local vcx = floor(w / 2)
   local vcy = mapY + floor(mapH / 2)
 
-  -- UAV out-of-view edge arrow (red/black)
+  -- UAV out-of-view edge arrow (black outline + red fill)
   if status.uavEdgeDrawX ~= nil then
     local eX = max(edgeMargin, min(status.uavEdgeDrawX, w - edgeMargin))
     local eY = max(mapY + edgeMargin, min(status.uavEdgeDrawY, mapY + mapH - edgeMargin))
     local angle = _deg(_atan2(status.uavEdgeDrawX - vcx, -(status.uavEdgeDrawY - vcy)))
-    libs.drawLib.drawRArrow(eX, eY, edgeArrowR - 2, angle, colors.red)
     libs.drawLib.drawRArrow(eX, eY, edgeArrowR, angle, colors.black)
+    libs.drawLib.drawRArrow(eX, eY, edgeArrowR - 5, angle, colors.red)
   end
 
-  -- Home out-of-view edge arrow (yellow/black)
+  -- Home out-of-view edge arrow (black outline + yellow fill)
   if status.homeEdgeDrawX ~= nil then
     local eX = max(edgeMargin, min(status.homeEdgeDrawX, w - edgeMargin))
     local eY = max(mapY + edgeMargin, min(status.homeEdgeDrawY, mapY + mapH - edgeMargin))
     local angle = _deg(_atan2(status.homeEdgeDrawX - vcx, -(status.homeEdgeDrawY - vcy)))
-    libs.drawLib.drawRArrow(eX, eY, edgeArrowR - 2, angle, colors.yellow)
     libs.drawLib.drawRArrow(eX, eY, edgeArrowR, angle, colors.black)
+    libs.drawLib.drawRArrow(eX, eY, edgeArrowR - 5, angle, colors.yellow)
   end
 
 end

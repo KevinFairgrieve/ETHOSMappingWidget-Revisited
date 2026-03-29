@@ -41,6 +41,12 @@ local _sensorNames = {}
 local _candidateFonts_medium = nil  -- lazily filled on first use (FONT constants must be available)
 local _candidateFonts_full   = nil
 
+-- Cached system sources for drawTopBar (system.getSource is expensive; these never change).
+local _cachedTxVoltSrc = nil
+
+-- Font selection cache: skip expensive font-fitting loop when inputs haven't changed.
+local _topBarFontCacheKey = nil
+
 -- Pre-computed angle offsets for drawRArrow (constants, never change).
 local ARROW_ANG_150  = rad(150)
 local ARROW_ANG_N150 = rad(-150)
@@ -52,6 +58,7 @@ local ROTOR_ARM_135 = rad(135)
 local ROTOR_ARM_225 = rad(225)
 local ROTOR_ARM_315 = rad(315)
 local HALF_PI = math.pi / 2
+local _multirotorShadowColor = nil  -- cached lcd.RGB(0,0,0,0.4) for rotor disc shadow
 
 -- Per-tick cache for safeSensorName to avoid redundant pcall overhead.
 local _sensorNameCache = {}
@@ -115,8 +122,16 @@ local function safeSensorValueText(sensor)
   end
 
   if topBarValueCacheCount >= TOP_BAR_CACHE_MAX then
-    topBarValueCache = {}
-    topBarValueCacheCount = 0
+    -- Evict stale entries instead of nuking the entire cache to avoid flicker.
+    local freshCount = 0
+    for k, v in pairs(topBarValueCache) do
+      if v.tickSerial ~= barTickSerial then
+        topBarValueCache[k] = nil
+      else
+        freshCount = freshCount + 1
+      end
+    end
+    topBarValueCacheCount = freshCount
   end
   topBarValueCache[cacheKey] = {
     tickSerial = barTickSerial,
@@ -222,11 +237,14 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   local sensorEntries = _sensorEntries
   local sensorCount = 0
 
-  -- Slot 1: TX voltage (always present).
+  -- Slot 1: TX voltage (always present; source cached to avoid per-frame getSource overhead).
+  if _cachedTxVoltSrc == nil then
+    _cachedTxVoltSrc = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0})
+  end
   sensorCount = sensorCount + 1
   local e1 = sensorEntries[sensorCount]
-  if e1 then e1.sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}); e1.label = "TX"
-  else sensorEntries[sensorCount] = { sensor = system.getSource({category=CATEGORY_SYSTEM, member=MAIN_VOLTAGE, options=0}), label = "TX" } end
+  if e1 then e1.sensor = _cachedTxVoltSrc; e1.label = "TX"
+  else sensorEntries[sensorCount] = { sensor = _cachedTxVoltSrc, label = "TX" } end
 
   -- Slot 2: link quality (always present).
   sensorCount = sensorCount + 1
@@ -272,7 +290,13 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
   local selectedFont = candidateFonts[#candidateFonts]
   local selectedUsedWidth = 0
   local selectedAvailableWidth = 0
-  for i = 1, #candidateFonts do
+
+  -- Cache key: skip the expensive font-fitting loop when layout inputs haven't changed.
+  local fontCacheKey = w * 100 + sensorCount * 10 + (verticalMedium and 1 or 0)
+  if _topBarFontCacheKey == fontCacheKey and topBarUnifiedFont ~= nil then
+    selectedFont = topBarUnifiedFont
+  else
+    for i = 1, #candidateFonts do
     local candidateFont = candidateFonts[i]
 
     local minTelemetryX = 6 * sx
@@ -309,6 +333,8 @@ function drawLib.drawTopBar(widget, barTop, barHeight)
     end
   end
   topBarUnifiedFont = selectedFont
+  _topBarFontCacheKey = fontCacheKey
+  end -- font cache miss
 
   local minTelemetryX = 6 * sx
 
@@ -380,11 +406,13 @@ function drawLib.drawRArrow(x,y,r,angle,color)
   lcd.drawLine(x3,y3,x4,y4)
 end
 
-function drawLib.drawRAirplane(x, y, r, angle, color)
+function drawLib.drawRAirplane(x, y, r, angle, color, cb, sb)
   -- Draws a rotated flying-wing silhouette with rear propeller stub.
-  -- Coordinates as (forward, lateral) offsets, positive = forward / left.
-  local baseRad = rad(angle - 90)
-  local cb, sb = cos(baseRad), sin(baseRad)
+  -- Accepts optional pre-computed cos/sin of (angle-90) to avoid redundant trig.
+  if cb == nil then
+    local baseRad = rad(angle - 90)
+    cb, sb = cos(baseRad), sin(baseRad)
+  end
 
   -- Nose tip (shorter fuselage — wingspan wider than length)
   local nx = x + r * 0.70 * cb
@@ -469,7 +497,10 @@ function drawLib.drawRMultirotor(x,y,r,angle,fillColor)
   lcd.drawLine(ax2 + p2x, ay2 + p2y, ax4 + p2x, ay4 + p2y)
 
   -- Rotor circles: black shadow fill (alpha 0.4) + fillColor ring on top
-  lcd.color(lcd.RGB(0, 0, 0, 0.4))
+  if not _multirotorShadowColor then
+    _multirotorShadowColor = lcd.RGB(0, 0, 0, 0.4)
+  end
+  lcd.color(_multirotorShadowColor)
   lcd.drawFilledCircle(ax1, ay1, rotorR - 1)
   lcd.drawFilledCircle(ax2, ay2, rotorR - 1)
   lcd.drawFilledCircle(ax3, ay3, rotorR - 1)
@@ -529,9 +560,11 @@ function drawLib.drawVehicle(x, y, r, heading, symbolType, fillColor)
   -- fillColor overrides the inner (white) color when provided (e.g. green for NAV, orange for RTH).
   fillColor = fillColor or WHITE
   if symbolType == 2 then
-    local hr = rad(heading - 90)
-    drawLib.drawRAirplane(x + cos(hr), y + sin(hr), r - 3, heading, fillColor)
-    drawLib.drawRAirplane(x, y, r, heading, BLACK)
+    -- Airplane: compute base trig once and share between fill + outline layers.
+    local baseRad = rad(heading - 90)
+    local cb, sb = cos(baseRad), sin(baseRad)
+    drawLib.drawRAirplane(x + cb, y + sb, r - 3, heading, fillColor, cb, sb)
+    drawLib.drawRAirplane(x, y, r, heading, BLACK, cb, sb)
   elseif symbolType == 3 then
     drawLib.drawRMultirotor(x, y, r, heading, fillColor)
   else
