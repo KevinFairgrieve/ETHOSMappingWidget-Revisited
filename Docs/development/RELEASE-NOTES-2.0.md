@@ -58,11 +58,9 @@ Set a **default map position** via the context menu (long press → Set Default 
 ### Performance Improvements
 Extensive optimization work since 1.0:
 - Embedded Lua performance optimizations (3-tier approach)
-- Cached `lcd.RGB` colors — removed 14 per-frame calls
 - Hot-path caching in draw/map/tile libraries
-- Bitmap GC-timing fix preventing ETHOS OOM at ~831KB
+- Bitmap GC-timing fix preventing ETHOS OOM error
 - Async tile loading architecture with full-speed map redraw
-- WP drawing optimized from 5 to 2 rendering passes
 
 ### Comprehensive Documentation
 This release includes a full set of user manuals — available both in the repository and linked from the README:
@@ -94,18 +92,6 @@ See the [Migration Guide](Docs/manuals/MigrationGuide.md) for full details.
 4. Add the **ETHOS Maps** widget to any screen
 
 Full instructions: [Installation Guide](Docs/manuals/Installation.md)
-
-## Bug Fixes
-- Fixed scale bar not shown for ESRI and OSM map providers
-- Fixed sensor fallback: heading/speed correctly fall back to calculated values
-- Fixed GPS 0,0 guard preventing false trail line at startup
-- Fixed memory leaks: GPS source caching, topBarValueCache bounded
-- Fixed waypoint numbering for off-screen waypoints
-- Fixed CRSF GPS nil safety (no more crashes from nil lat/lon)
-- Fixed unlock-mode markers not showing in detached panning mode
-- Fixed CRSF pushFrame/popFrame API compatibility
-- Fixed provider-switch tile cache bug
-- Improved MSP reliability with auto-retry and timeout handling
 
 ## Compatibility
 - **Radios**: All FrSky radios running ETHOS 1.6+ (TANDEM, TWIN, Horus series)
