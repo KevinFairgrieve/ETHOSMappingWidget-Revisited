@@ -10,7 +10,7 @@ The widget can automatically download and display INAV waypoint missions from yo
 - SmartPort (FrSky ACCESS / ACCST / TD) **or** CRSF (Crossfire / ELRS) telemetry link
 - "Waypoint download (INAV)" enabled in widget settings (default: on)
 
-> **Note**: SmartPort is fully tested. CRSF/ELRS support is experimental.
+> **Note**: SmartPort is fully tested. CRSF/ELRS support is experimental. Please report Issues in GH Tickets.
 
 ## How It Works
 
