@@ -45,9 +45,13 @@ Recommended format: **JPG** for all radios. Existing Yaapu tiles (Google, GMapCa
 |----------|-------------|
 | [Installation Guide](Docs/manuals/Installation.md) | Setup, folder structure, map tiles, updates |
 | [Overview](Docs/manuals/Overview.md) | User interface, all settings, context menu |
+| [Map Tiles Guide](Docs/manuals/MapTilesGuide.md) | Providers, formats, folder structure, Yaapu fallback |
 | [Panning & Marker](Docs/manuals/PanningAndMarker.md) | Map panning, observation marker, detached mode |
 | [Waypoint Missions](Docs/manuals/WaypointMission.md) | INAV MSP waypoint overlay |
 | [Custom Layouts](Docs/manuals/CustomLayouts.md) | Split-screen and custom widget sizes |
+| [Troubleshooting](Docs/manuals/Troubleshooting.md) | Common problems and solutions |
+| [Migration Guide](Docs/manuals/MigrationGuide.md) | Upgrading from 1.x to 2.0 |
+| [Changelog](Docs/development/CHANGELOG.md) | Version history with all notable changes |
 
 ## Credits
 
