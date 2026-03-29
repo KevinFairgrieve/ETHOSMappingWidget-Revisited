@@ -33,7 +33,7 @@ with strict naming:
 
 ### Who Needs to Migrate
 
-Only users who had tiles in a **custom non-standard layout** that was neither Yaapu nor the native EthosMaps format. If you downloaded tiles with the recommended downloader tool, no changes are needed.
+Only users who had tiles in a **custom non-standard layout** that was neither Yaapu nor the native EthosMaps format (1.0-beta). If you downloaded tiles with the recommended downloader tool, no changes are needed.
 
 ### Migration Steps (if needed)
 
@@ -61,16 +61,14 @@ Widget settings are stored under a versioned key. When upgrading from 1.x to 2.0
 
 Settings are preserved between minor releases (e.g. 2.0 → 2.1).
 
-## MSP Stack Changes
+## MSP Stack
 
-The MSP waypoint download system was completely rewritten in 2.0:
+The MSP waypoint download system was newly implemented in 2.0:
 
-- **Native MSP V1/V2 protocol** support (previously Yaapu-derived)
+- **Native MSP V1/V2 protocol** support
 - **Dual transport**: SmartPort and CRSF/ELRS with automatic fallback
 - **Auto-retry** on connection loss (5-second intervals)
 - **INAV FC detection** with version validation
-
-If you were using waypoint download in 1.x, it should work transparently in 2.0 with improved reliability.
 
 ## New Features in 2.0
 
@@ -78,9 +76,7 @@ Features added since 1.0 that are available after upgrading:
 
 - CRSF/ELRS transport for MSP waypoint download
 - Active waypoint tracking with nav-mode coloring
-- Improved waypoint rendering (heading arrows, RTH paths, jump indicators)
 - BMP tile support
-- Flight trail with configurable resolution and bend threshold
 - Touch panning with observation marker (fullscreen)
 - Multiple vehicle symbol styles (Arrow, Airplane, Multirotor)
 - Edge arrows when UAV or home is off-screen

@@ -12,7 +12,7 @@ Common problems and their solutions. If your issue is not listed here, check the
 |-------|----------|
 | No GPS sensor connected to the flight controller | Connect a GPS module and verify it reports a fix in the FC configurator |
 | Telemetry link not active | Ensure the receiver is bound and telemetry is flowing (check ETHOS telemetry screen) |
-| ETHOS does not see the GPS source | Go to **System → Telemetry → Sensors** and verify that a GPS sensor is listed |
+| ETHOS does not see the GPS source | Go to **Model → Telemetry → Sensors** and verify that a GPS sensor is listed |
 | Sensor mode misconfigured | In widget settings, ensure **Telemetry source** is set to `ETHOS` (default). The `Sensors` mode is a debug feature for custom source assignment |
 
 > The widget reads GPS data via ETHOS's built-in `GPS` source. If no GPS source exists in the system, the widget will show this overlay indefinitely.
@@ -39,10 +39,10 @@ Common problems and their solutions. If your issue is not listed here, check the
 
 This is **normal** before arming. The home position is set automatically when:
 
-- The flight controller arms (detected via MSP), or
+- The flight controller arms (detected via MSP, INAV only), or
 - You manually set it via **long press → Set Home**
 
-If the warning persists after arming, check that the FC is reporting arming status via telemetry.
+If the warning persists after arming, check that the FC is reporting arming status via MSP and that your RC Link supports MSP-Passthrough.
 
 ---
 
@@ -96,8 +96,8 @@ Touch panning is only available in **fullscreen** mode. In split-screen or small
 | Setting disabled | Enable **Waypoint download (INAV)** in widget settings |
 | No INAV FC detected | The MSP stack probes SmartPort first, then CRSF/ELRS. If neither responds within 5 seconds each, the widget enters ERROR state and retries after 5 seconds. Ensure your FC is connected and telemetry is bidirectional |
 | Unsupported FC | Only **INAV** flight controllers support MSP waypoint download. Betaflight, ArduPilot, etc. are not supported |
-| No mission on FC | Upload a waypoint mission to the FC via INAV Configurator before the flight |
-| SmartPort passthrough not enabled | For SmartPort transport, ensure MSP passthrough is enabled in the FC's serial port configuration |
+| No mission on FC | Upload a waypoint mission to the FC via INAV Configurator before the flight and make sure its active (in RAM) |
+| SmartPort passthrough not available | For SmartPort transport, ensure MSP passthrough is supported by your RC Link (SmartPort/FrSky, Crossfire, ELRS) and Telemetry is enabled in the FC's serial port and feature configuration |
 
 Check the **debug log** (enable in widget settings) for detailed MSP state transitions and error messages.
 
