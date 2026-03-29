@@ -10,11 +10,21 @@
 --   CRSF:      [ETHOS Lua] → crsf sensor → [CRSF MSP Passthrough]
 --              → [ELRS/TBS Rx] → [FC UART] → [INAV MSP Handler]
 --
--- Supports MSPv1 (commands < 256) and MSPv2-over-V1 encapsulation
--- (cmd=0xFF wrapper) for future 16-bit command IDs.
+-- MSP version selection:
+--   Commands ≤ 254 → MSPv1 chunks (version bits 01, works on all INAV versions)
+--   Commands > 254 → native MSPv2 chunks (version bits 10, requires INAV ≥ 9.0)
+--
+-- CRC handling:
+--   V1 over SmartPort: XOR checksum appended to final chunk
+--   V1 over CRSF:      no MSP CRC (CRSF frame CRC provides integrity)
+--   V2 over any:        no chunk CRC (DVB-S2 CRC is embedded in V2 payload)
 --
 -- Transport auto-detection: tries SmartPort first, then CRSF.
--- CRSF support is UNTESTED — needs verification on ELRS/TBS hardware.
+-- Falls back to next transport after FC_DETECT_TIMEOUT on each.
+--
+-- ETHOS Lua API references:
+--   SmartPort: pushFrame({table}) / popFrame() → SPortFrame object  (Since 1.1.0)
+--   CRSF:      pushFrame(command, data) / popFrame() → command, data (Since 1.4.0/1.6.0)
 --
 -- Usage from widget:
 --   libs.msp.open()      — acquire sensor + auto-detect transport
@@ -32,7 +42,7 @@ local status = nil
 local libs   = nil
 
 -- ============================================================================
--- Bitwise helpers  (ETHOS Lua 5.4 — no bit32)
+-- Bitwise helpers  (ETHOS Lua 5.4 — native operators, no bit32)
 -- ============================================================================
 local function band(a, b)   return a & b end
 local function bor(a, b)    return a | b end
@@ -45,7 +55,7 @@ local char  = string.char
 local clock = os.clock
 
 -- ============================================================================
--- CRC8 DVB-S2  (for MSPv2)
+-- CRC8 DVB-S2  (for MSPv2 payload integrity)
 -- ============================================================================
 local function crc8_dvb_s2(crc, byte)
     crc = bxor(crc, byte)
@@ -63,8 +73,8 @@ end
 -- ============================================================================
 -- MSP command IDs
 -- ============================================================================
-local MSP_V2_FRAME_ID = 255     -- MSPv1 cmd for V2-over-V1 encapsulation
 local MSP_FC_VARIANT  = 2       -- 4-char FC identifier ("INAV")
+local MSP_FC_VERSION  = 3       -- uint8 major + uint8 minor + uint8 patch
 local MSP_STATUS      = 101     -- cycleTime + i2cErr + sensors + flightModeFlags + profile
 local MSP_WP_GETINFO  = 20      -- reserved(1)+maxWP(1)+valid(1)+count(1)
 local MSP_WP          = 118     -- get single WP by index
@@ -91,12 +101,8 @@ local REPLY_FRAME_ID   = 0x32
 local SP_REMOTE_ID     = 0x1B
 local FP_REMOTE_ID     = 0x00
 
--- MSP-over-SmartPort framing
-local MSP_VERSION_BITS = lshift(1, 5)   -- V1 in status byte bits 5-6
-local MSP_STARTFLAG    = lshift(1, 4)
-
 -- ============================================================================
--- CRSF transport constants  (UNTESTED — needs hardware verification)
+-- CRSF transport constants
 -- ============================================================================
 local CRSF_FRAMETYPE_MSP_REQ  = 0x7A  -- MSP request  (Radio → FC via Rx)
 local CRSF_FRAMETYPE_MSP_RESP = 0x7B  -- MSP response (FC → Radio via Rx)
@@ -113,9 +119,13 @@ local TRANSPORT_CRSF  = 2
 -- Max bytes per transport chunk (status byte + MSP body):
 --   SmartPort: 6 (2 dataId + 4 value, all repurposed as MSP chunk)
 --   CRSF:     58 (64 max frame - sync - framelen - type - dest - orig - CRC)
---             → 1 status byte + up to 57 MSP body bytes per CRSF frame
 local SPORT_FRAME_PAYLOAD = 6
 local CRSF_FRAME_PAYLOAD  = 58
+
+-- MSP chunk status byte fields
+local MSP_VERSION_V1  = 0x20     -- bits 5-6 = 01  (MSPv1)
+local MSP_VERSION_V2  = 0x40     -- bits 5-6 = 10  (MSPv2)
+local MSP_STARTFLAG   = 0x10     -- bit 4 = start of message
 
 -- ============================================================================
 -- Timing
@@ -134,14 +144,16 @@ local NAV_STATUS_POLL_INTERVAL = 2.0  -- seconds between MSP_NAV_STATUS queries
 -- ============================================================================
 local STATE_OFF         = 0  -- MSP disabled / not started
 local STATE_CONNECTING  = 1  -- Identifying FC (MSP_FC_VARIANT)
-local STATE_GET_WP_INFO = 2  -- Requesting waypoint count
-local STATE_DOWNLOADING = 3  -- Downloading individual waypoints
-local STATE_DONE        = 4  -- Download complete
-local STATE_ERROR       = 5  -- Unrecoverable error
+local STATE_GET_VERSION = 2  -- Querying FC firmware version (MSP_FC_VERSION)
+local STATE_GET_WP_INFO = 3  -- Requesting waypoint count
+local STATE_DOWNLOADING = 4  -- Downloading individual waypoints
+local STATE_DONE        = 5  -- Download complete
+local STATE_ERROR       = 6  -- Unrecoverable error
 
 -- Expose state constants for external code
 msp.STATE_OFF         = STATE_OFF
 msp.STATE_CONNECTING  = STATE_CONNECTING
+msp.STATE_GET_VERSION = STATE_GET_VERSION
 msp.STATE_GET_WP_INFO = STATE_GET_WP_INFO
 msp.STATE_DOWNLOADING = STATE_DOWNLOADING
 msp.STATE_DONE        = STATE_DONE
@@ -175,21 +187,25 @@ local mspRemoteSeq = 0
 local mspTxBuf     = {}
 local mspTxIdx     = 1
 local mspTxCRC     = 0
+local mspTxVersion = 1    -- MSP version of current outgoing message (1 or 2)
 local mspRxBuf     = {}
 local mspRxError   = false
 local mspRxSize    = 0
 local mspRxCRC     = 0
 local mspRxReq     = 0
+local mspRxVersion = 1    -- MSP version of current incoming message
 local mspStarted   = false
 local mspLastReq   = 0
-local mspRealCmd   = 0   -- actual command (for V2 unwrapping)
 
--- Duplicate-frame filter
+-- Duplicate-frame filter (SmartPort only)
 local prevSensorId, prevFrameId, prevDataId, prevValue
 
 -- Application state
 local state        = STATE_OFF
 local fcVariant    = nil
+local fcVersionMajor = 0
+local fcVersionMinor = 0
+local fcVersionPatch = 0
 local connected    = false
 local currentCmd   = nil
 local lastReqTime  = 0
@@ -280,12 +296,13 @@ local function sportPoll()
 end
 
 -- ============================================================================
--- CRSF send / receive   (UNTESTED — needs hardware verification)
+-- CRSF send / receive
+-- ETHOS API: pushFrame(command, data) since 1.4.0
+--            popFrame([filterMin, filterMax]) → command, data since 1.6.0
 -- ============================================================================
 
 --- Send an MSP chunk as a CRSF frame (type 0x7A).
 --- Wraps the chunk with destination/origin address bytes.
---- ETHOS API: sensor:pushFrame(frameType, {byte1, byte2, ...})
 local function crsfSend(chunk)
     if not sensor then return false end
     local payload = { CRSF_ADDRESS_FC, CRSF_ADDRESS_RADIO }
@@ -297,33 +314,34 @@ end
 
 --- Poll for a CRSF MSP response frame (type 0x7B).
 --- Strips destination/origin address bytes and returns the MSP chunk.
---- ETHOS API: sensor:popFrame() → frameType, {byte1, byte2, ...} | nil
 local function crsfPoll()
     if not sensor then return nil end
     while true do
-        local fType, data = sensor:popFrame()
+        local fType, data = sensor:popFrame(CRSF_FRAMETYPE_MSP_RESP, CRSF_FRAMETYPE_MSP_RESP)
         if not fType then return nil end
-        if fType == CRSF_FRAMETYPE_MSP_RESP then
-            if data and #data >= 3 then
-                -- Strip dest(1) + orig(1), return MSP chunk from status byte
-                local chunk = {}
-                for i = 3, #data do
-                    chunk[#chunk + 1] = data[i]
-                end
-                return chunk
+        if data and #data >= 3 then
+            -- Strip dest(1) + orig(1), return MSP chunk from status byte onward
+            local chunk = {}
+            for i = 3, #data do
+                chunk[#chunk + 1] = data[i]
             end
+            return chunk
         end
     end
 end
 
 -- ============================================================================
--- MSP framing  (shared chunking for SmartPort and CRSF)
+-- MSP chunk TX  (shared chunking for SmartPort and CRSF, version-aware)
 -- ============================================================================
 
+--- Continue transmitting the current mspTxBuf as transport-sized chunks.
+--- Version bits in the status byte are set according to mspTxVersion.
+--- XOR CRC is appended only for V1 over SmartPort.
 local function mspProcessTxQ()
     if #mspTxBuf == 0 then return false end
+    local versionBits = mspTxVersion == 2 and MSP_VERSION_V2 or MSP_VERSION_V1
     local frame = {}
-    frame[1] = mspSeq + MSP_VERSION_BITS
+    frame[1] = mspSeq + versionBits
     mspSeq = band(mspSeq + 1, 0x0F)
     if mspTxIdx == 1 then
         frame[1] = frame[1] + MSP_STARTFLAG
@@ -332,16 +350,20 @@ local function mspProcessTxQ()
     while i <= maxFramePayload and mspTxIdx <= #mspTxBuf do
         frame[i] = mspTxBuf[mspTxIdx]
         mspTxIdx = mspTxIdx + 1
-        mspTxCRC = bxor(mspTxCRC, frame[i])
+        -- Accumulate XOR CRC for V1 SmartPort only
+        if mspTxVersion == 1 then
+            mspTxCRC = bxor(mspTxCRC, frame[i])
+        end
         i = i + 1
     end
     if i <= maxFramePayload then
-        -- SmartPort: append MSP CRC + pad to fixed 6-byte frame
-        -- CRSF: NO MSP CRC (protected by CRSF frame CRC per spec)
-        if transportType ~= TRANSPORT_CRSF then
+        -- Final chunk
+        -- V1 SmartPort: append XOR CRC byte
+        if mspTxVersion == 1 and transportType == TRANSPORT_SPORT then
             frame[i] = mspTxCRC
             i = i + 1
         end
+        -- SmartPort: zero-pad to fixed 6-byte frame
         if transportType == TRANSPORT_SPORT then
             while i <= maxFramePayload do frame[i] = 0; i = i + 1 end
         end
@@ -355,79 +377,110 @@ local function mspProcessTxQ()
     return true
 end
 
---- Queue a plain MSPv1 request (cmd < 256).
+-- ============================================================================
+-- MSP request building  (V1 and native V2, auto-selected by command ID)
+-- ============================================================================
+
+--- Queue an MSP request. Auto-selects V1 (cmd ≤ 254) or native V2 (cmd > 254).
+---
+--- V1 TX buffer layout: [size(1), cmd(1), payload...]
+--- V2 TX buffer layout: [flag(1), cmd_lo(1), cmd_hi(1), size_lo(1), size_hi(1), payload..., crc8(1)]
 local function mspSendRequest(cmd, payload)
     if #mspTxBuf ~= 0 then return nil end
     payload = payload or {}
-    mspTxBuf[1] = #payload
-    mspTxBuf[2] = band(cmd, 0xFF)
-    for i = 1, #payload do
-        mspTxBuf[i + 2] = band(payload[i], 0xFF)
+
+    if cmd > 254 then
+        -- ── Native MSPv2 (requires INAV ≥ 9.0 for telemetry transport) ──
+        mspTxVersion = 2
+        local flag   = 0
+        local cmdLo  = band(cmd, 0xFF)
+        local cmdHi  = band(rshift(cmd, 8), 0xFF)
+        local sizeLo = band(#payload, 0xFF)
+        local sizeHi = band(rshift(#payload, 8), 0xFF)
+
+        -- DVB-S2 CRC over flag + cmd + size + payload
+        local crc = 0
+        crc = crc8_dvb_s2(crc, flag)
+        crc = crc8_dvb_s2(crc, cmdLo)
+        crc = crc8_dvb_s2(crc, cmdHi)
+        crc = crc8_dvb_s2(crc, sizeLo)
+        crc = crc8_dvb_s2(crc, sizeHi)
+        for i = 1, #payload do
+            crc = crc8_dvb_s2(crc, band(payload[i], 0xFF))
+        end
+
+        local idx = 1
+        mspTxBuf[idx] = flag;   idx = idx + 1
+        mspTxBuf[idx] = cmdLo;  idx = idx + 1
+        mspTxBuf[idx] = cmdHi;  idx = idx + 1
+        mspTxBuf[idx] = sizeLo; idx = idx + 1
+        mspTxBuf[idx] = sizeHi; idx = idx + 1
+        for i = 1, #payload do
+            mspTxBuf[idx] = band(payload[i], 0xFF)
+            idx = idx + 1
+        end
+        mspTxBuf[idx] = crc
+    else
+        -- ── MSPv1 (works on all INAV versions) ──
+        mspTxVersion = 1
+        mspTxBuf[1] = #payload
+        mspTxBuf[2] = band(cmd, 0xFF)
+        for i = 1, #payload do
+            mspTxBuf[i + 2] = band(payload[i], 0xFF)
+        end
     end
+
     mspLastReq = cmd
-    mspRealCmd = cmd
     return mspProcessTxQ()
 end
 
---- Queue an MSPv2-over-V1 request (any cmd, 16-bit).
-local function mspSendRequestV2(cmd, payload)
-    if #mspTxBuf ~= 0 then return nil end
-    payload = payload or {}
-    local flag   = 0
-    local cmdLo  = band(cmd, 0xFF)
-    local cmdHi  = band(rshift(cmd, 8), 0xFF)
-    local sizeLo = band(#payload, 0xFF)
-    local sizeHi = band(rshift(#payload, 8), 0xFF)
+-- ============================================================================
+-- MSP chunk RX  (version-aware reassembly)
+-- ============================================================================
 
-    local crc = 0
-    crc = crc8_dvb_s2(crc, flag)
-    crc = crc8_dvb_s2(crc, cmdLo)
-    crc = crc8_dvb_s2(crc, cmdHi)
-    crc = crc8_dvb_s2(crc, sizeLo)
-    crc = crc8_dvb_s2(crc, sizeHi)
-    for i = 1, #payload do
-        crc = crc8_dvb_s2(crc, band(payload[i], 0xFF))
-    end
-
-    local v2Len = 5 + #payload + 1
-    mspTxBuf[1] = v2Len
-    mspTxBuf[2] = MSP_V2_FRAME_ID
-    local idx = 3
-    mspTxBuf[idx] = flag;    idx = idx + 1
-    mspTxBuf[idx] = cmdLo;   idx = idx + 1
-    mspTxBuf[idx] = cmdHi;   idx = idx + 1
-    mspTxBuf[idx] = sizeLo;  idx = idx + 1
-    mspTxBuf[idx] = sizeHi;  idx = idx + 1
-    for i = 1, #payload do
-        mspTxBuf[idx] = band(payload[i], 0xFF)
-        idx = idx + 1
-    end
-    mspTxBuf[idx] = crc
-
-    mspLastReq = MSP_V2_FRAME_ID
-    mspRealCmd = cmd
-    return mspProcessTxQ()
-end
-
---- Process a single received SmartPort frame as MSP reply fragment.
+--- Process a single received transport chunk as MSP reply fragment.
+--- Handles V0 (legacy), V1, and V2 header formats.
+---
+--- V1 start: [status | size(1) | cmd(1) | payload...]
+--- V2 start: [status | flag(1) | cmd_lo(1) | cmd_hi(1) | size_lo(1) | size_hi(1) | payload...]
 local function mspReceivedReply(frame)
     local idx    = 1
     local st     = frame[idx]
-    local ver    = rshift(band(st, 0x60), 5)
+    local ver    = rshift(band(st, 0x60), 5)   -- 0=V0, 1=V1, 2=V2
     local start  = btest(st, 0x10)
     local seq    = band(st, 0x0F)
     idx = idx + 1
+
     if start then
-        mspRxBuf   = {}
-        mspRxError = btest(st, 0x80)
-        mspRxSize  = frame[idx]
-        mspRxReq   = mspLastReq
-        idx = idx + 1
-        if ver == 1 then
-            mspRxReq = frame[idx]
-            idx = idx + 1
+        mspRxBuf     = {}
+        mspRxError   = btest(st, 0x80)
+        mspRxVersion = ver
+
+        if ver == 2 then
+            -- V2 header: flag(1) + cmd(2) + size(2) = 5 bytes
+            local flag   = frame[idx]; idx = idx + 1
+            local cmdLo  = frame[idx]; idx = idx + 1
+            local cmdHi  = frame[idx]; idx = idx + 1
+            local sizeLo = frame[idx]; idx = idx + 1
+            local sizeHi = frame[idx]; idx = idx + 1
+            mspRxReq  = cmdLo + lshift(cmdHi, 8)
+            mspRxSize = sizeLo + lshift(sizeHi, 8)
+        else
+            -- V1/V0 header: size(1) [+ cmd(1) for V1]
+            mspRxSize = frame[idx]; idx = idx + 1
+            if ver == 1 then
+                mspRxReq = frame[idx]; idx = idx + 1
+            else
+                mspRxReq = mspLastReq   -- V0: cmd not in response
+            end
         end
-        mspRxCRC = bxor(mspRxSize, mspRxReq)
+
+        -- V1 XOR CRC seed (for SmartPort verification)
+        mspRxCRC = 0
+        if ver == 1 then
+            mspRxCRC = bxor(mspRxSize, mspRxReq)
+        end
+
         if mspRxReq == mspLastReq then
             mspStarted = true
         else
@@ -440,65 +493,43 @@ local function mspReceivedReply(frame)
         mspStarted = false
         return nil
     end
+
+    -- Collect payload bytes
     local frameLen = #frame
     while idx <= frameLen and #mspRxBuf < mspRxSize do
         mspRxBuf[#mspRxBuf + 1] = frame[idx]
-        mspRxCRC = bxor(mspRxCRC, frame[idx])
+        if mspRxVersion == 1 then
+            mspRxCRC = bxor(mspRxCRC, frame[idx])
+        end
         idx = idx + 1
     end
-    -- CRSF: no MSP CRC in frame (protected by CRSF frame CRC per spec)
-    -- Response is complete once all mspRxSize bytes are collected.
-    if transportType == TRANSPORT_CRSF then
-        if #mspRxBuf >= mspRxSize then
+
+    -- Check completeness
+    if #mspRxBuf >= mspRxSize then
+        -- V2 or CRSF: no chunk-level MSP CRC — done immediately
+        if mspRxVersion == 2 or transportType == TRANSPORT_CRSF then
             mspStarted = false
             return true
         end
-        mspRemoteSeq = seq
-        return false
-    end
-    -- SmartPort: expect MSP CRC byte after payload
-    if idx > frameLen then
-        mspRemoteSeq = seq
-        return false
-    end
-    mspStarted = false
-    if ver == 0 and mspRxCRC ~= frame[idx] then
-        return nil
-    end
-    return true
-end
-
---- Unwrap MSPv2-over-V1 response.
-local function unwrapV2Response(cmd, buf)
-    if cmd ~= MSP_V2_FRAME_ID then
-        return cmd, buf, false
-    end
-    if #buf < 6 then
-        return mspRealCmd, {}, true
-    end
-    local v2Cmd  = buf[2] + lshift(buf[3], 8)
-    local v2Size = buf[4] + lshift(buf[5], 8)
-
-    local crc = 0
-    for i = 1, 5 + v2Size do
-        if buf[i] then
-            crc = crc8_dvb_s2(crc, buf[i])
+        -- V0/V1 over SmartPort: expect XOR CRC byte following payload
+        if idx > frameLen then
+            mspRemoteSeq = seq
+            return false   -- CRC byte will arrive in next chunk
         end
-    end
-    local expectedCrc = buf[6 + v2Size]
-    if expectedCrc and crc ~= expectedCrc then
-        return v2Cmd, {}, true
+        mspStarted = false
+        -- V0: validate XOR CRC  (V1: CRC present but not validated, matching reference impls)
+        if ver == 0 and mspRxCRC ~= frame[idx] then
+            return nil
+        end
+        return true
     end
 
-    local inner = {}
-    for i = 6, 5 + v2Size do
-        inner[#inner + 1] = buf[i]
-    end
-    return v2Cmd, inner, false
+    mspRemoteSeq = seq
+    return false
 end
 
 --- Poll for a complete MSP reply.
---- Drains ALL available transport frames so multi-frame responses
+--- Drains all available transport frames so multi-frame responses
 --- are assembled in a single wakeup cycle.
 local function mspPollReply()
     if not rawPoll then return nil end
@@ -508,11 +539,7 @@ local function mspPollReply()
         local result = mspReceivedReply(frame)
         if result then
             mspLastReq = 0
-            local cmd, buf, err = mspRxReq, mspRxBuf, mspRxError
-            if cmd == MSP_V2_FRAME_ID then
-                cmd, buf, err = unwrapV2Response(cmd, buf)
-            end
-            return cmd, buf, err
+            return mspRxReq, mspRxBuf, mspRxError
         end
     end
 end
@@ -596,16 +623,26 @@ local function handleFcVariant(buf)
         fcVariant = char(buf[1], buf[2], buf[3], buf[4])
         log("MSP", fmt("FC variant: %s", fcVariant))
         if fcVariant == "INAV" then
-            if armingOnly then
-                state = STATE_DONE
-                log("MSP", "Arming-only mode — skipping WP download")
-            else
-                state = STATE_GET_WP_INFO
-            end
+            state = STATE_GET_VERSION
         else
             log("MSP", fmt("Unsupported FC: %s (need INAV)", fcVariant))
             state = STATE_ERROR
             errorTime = clock()
+        end
+    end
+end
+
+local function handleFcVersion(buf)
+    if #buf >= 3 then
+        fcVersionMajor = buf[1]
+        fcVersionMinor = buf[2]
+        fcVersionPatch = buf[3]
+        log("MSP", fmt("FC version: %d.%d.%d", fcVersionMajor, fcVersionMinor, fcVersionPatch))
+        if armingOnly then
+            state = STATE_DONE
+            log("MSP", "Arming-only mode — skipping WP download")
+        else
+            state = STATE_GET_WP_INFO
         end
     end
 end
@@ -669,21 +706,25 @@ local function resetState()
     mspTxBuf     = {}
     mspTxIdx     = 1
     mspTxCRC     = 0
+    mspTxVersion = 1
     mspRxBuf     = {}
     mspRxError   = false
     mspRxSize    = 0
     mspRxCRC     = 0
     mspRxReq     = 0
+    mspRxVersion = 1
     mspStarted   = false
     mspLastReq   = 0
-    mspRealCmd   = 0
 
     prevSensorId = nil
     prevFrameId  = nil
     prevDataId   = nil
     prevValue    = nil
 
-    fcVariant    = nil
+    fcVariant      = nil
+    fcVersionMajor = 0
+    fcVersionMinor = 0
+    fcVersionPatch = 0
     connected    = false
     currentCmd   = nil
     lastReqTime  = 0
@@ -737,9 +778,12 @@ local function tryNextTransport()
     mspRemoteSeq = 0
     mspTxBuf     = {}
     mspTxIdx     = 1
+    mspTxCRC     = 0
+    mspTxVersion = 1
     mspRxBuf     = {}
     mspRxError   = false
     mspRxSize    = 0
+    mspRxVersion = 1
     mspStarted   = false
     currentCmd   = nil
     lastReqTime  = 0
@@ -954,6 +998,8 @@ function msp.poll()
         else
             if cmd == MSP_FC_VARIANT then
                 handleFcVariant(buf)
+            elseif cmd == MSP_FC_VERSION then
+                handleFcVersion(buf)
             elseif cmd == MSP_WP_GETINFO then
                 handleWpGetInfo(buf)
             elseif cmd == MSP_WP then
@@ -972,6 +1018,10 @@ function msp.poll()
         if state == STATE_CONNECTING then
             mspSendRequest(MSP_FC_VARIANT, {})
             currentCmd  = MSP_FC_VARIANT
+            lastReqTime = now
+        elseif state == STATE_GET_VERSION then
+            mspSendRequest(MSP_FC_VERSION, {})
+            currentCmd  = MSP_FC_VERSION
             lastReqTime = now
         elseif state == STATE_GET_WP_INFO then
             mspSendRequest(MSP_WP_GETINFO, {})
@@ -1002,12 +1052,14 @@ function msp.poll()
 end
 
 --- Return current state snapshot for external consumers.
---- @return table { state, fcVariant, connected, wpCount, wpValid, wpList, wpNextIdx }
 local TRANSPORT_NAMES = { [0]="NONE", "SPORT", "CRSF" }
 function msp.getState()
     return {
         state      = state,
         fcVariant  = fcVariant,
+        fcVersion  = fcVersionMajor > 0
+                       and fmt("%d.%d.%d", fcVersionMajor, fcVersionMinor, fcVersionPatch)
+                       or nil,
         connected  = connected,
         wpCount    = wpCount,
         wpValid    = wpValid,

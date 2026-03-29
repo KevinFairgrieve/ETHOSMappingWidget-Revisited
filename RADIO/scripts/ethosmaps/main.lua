@@ -1351,10 +1351,11 @@ local function wakeup(widget)
       local now = getTime()
       if not mapStatus._mspLastStatusLog or (now - mapStatus._mspLastStatusLog) > 100 then
         mapStatus._mspLastStatusLog = now
-        local stateNames = { [0]="OFF", "CONNECTING", "GET_WP_INFO", "DOWNLOADING", "DONE", "ERROR" }
-        mapLibs.utils.logDebug("MSP_DBG", fmt("state=%s fc=%s transport=%s wpCount=%d done=%s active=%s missions=%d published=%s",
+        local stateNames = { [0]="OFF", "CONNECTING", "GET_VERSION", "GET_WP_INFO", "DOWNLOADING", "DONE", "ERROR" }
+        mapLibs.utils.logDebug("MSP_DBG", fmt("state=%s fc=%s(%s) transport=%s wpCount=%d done=%s active=%s missions=%d published=%s",
             stateNames[mspState.state] or tostring(mspState.state),
             tostring(mspState.fcVariant),
+            mspState.fcVersion or "?",
             mspState.transport or "?",
             mspState.wpCount or 0,
             tostring(mapLibs.msp.isDone()),
