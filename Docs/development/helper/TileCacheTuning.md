@@ -1,5 +1,7 @@
 # Tile Cache Tuning (Field Manual)
 
+> **Version**: 1.0+ — The tile cache system has been present since the initial 1.0 release. Parameters and behavior remain unchanged in 2.0.
+
 This file describes the currently relevant cache parameters for map rendering, so we can run fast and reproducible per-user field tests.
 
 ## Purpose
@@ -32,10 +34,9 @@ In `layout_default.lua`:
 - `MAP_TILE_BUFFER_X = 1`
 - `MAP_TILE_BUFFER_Y = 1`
 - Formula:
-  - `mapTilesX = max(MIN, ceil(viewportWidth/100) + MAP_TILE_BUFFER_X)`
-  - `mapTilesY = max(MIN, ceil(viewportHeight/100) + MAP_TILE_BUFFER_Y)`
-
-Note: The effective height depends on which `viewportHeight` is passed into `drawMap(...)`.
+  - `mapTilesX = max(MAP_MIN_TILES_X, ceil(w / MAP_TILE_SIZE) + MAP_TILE_BUFFER_X)`
+  - `mapTilesY = max(MAP_MIN_TILES_Y, ceil(h / MAP_TILE_SIZE) + MAP_TILE_BUFFER_Y)`
+  - Where `MAP_MIN_TILES_X = 3`, `MAP_MIN_TILES_Y = 3`, `MAP_TILE_SIZE = 100`, `w`/`h` = viewport dimensions
 
 ### Cache Keep-Window
 

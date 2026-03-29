@@ -1,5 +1,7 @@
 # Map Panning & Observation Marker
 
+> **Version**: 2.0 — This feature was introduced in version 2.0 and is not available in 1.x releases.
+
 The widget supports touch-based map panning and a custom observation marker feature. This allows free exploration of the map while the UAV continues to fly, and the ability to pin a marker at any position for reference.
 
 ## Panning
@@ -14,28 +16,13 @@ By default, the map is locked to follow the UAV position (follow-lock). When pan
 |---------------|-----------------------------------------------|
 | Touch & drag  | Pan the map in any direction                  |
 | Tap (no drag) | No action (touch released without movement)   |
-| Release       | Map enters 5-second grace period, then re-centers on UAV |
+| Release       | Map stays briefly, then re-centers on UAV     |
 
-### Pan State Machine
-
-The panning system uses four states:
-
-| State      | Description                                              |
-|------------|----------------------------------------------------------|
-| IDLE       | Map follows UAV (follow-lock active)                     |
-| PENDING    | Touch detected, waiting for drag movement or release     |
-| DRAGGING   | Finger down, map scrolling with touch movement           |
-| GRACE      | Finger released, map stays at offset for 5 seconds       |
-
-**Timing**:
-- Touch timeout: 200 ms (distinguishes tap from drag)
-- Grace period: 5 seconds after release before auto-recenter
+After releasing the touch, the map holds its position for about 5 seconds before automatically re-centering on the UAV.
 
 ### Performance During Panning
 
-To maintain smooth scrolling, the widget reduces rendering complexity while panning:
-- Heavy waypoint rendering passes (JUMP arrows, detailed markers, telemetry info) are skipped
-- Only essential elements are drawn (path lines, simple WP dots, UAV position, home location, obervation marker)
+To maintain smooth scrolling during active dragging, waypoint detail rendering is temporarily reduced. Only flight path lines and essential markers (UAV, home, observation marker) remain visible. Full detail returns as soon as dragging stops.
 
 ## Follow-Lock
 
@@ -43,17 +30,16 @@ The lock button (visible in fullscreen mode) toggles the follow-lock behavior:
 
 ### Locked (default)
 - Map follows UAV position in real time
-- Pan offset is zero
-- Panning via touch is available (temporarily breaks lock during drag + grace period)
+- Panning via touch is available (temporarily breaks lock during drag)
 
 ### Unlocked (detached mode)
 - Map freezes at the current viewport position
 - UAV marker still updates on the frozen map
-- No auto-recenter after grace period
+- No auto-recenter after dragging
 - Pin button becomes available for placing observation markers
 
 ### Re-Locking
-Pressing the lock button again snaps the map back to the UAV position and clears all pan state (offsets, anchors).
+Pressing the lock button again snaps the map back to the UAV position.
 
 ## Observation Marker
 
@@ -62,9 +48,11 @@ The observation marker is a persistent, user-placed pin on the map. It can be us
 ### Placement
 
 1. Unlock the map (press the lock button)
-2. Pan the map so the desired location is at the **viewport center**
-3. Press the **pin button**
-4. A green filled circle with a black outline appears at the marker position
+2. A crosshair appears at the viewport center to indicate detached mode
+3. Pan the map so the desired location aligns with the crosshair
+4. Press the **pin button**
+5. A green marker appears at the position
+6. A line is drawn from the UAV to the marker for reference
 
 ### Removal
 
@@ -72,17 +60,17 @@ Press the pin button again while an observation marker is active. It toggles off
 
 ### Persistence
 
-The observation marker coordinates are saved to widget storage immediately on placement or removal. The marker persists across widget restarts and power cycles until explicitly removed.
+The observation marker persists across widget restarts and power cycles until explicitly removed.
 
 ## UI Buttons
 
-The panning and marker controls are rendered as overlay buttons on the right side of the map in fullscreen mode:
+The panning and marker controls are rendered as overlay buttons in fullscreen mode:
 
-| Button | Icon   | Condition                    | Action                            |
-|--------|--------|------------------------------|-----------------------------------|
-| Lock   | 🔒/🔓 | Fullscreen + panning enabled  | Toggle follow-lock on/off        |
-| Pin    | 📌     | Unlocked + panning enabled    | Place/remove observation marker  |
-| Zoom + | ➕     | Always visible                | Increase map zoom level          |
-| Zoom - | ➖     | Always visible                | Decrease map zoom level          |
+| Button | Condition                    | Action                            |
+|--------|------------------------------|-----------------------------------|
+| Lock   | Fullscreen + panning enabled  | Toggle follow-lock on/off        |
+| Pin    | Unlocked + panning enabled    | Place/remove observation marker  |
+| Zoom + | Always visible                | Increase map zoom level          |
+| Zoom - | Always visible                | Decrease map zoom level          |
 
 > **Note**: The pin button is only available when the map is **unlocked** (detached mode). This ensures you are panning to the desired position before placing the marker.
