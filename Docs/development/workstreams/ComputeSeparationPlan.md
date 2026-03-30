@@ -1,7 +1,7 @@
 # ETHOS Mapping Widget – Compute Separation Plan
 
-**Branch:** `2.0-dev` (post-release)  
-**Goal:** Move all heavy computation out of `paint()` into `wakeup()` to eliminate "Maximum number of instructions reached" errors permanently. Remove the `pcall` wrapper added as a 2.0 stopgap.  
+**Branch:** `2.1-dev`  
+**Goal:** Move all heavy computation out of `paint()` into `wakeup()` to eliminate "Maximum number of instructions reached" errors permanently. Maximize overall widget performance through scheduled, incremental computation. Remove the `pcall` wrapper added as a 2.0 stopgap.  
 **Constraint:** No functionality loss. Rendering must stay visually identical. Tile management stays in `tileloader.lua`.
 
 ---
@@ -18,6 +18,43 @@ The root cause is that `paint()` performs **computation AND rendering** in the s
 - Telemetry snapshot caching
 
 `wakeup()` has **no hard instruction limit** (preempted since ETHOS 1.5.10) and runs before every `paint()`. All non-rendering work should move there.
+
+However, simply moving all computation into a single `wakeup()` call creates a new bottleneck: a heavy wakeup cycle delays the subsequent `paint()`, reducing frame rate. The solution is a **compute scheduler** that distributes work across multiple wakeup cycles.
+
+---
+
+## Design Priorities
+
+These principles guide every phase of the refactoring:
+
+### P1: Compute Scheduler — Staggered Workloads
+
+Do NOT run all dirty computations in a single `wakeup()` call. Instead, implement a **priority-based task scheduler** that processes one or two tasks per cycle:
+
+- **Task queue with priorities:** HIGH = tile grid + vehicle position (visible every frame), MEDIUM = waypoint layout + trail segments, LOW = sensor cache + scale bar + prefetch
+- **One-task-per-cycle default:** Each `wakeup()` picks the highest-priority dirty task, executes it, then yields. If wakeup still has budget (no preemption), it may process a second LOW task.
+- **Starvation prevention:** LOW tasks get promoted after N skipped cycles.
+- **Result:** Shorter wakeup cycles → faster paint → higher FPS. Computation spreads over 3-5 frames instead of spiking in one.
+
+### P2: Avoid Redundant Computation
+
+Never recompute what hasn't changed:
+
+- **Input change detection:** Track a lightweight state fingerprint (zoom level, center tile X/Y, pixel offset, WP revision counter, trail write index). Skip the entire compute cycle when the fingerprint matches.
+- **Dirty flags per subsystem:** `needsTileGrid`, `needsWpLayout`, `needsTrailClip`, `needsBarSnapshot`, `needsScale`. Only set when the relevant input actually changes.
+- **Incremental/delta updates for pan:** When the viewport shifts by a few pixels (pan or tracking), apply a pixel offset to existing screen coordinates instead of full Mercator reprojection. Full reprojection only on zoom change or tile boundary crossing.
+
+### P3: Minimize Allocation — Table Reuse
+
+GC pressure matters even in `wakeup()` because `collectgarbage()` can spike in any callback:
+
+- **Reuse result tables:** Overwrite `results.waypoints.markers[i].x = ...` instead of `results.waypoints.markers = {}`.
+- **Pre-allocate arrays** to expected size (e.g., max WP count, tile grid size) during `init()`.
+- **No closures in hot paths:** Use upvalue references or module-level functions.
+
+### P4: Bugfixes Deferred
+
+Small, non-system-breaking bugs are collected in the "Known Bugs" section and fixed **after** the compute separation is complete and stable. This avoids scope creep during the refactoring.
 
 ---
 
@@ -79,16 +116,35 @@ I/O and cache management: **25% computation**, 0% rendering, 75% state managemen
 
 Responsibilities:
 - Owns a `compute.update(widget)` entry point called from `wakeup()` in `main.lua`
+- Implements the **priority-based task scheduler** (see Design Priorities P1)
 - Maintains pre-computed result tables that `paint()` reads (read-only during paint)
-- Tracks dirty flags: `needsProjection`, `needsWpLayout`, `needsTrailClip`, `needsBarSnapshot`
+- Tracks dirty flags per subsystem with input fingerprinting (see P2)
+- Pre-allocates and reuses all result tables (see P3)
 
 Initial skeleton:
 ```lua
 local compute = {}
-local results = {}  -- shared read-only results for paint()
+local results = {}           -- shared read-only results for paint()
+local dirty = {}             -- per-subsystem dirty flags
+local fingerprint = {}       -- input state for change detection
+local skipCount = {}         -- starvation counters for LOW tasks
+
+-- Task registry: { name, priority, fn, dirtyKey }
+local tasks = {}
+
+local function registerTask(name, priority, fn, dirtyKey)
+    tasks[#tasks + 1] = { name = name, pri = priority, fn = fn, key = dirtyKey }
+end
+
+function compute.setDirty(key)
+    dirty[key] = true
+end
 
 function compute.update(widget)
-    -- Phase 2+: process dirty flags and update results
+    -- 1. Check fingerprint — skip entirely if nothing changed
+    -- 2. Pick highest-priority dirty task, execute it
+    -- 3. If budget remains, pick one LOW task
+    -- 4. Increment skip counters, promote starved tasks
 end
 
 function compute.getResults()
@@ -96,7 +152,7 @@ function compute.getResults()
 end
 
 function compute.init(param_status, param_libs)
-    -- store references
+    -- store references, pre-allocate result tables
 end
 
 return compute
@@ -127,6 +183,8 @@ Move waypoint path construction out of `drawWaypoints()`:
 `drawWaypoints()` becomes a pure draw loop over pre-computed geometry.
 
 **Dirty flag:** Set when WP data changes (MSP download), zoom changes, or viewport pans.
+
+**Incremental optimization:** On pan (no zoom change), apply pixel delta to cached screen coordinates instead of full reprojection. Full recompute only on zoom change, tile boundary crossing, or WP data change.
 
 ### Phase 3: Trail Pre-computation
 
@@ -195,15 +253,18 @@ After all phases are stable and tested:
 
 ---
 
-## Known Bugs to Address During Refactoring
+## Known Bugs (deferred — fix after compute separation is stable)
 
 - **WP clearing/reload loop:** WPs sometimes get cleared and reload endlessly without completing. Investigate interaction between MSP state machine and WP cache invalidation.
+- *(Add further non-breaking bugs here as discovered)*
 
 ---
 
 ## Success Criteria
 
 - `paint()` uses < 15,000 instructions per frame (measured via checkpoint profiling)
+- `wakeup()` compute cycle completes within 1-2 tasks per call (no frame-rate regression)
 - `pcall` wrapper removed
 - No visual regressions
 - No new garbage created in paint() hot path
+- No redundant recomputation when inputs are unchanged (verified via dirty-flag hit counters)
