@@ -1,6 +1,0 @@
-# Ignore all map tile files and provider subdirectory contents.
-# Tile folders are created at runtime by the widget when maps are downloaded.
-# Only .gitkeep files are tracked to preserve the folder structure.
-*
-!.gitignore
-!*/.gitkeep
