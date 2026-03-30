@@ -720,7 +720,7 @@ local function gpsDataAvailable(lat,lon)
   return lat ~= nil and lon ~= nil and lat ~= 0 and lon ~= 0
 end
 
-local function paint(widget)
+local function paintProtected(widget)
   -- Clears the widget area and routes drawing to the active layout using the latest shared state.
   local perfActive = mapStatus.perfActive
   local perfStartMs = nil
@@ -769,6 +769,13 @@ local function paint(widget)
     if paintElapsedMs >= 200 then
       perfInc("long_frame_count_200ms", 1)
     end
+  end
+end
+
+local function paint(widget)
+  local ok, err = pcall(paintProtected, widget)
+  if not ok and mapStatus.debugEnabled and mapLibs and mapLibs.utils then
+    mapLibs.utils.logDebug("PAINT", "pcall caught: " .. tostring(err), true)
   end
 end
 
